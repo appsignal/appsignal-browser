@@ -1,0 +1,52 @@
+{
+  "name": "@appsignal/browser",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/browser.umd.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/browser.umd.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc && node build.mjs",
+    "prepare": "bun run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rrweb/record": "^2.0.0-alpha.18",
+    "uuidv7": "^1.2.1",
+    "web-vitals": "^4.2.4"
+  },
+  "peerDependencies": {
+    "react": ">=16.8.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.0.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^24.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.2.4",
+    "typescript": "~5.9.3",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,291 @@
+import type { ServerConfig } from "./types.js";
+import { getSessionId } from "./session.js";
+import { sendReplayChunk } from "./transport.js";
+import { getConsent, onConsentDenied, onConsentGranted } from "./consent.js";
+import { onBeforeNavigation } from "./breadcrumbs.js";
+
+let config: ServerConfig["replay"];
+let appVersion: string | undefined;
+let recorder: { stop: () => void } | null = null;
+let isRecording = false;
+let isPaused = false;
+let sessionRandom = 0;
+let sampled = true;
+let errorReplayEnabled = false;
+let hadError = false;
+let eventBuffer: unknown[] = [];
+let eventSizes: number[] = [];
+let totalMemoryBytes = 0;
+let flushTimer: ReturnType<typeof setInterval> | null = null;
+let maxRecordingTimer: ReturnType<typeof setTimeout> | null = null;
+let recordFn: ((opts: Record<string, unknown>) => (() => void) | undefined) | null = null;
+let replayVisibilityHandler: (() => void) | null = null;
+let replayPagehideHandler: EventListener | null = null;
+let listenersRegistered = false;
+
+const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
+
+// Chunk index is persisted per session so it survives page reloads.
+// Without this, reloading within a session restarts the counter at 0 and
+// collides with chunks already stored server-side under the same session_id.
+const CHUNK_INDEX_KEY_PREFIX = "appsignal_replay_chunk_index_";
+
+/** Exported for tests only. Returns the next chunk_index to emit for the
+ * given session and advances the persisted counter by one. */
+export function nextChunkIndex(sessionId: string): number {
+  const key = CHUNK_INDEX_KEY_PREFIX + sessionId;
+  const current = Number(sessionStorage.getItem(key) || "0");
+  try { sessionStorage.setItem(key, String(current + 1)) } catch { /* ignore */ }
+  return current;
+}
+
+/** Clear the persisted chunk counter for a session. Called when the session
+ * ends so orphaned keys don't accumulate in sessionStorage on long-lived
+ * tabs that rotate through many sessions. */
+export function clearChunkIndex(sessionId: string): void {
+  sessionStorage.removeItem(CHUNK_INDEX_KEY_PREFIX + sessionId);
+}
+
+export function initReplay(
+  serverConfig: ServerConfig["replay"],
+  version?: string,
+): void {
+  config = serverConfig;
+  appVersion = version;
+
+  if (!config.enabled) return;
+
+  // Roll once per session — reused when the real config arrives.
+  // The fallback config has sample_rate 1.0 so this records everything
+  // on first init. applyReplaySampling() narrows the decision.
+  sessionRandom = Math.random();
+  sampled = sessionRandom < config.sample_rate;
+
+  if (sampled && getConsent() === "granted") {
+    startRecording();
+  }
+
+  // Register listeners only once — prevents accumulation on init→destroy→init cycles
+  if (!listenersRegistered) {
+    listenersRegistered = true;
+
+    // Flush replay on SPA navigation so each page gets its own chunk
+    onBeforeNavigation(() => {
+      if (isRecording) flushChunk();
+    });
+
+    // Pause/resume on offline/online
+    window.addEventListener("offline", pauseRecording);
+    window.addEventListener("online", resumeRecording);
+
+    // Flush on page hide — use beacon so the request survives unload.
+    // Plain fetch is cancelled mid-flight on unload, which drops the
+    // first chunk (the one with rrweb's initial FullSnapshot).
+    replayVisibilityHandler = () => {
+      if (document.visibilityState === "hidden" && isRecording) {
+        flushChunk(true);
+      }
+    };
+    document.addEventListener("visibilitychange", replayVisibilityHandler);
+
+    replayPagehideHandler = (e: Event) => {
+      if (!(e as PageTransitionEvent).persisted && isRecording) {
+        flushChunk(true);
+      }
+    };
+    window.addEventListener("pagehide", replayPagehideHandler);
+
+    // Stop recording when consent is denied, resume when granted
+    onConsentDenied(() => {
+      if (isRecording) stopReplay();
+    });
+    onConsentGranted(() => {
+      if (sampled && !isRecording && !isPaused) {
+        startRecording();
+      }
+    });
+  }
+}
+
+/** Apply the real sampling decision once server config is available. */
+export function applyReplaySampling(realConfig: ServerConfig["replay"]): void {
+  config = realConfig;
+
+  if (!realConfig.enabled) {
+    discardReplay();
+    return;
+  }
+
+  sampled = sessionRandom < realConfig.sample_rate;
+  errorReplayEnabled = realConfig.error_replay;
+
+  if (!sampled && !errorReplayEnabled) {
+    discardReplay();
+  }
+}
+
+export function onError(): void {
+  hadError = true;
+}
+
+async function startRecording(): Promise<void> {
+  if (isRecording) return;
+
+  try {
+    if (!recordFn) {
+      const mod = await import("@rrweb/record");
+      recordFn = mod.record as unknown as typeof recordFn;
+    }
+
+    const stopFn = recordFn!({
+      emit: (event: unknown, isCheckout?: boolean) => {
+        // Flush before a new full snapshot so each chunk starts clean
+        if (isCheckout && eventBuffer.length > 0) {
+          flushChunk();
+        }
+
+        let size: number;
+        try { size = JSON.stringify(event).length; }
+        catch { size = 1024; }
+        totalMemoryBytes += size;
+
+        while (eventBuffer.length > 0 && totalMemoryBytes > MAX_MEMORY_BYTES) {
+          eventBuffer.shift();
+          const removed = eventSizes.shift();
+          if (removed !== undefined) totalMemoryBytes -= removed;
+        }
+
+        eventBuffer.push(event);
+        eventSizes.push(size);
+      },
+      checkoutEveryNms: config.checkout_interval_ms || undefined,
+      maskAllInputs: config.mask_all_inputs,
+      maskTextSelector: config.mask_selectors.length
+        ? config.mask_selectors.join(", ")
+        : undefined,
+      blockSelector: config.block_selectors.length
+        ? config.block_selectors.join(", ")
+        : undefined,
+    });
+
+    if (stopFn) {
+      recorder = { stop: stopFn as () => void };
+    }
+    isRecording = true;
+    isPaused = false;
+
+    flushTimer = setInterval(flushChunk, 5000);
+
+    // Clear any existing timeout from a previous start (pause→resume)
+    if (maxRecordingTimer) clearTimeout(maxRecordingTimer);
+    maxRecordingTimer = setTimeout(() => stopReplay(), config.max_duration_ms);
+  } catch {
+    // rrweb not available — skip silently
+  }
+}
+
+function pauseRecording(): void {
+  if (!isRecording) return;
+
+  // Stop rrweb and flush what we have
+  clearTimers();
+  flushChunk();
+  if (recorder) {
+    recorder.stop();
+    recorder = null;
+  }
+  isRecording = false;
+  isPaused = true;
+}
+
+function resumeRecording(): void {
+  if (!isPaused) return;
+  isPaused = false;
+
+  // Restart recording — rrweb takes a fresh full snapshot
+  startRecording();
+}
+
+function flushChunk(useBeacon = false): void {
+  if (eventBuffer.length === 0) return;
+
+  // Only send if sampled, or if error_replay triggered by an error
+  if (!sampled && !(errorReplayEnabled && hadError)) return;
+
+  const events = eventBuffer;
+  eventBuffer = [];
+  eventSizes = [];
+  totalMemoryBytes = 0;
+
+  const sessionId = getSessionId();
+  sendReplayChunk(
+    {
+      type: "replay",
+      session_id: sessionId,
+      chunk_index: nextChunkIndex(sessionId),
+      events,
+      app_version: appVersion,
+    },
+    useBeacon,
+  );
+}
+
+function clearTimers(): void {
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+  if (maxRecordingTimer) {
+    clearTimeout(maxRecordingTimer);
+    maxRecordingTimer = null;
+  }
+}
+
+export function stopReplay(): void {
+  clearTimers();
+  flushChunk();
+  if (recorder) {
+    recorder.stop();
+    recorder = null;
+  }
+  isRecording = false;
+  isPaused = false;
+}
+
+/** Flush any buffered replay events under the current session_id without
+ * stopping the recorder. Used by endSession() so chunks are attributed to
+ * the session that recorded them, not to the session that replaces it.
+ * Pass `useBeacon=true` when a navigation is imminent (e.g. logout). */
+export function flushReplay(useBeacon = false): void {
+  if (isRecording) flushChunk(useBeacon);
+}
+
+export function destroyReplay(): void {
+  stopReplay();
+  window.removeEventListener("offline", pauseRecording);
+  window.removeEventListener("online", resumeRecording);
+  if (replayVisibilityHandler) {
+    document.removeEventListener("visibilitychange", replayVisibilityHandler);
+    replayVisibilityHandler = null;
+  }
+  if (replayPagehideHandler) {
+    window.removeEventListener("pagehide", replayPagehideHandler);
+    replayPagehideHandler = null;
+  }
+  hadError = false;
+  listenersRegistered = false;
+}
+
+/** Stop recording and discard buffered data without flushing. */
+export function discardReplay(): void {
+  clearTimers();
+  eventBuffer = [];
+  eventSizes = [];
+  totalMemoryBytes = 0;
+  if (recorder) {
+    recorder.stop();
+    recorder = null;
+  }
+  isRecording = false;
+  isPaused = false;
+}
