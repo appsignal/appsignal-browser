@@ -26,10 +26,11 @@ let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
 
-const CHUNK_INDEX_KEY_PREFIX = "appsignal_replay_chunk_index_";
+const chunkIndexKey = (sessionId: string, tabId: string) =>
+  `appsignal_replay_chunk_index_${sessionId}_${tabId}`;
 
 function nextChunkIndex(sessionId: string, tabId: string): number {
-  const key = CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId;
+  const key = chunkIndexKey(sessionId, tabId);
   const current = Number(storage.getString(sessionStorage, key) || "0");
   storage.setString(sessionStorage, key, String(current + 1));
   return current;
@@ -37,7 +38,7 @@ function nextChunkIndex(sessionId: string, tabId: string): number {
 
 /** Clear chunk counter on session end so keys don't pile up in long-lived tabs. */
 export function clearChunkIndex(sessionId: string, tabId: string): void {
-  storage.remove(sessionStorage, CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId);
+  storage.remove(sessionStorage, chunkIndexKey(sessionId, tabId));
 }
 
 export function initReplay(
