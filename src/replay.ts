@@ -1,8 +1,9 @@
 import type { ServerConfig } from "./types.js";
-import { getSessionId } from "./session.js";
+import { getSessionId, getTabId } from "./session.js";
 import { sendReplayChunk } from "./transport.js";
 import { getConsent, onConsentDenied, onConsentGranted } from "./consent.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
+import { storage } from "./utils.js";
 
 let config: ServerConfig["replay"];
 let appVersion: string | undefined;
@@ -25,25 +26,27 @@ let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
 
-// Chunk index is persisted per session so it survives page reloads.
-// Without this, reloading within a session restarts the counter at 0 and
-// collides with chunks already stored server-side under the same session_id.
+// Chunk index is persisted per (session, tab) so it survives page reloads in
+// the same tab without colliding with chunks emitted by other tabs of the
+// same session. The key is in sessionStorage (per-tab); including tab_id
+// makes the namespacing explicit and matches the server-side key tuple
+// (session_id, tab_id, chunk_index).
 const CHUNK_INDEX_KEY_PREFIX = "appsignal_replay_chunk_index_";
 
 /** Exported for tests only. Returns the next chunk_index to emit for the
- * given session and advances the persisted counter by one. */
-export function nextChunkIndex(sessionId: string): number {
-  const key = CHUNK_INDEX_KEY_PREFIX + sessionId;
-  const current = Number(sessionStorage.getItem(key) || "0");
-  try { sessionStorage.setItem(key, String(current + 1)) } catch { /* ignore */ }
+ * given (session, tab) pair and advances the persisted counter by one. */
+export function nextChunkIndex(sessionId: string, tabId: string): number {
+  const key = CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId;
+  const current = Number(storage.getString(sessionStorage, key) || "0");
+  storage.setString(sessionStorage, key, String(current + 1));
   return current;
 }
 
-/** Clear the persisted chunk counter for a session. Called when the session
- * ends so orphaned keys don't accumulate in sessionStorage on long-lived
- * tabs that rotate through many sessions. */
-export function clearChunkIndex(sessionId: string): void {
-  sessionStorage.removeItem(CHUNK_INDEX_KEY_PREFIX + sessionId);
+/** Clear the persisted chunk counter for a session in this tab. Called when
+ * the session ends so orphaned keys don't accumulate in sessionStorage on
+ * long-lived tabs that rotate through many sessions. */
+export function clearChunkIndex(sessionId: string, tabId: string): void {
+  storage.remove(sessionStorage, CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId);
 }
 
 export function initReplay(
@@ -218,11 +221,13 @@ function flushChunk(useBeacon = false): void {
   totalMemoryBytes = 0;
 
   const sessionId = getSessionId();
+  const tabId = getTabId();
   sendReplayChunk(
     {
       type: "replay",
       session_id: sessionId,
-      chunk_index: nextChunkIndex(sessionId),
+      tab_id: tabId,
+      chunk_index: nextChunkIndex(sessionId, tabId),
       events,
       app_version: appVersion,
     },

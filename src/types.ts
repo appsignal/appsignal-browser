@@ -69,6 +69,10 @@ export interface Breadcrumb {
 
 export interface SessionContext {
   session_id: string;
+  /** Per-tab identifier. Stable for the lifetime of one tab (survives reloads,
+   * unique to the tab). Lets the server reconstruct cross-tab journeys: one
+   * session_id grouping many tab_ids that ran concurrently. */
+  tab_id: string;
   anonymous_id: string;
   page_url: string;
   referrer: string;
@@ -124,6 +128,10 @@ export interface EventPayload {
 export interface ReplayChunk {
   type: "replay";
   session_id: string;
+  /** Per-tab id. Together with session_id and chunk_index, uniquely keys a
+   * chunk on the server. Without this, two tabs of the same session both
+   * produce chunk_index=0,1,2,… and collide. */
+  tab_id: string;
   chunk_index: number;
   events: unknown[];
   app_version?: string;

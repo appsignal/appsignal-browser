@@ -459,4 +459,34 @@ describe("breadcrumbs", () => {
       expect(vis[0].data?.state).toBeDefined();
     });
   });
+
+  describe("tab lifecycle breadcrumbs", () => {
+    it("emits tab_open on init", () => {
+      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+
+      const open = getSnapshot().filter(
+        (b) => b.category === "tab" && b.data?.event === "open",
+      );
+      expect(open.length).toBeGreaterThanOrEqual(1);
+      expect(open[0].message).toBe("Tab opened");
+    });
+
+    it("emits tab_close on pagehide (non-persisted)", () => {
+      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+      clearBreadcrumbs();
+
+      // PageTransitionEvent constructor isn't in jsdom; dispatch a generic
+      // Event and rely on the persisted check defaulting to false/undefined.
+      // Note: the test suite shares module state and previous initBreadcrumbs
+      // calls leak pagehide listeners — assert >= 1 and check shape, like
+      // the other breadcrumb tests in this file.
+      window.dispatchEvent(new Event("pagehide"));
+
+      const close = getSnapshot().filter(
+        (b) => b.category === "tab" && b.data?.event === "close",
+      );
+      expect(close.length).toBeGreaterThanOrEqual(1);
+      expect(close[0].message).toBe("Tab closed");
+    });
+  });
 });

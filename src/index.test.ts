@@ -215,6 +215,32 @@ describe("SDK integration", () => {
     expect(afterPayloads[0].session.user_id).toBeUndefined();
   });
 
+  it("attaches tab_id to event and error payloads", () => {
+    init({ key: "test-key" });
+
+    addBreadcrumb({ category: "test", message: "tab id check" });
+    captureError(new Error("tab id error"));
+    flush();
+
+    const eventPayloads = sentPayloads
+      .map(p => { try { return JSON.parse(p.body) } catch { return null } })
+      .filter(b => b?.type === "events");
+    const errorPayloads = sentPayloads
+      .map(p => { try { return JSON.parse(p.body) } catch { return null } })
+      .filter(b => b?.type === "error");
+
+    expect(eventPayloads.length).toBeGreaterThan(0);
+    expect(errorPayloads.length).toBeGreaterThan(0);
+
+    // Both kinds of payload carry tab_id, and within one tab they share it.
+    const eventTab = eventPayloads[0].session.tab_id;
+    const errorTab = errorPayloads[0].session.tab_id;
+    expect(eventTab).toBeTruthy();
+    expect(eventTab).toBe(errorTab);
+    // tab_id is distinct from session_id.
+    expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
+  });
+
   it("setUser attaches user context to payloads", () => {
     init({ key: "test-key" });
 

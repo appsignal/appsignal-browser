@@ -92,6 +92,7 @@ export function initBreadcrumbs(
   if (config.form_abandonment) initFormAbandonment();
   if (config.user_timing) initUserTiming();
   initVisibility();
+  initTabLifecycle();
 }
 
 export function addBreadcrumb(crumb: Breadcrumb): void {
@@ -1085,6 +1086,38 @@ function initVisibility(): void {
   };
   document.addEventListener("visibilitychange", handler);
   cleanups.push(() => document.removeEventListener("visibilitychange", handler));
+}
+
+// --- Tab lifecycle tracking ---
+//
+// Open/close bookends for the per-tab journey. Combined with the existing
+// `visibility` breadcrumbs (which mark focus/blur within a tab's lifetime),
+// these let the server reconstruct cross-tab activity: when a tab opened,
+// when each tab held focus, and when it closed. tab_id on the enclosing
+// payload identifies which tab the breadcrumb belongs to.
+
+function initTabLifecycle(): void {
+  addBreadcrumb({
+    timestamp: Date.now(),
+    category: "tab",
+    message: "Tab opened",
+    data: { event: "open" },
+  });
+
+  // pagehide is the most reliable tab-close signal — fires for tab close,
+  // navigation away, and bfcache. We don't distinguish bfcache from real
+  // close: if the page resumes from bfcache, fresh breadcrumbs on the same
+  // tab_id will speak for themselves. beforeunload isn't reliable on mobile.
+  const handler = () => {
+    addBreadcrumb({
+      timestamp: Date.now(),
+      category: "tab",
+      message: "Tab closed",
+      data: { event: "close" },
+    });
+  };
+  window.addEventListener("pagehide", handler);
+  cleanups.push(() => window.removeEventListener("pagehide", handler));
 }
 
 // --- Destroy ---
