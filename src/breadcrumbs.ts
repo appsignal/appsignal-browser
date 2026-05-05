@@ -6,8 +6,6 @@ import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, filterQueryParams } from "./utils.js";
 import { getConsent } from "./consent.js";
 
-// Initialized with default capacity so addBreadcrumb works before initBreadcrumbs
-// (collect-before-config model). Replaced with server config capacity on init.
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
 let collectEndpoint = "";

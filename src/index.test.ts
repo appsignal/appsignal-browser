@@ -215,6 +215,27 @@ describe("SDK integration", () => {
     expect(afterPayloads[0].session.user_id).toBeUndefined();
   });
 
+  it("breadcrumbs collected before server config arrives are still flushed after", async () => {
+    // Collect-before-config contract from the README: data captured during
+    // the fallback-config window must survive the real config arriving.
+    init({ key: "test-key" });
+    addBreadcrumb({ category: "early", message: "before config" });
+
+    // Let the config-fetch promise resolve and applyServerConfig run.
+    await new Promise(r => setTimeout(r, 50));
+
+    flush();
+
+    const eventPayloads = sentPayloads
+      .map(p => { try { return JSON.parse(p.body) } catch { return null } })
+      .filter(b => b?.type === "events");
+
+    const early = eventPayloads
+      .flatMap(p => p.breadcrumbs)
+      .find((b: { category: string }) => b.category === "early");
+    expect(early).toBeDefined();
+  });
+
   it("attaches tab_id to event and error payloads", () => {
     init({ key: "test-key" });
 
