@@ -215,21 +215,56 @@ describe("SDK integration", () => {
     expect(afterPayloads[0].session.user_id).toBeUndefined();
   });
 
-  it("breadcrumbs collected before server config arrives are still flushed after", async () => {
+  it("breadcrumbs and errors collected before server config arrives are still sent after", async () => {
     // Collect-before-config contract from the README: data captured during
     // the fallback-config window must survive the real config arriving.
+    // Breadcrumbs are buffered until flush; errors are sent immediately.
     init({ key: "test-key" });
     addBreadcrumb({ category: "early", message: "before config" });
+    captureError(new Error("pre-config error"));
 
     // Let the config-fetch promise resolve and applyServerConfig run.
     await new Promise(r => setTimeout(r, 50));
 
     flush();
 
-    const eventPayloads = sentPayloads
-      .map(p => { try { return JSON.parse(p.body) } catch { return null } })
-      .filter(b => b?.type === "events");
+    const parsed = sentPayloads.map(p => {
+      try { return JSON.parse(p.body); } catch { return null; }
+    });
 
+    // The error was sent immediately, before the config arrived.
+    const errorPayload = parsed.find(b => b?.type === "error" && b?.message === "pre-config error");
+    expect(errorPayload).toBeDefined();
+
+    // The breadcrumb sat in the buffer through applyServerConfig and only
+    // shipped on the post-config flush — proves updateBreadcrumbConfig does
+    // not drop the buffer on a normal (enabled) config arrival.
+    const eventPayloads = parsed.filter(b => b?.type === "events");
+    const early = eventPayloads
+      .flatMap(p => p.breadcrumbs)
+      .find((b: { category: string }) => b.category === "early");
+    expect(early).toBeDefined();
+  });
+
+  it("non-default replay sample_rate does not affect breadcrumb survival", async () => {
+    // Sanity: breadcrumbs are independent of replay sampling. A reduced
+    // replay sample_rate (0.1) on the arriving server config must not
+    // accidentally clear the breadcrumb buffer.
+    serverConfigResponse = {
+      ...DEFAULT_SERVER_CONFIG,
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1 },
+    };
+
+    init({ key: "test-key" });
+    addBreadcrumb({ category: "early", message: "before low-sample config" });
+
+    await new Promise(r => setTimeout(r, 50));
+
+    flush();
+
+    const eventPayloads = sentPayloads
+      .map(p => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter(b => b?.type === "events");
     const early = eventPayloads
       .flatMap(p => p.breadcrumbs)
       .find((b: { category: string }) => b.category === "early");
