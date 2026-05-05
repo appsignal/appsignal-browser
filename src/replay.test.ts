@@ -97,6 +97,7 @@ describe("replay", () => {
     const chunk = sendChunkMock.mock.calls[0][0];
     expect(chunk.type).toBe("replay");
     expect(chunk.session_id).toBe("test-session-id");
+    expect(chunk.tab_id).toBe("test-tab-id");
     expect(chunk.events).toHaveLength(2);
     expect(chunk.chunk_index).toBe(0);
   });
