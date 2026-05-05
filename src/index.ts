@@ -1,6 +1,6 @@
 import type { BrowserConfig, ServerConfig, EventPayload } from "./types.js";
 import { DEFAULT_SERVER_CONFIG } from "./types.js";
-import { initSession, getSessionId, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initSession, getSessionId, getTabId, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, updateBreadcrumbConfig, addManualBreadcrumb, drainBreadcrumbs, clearBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, updateErrorConfig, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
@@ -74,10 +74,11 @@ export function endSession(): void {
   // touchActivity keeps getSessionId() inside flushEvents/flushReplay
   // from rotating again mid-flush.
   const sessionIdToClear = getSessionId();
+  const tabIdToClear = getTabId();
   touchActivity();
   flushEvents(true);
   flushReplay(true);
-  clearChunkIndex(sessionIdToClear);
+  clearChunkIndex(sessionIdToClear, tabIdToClear);
   sessionEndSession();
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { initErrors, getLastErrorTimestamp } from "./errors.js";
+import { initErrors, destroyErrors, getLastErrorTimestamp } from "./errors.js";
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
 import * as session from "./session.js";
@@ -50,29 +50,22 @@ function fireError(message: string, stack?: string): void {
   window.dispatchEvent(event);
 }
 
-// Track calls since last reset — initErrors adds listeners cumulatively
-function callsSince(mock: ReturnType<typeof vi.fn>, since: number) {
-  return mock.mock.calls.length - since;
-}
-
 describe("errors", () => {
-  let sendBefore: number;
-  let replayBefore: number;
-  let breadcrumbBefore: number;
-
   beforeEach(() => {
-    sendBefore = sendErrorMock.mock.calls.length;
-    replayBefore = replayOnError.mock.calls.length;
-    breadcrumbBefore = addBreadcrumbMock.mock.calls.length;
+    // initErrors is idempotent — but explicitly tear down + clear mocks so
+    // each test starts from zero and assertions can use direct counts.
+    destroyErrors();
+    sendErrorMock.mockClear();
+    replayOnError.mockClear();
+    addBreadcrumbMock.mockClear();
   });
 
   it("sends error events via transport", () => {
     initErrors({ enabled: true, sample_rate: 1.0 }, "v1.0");
     fireError("Test error");
 
-    expect(callsSince(sendErrorMock, sendBefore)).toBeGreaterThanOrEqual(1);
-    const lastCall = sendErrorMock.mock.calls[sendErrorMock.mock.calls.length - 1];
-    const payload = lastCall[0] as BrowserError;
+    expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    const payload = sendErrorMock.mock.calls[0][0] as BrowserError;
     expect(payload.message).toBe("Test error");
     expect(payload.app_version).toBe("v1.0");
   });
@@ -89,9 +82,8 @@ describe("errors", () => {
     });
     window.dispatchEvent(event);
 
-    expect(callsSince(sendErrorMock, sendBefore)).toBeGreaterThanOrEqual(1);
-    const lastCall = sendErrorMock.mock.calls[sendErrorMock.mock.calls.length - 1];
-    const payload = lastCall[0] as BrowserError;
+    expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    const payload = sendErrorMock.mock.calls[0][0] as BrowserError;
     expect(payload.error_class).toBe("TypeError");
   });
 
@@ -99,7 +91,18 @@ describe("errors", () => {
     initErrors({ enabled: false, sample_rate: 1.0 });
     fireError("Test error");
 
-    expect(callsSince(sendErrorMock, sendBefore)).toBe(0);
+    expect(sendErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("repeated init does not stack listeners", () => {
+    // Regression: a second initErrors used to leave the previous listener
+    // attached, so a single dispatched error fired the pipeline twice.
+    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sample_rate: 1.0 });
+    fireError("only once");
+
+    expect(sendErrorMock).toHaveBeenCalledTimes(1);
   });
 
   describe("ignoreErrors", () => {
@@ -109,7 +112,7 @@ describe("errors", () => {
       ]);
       fireError("ResizeObserver loop limit exceeded");
 
-      expect(callsSince(sendErrorMock, sendBefore)).toBe(0);
+      expect(sendErrorMock).not.toHaveBeenCalled();
     });
 
     it("filters by regex match", () => {
@@ -118,7 +121,7 @@ describe("errors", () => {
       ]);
       fireError("Script error.");
 
-      expect(callsSince(sendErrorMock, sendBefore)).toBe(0);
+      expect(sendErrorMock).not.toHaveBeenCalled();
     });
 
     it("sends non-matching errors", () => {
@@ -127,7 +130,7 @@ describe("errors", () => {
       ]);
       fireError("TypeError: Cannot read property 'foo'");
 
-      expect(callsSince(sendErrorMock, sendBefore)).toBeGreaterThanOrEqual(1);
+      expect(sendErrorMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -140,36 +143,30 @@ describe("errors", () => {
       initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
       fireError("sensitive data");
 
-      const lastCall = sendErrorMock.mock.calls[sendErrorMock.mock.calls.length - 1];
-      const payload = lastCall[0] as BrowserError;
+      const payload = sendErrorMock.mock.calls[0][0] as BrowserError;
       expect(payload.message).toBe("redacted");
     });
 
     it("can drop the event by returning null", () => {
       const hook = vi.fn(() => null);
       initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
-      const before = sendErrorMock.mock.calls.length;
       fireError("drop me");
 
       expect(hook).toHaveBeenCalled();
-      expect(callsSince(sendErrorMock, before)).toBe(0);
+      expect(sendErrorMock).not.toHaveBeenCalled();
     });
   });
 
   describe("deduplication", () => {
     it("suppresses repeated identical errors after 5 occurrences", () => {
       initErrors({ enabled: true, sample_rate: 1.0 });
-      const before = sendErrorMock.mock.calls.length;
 
-      // Use a unique stack to avoid interference from other tests
-      const uniqueStack = `Error\n    at dedup_test_${Date.now()} (test.js:1:1)`;
       for (let i = 0; i < 10; i++) {
-        fireError("dedup test error", uniqueStack);
+        fireError("dedup test error");
       }
 
       // First 5 should be sent, 6-10 suppressed
-      const sent = callsSince(sendErrorMock, before);
-      expect(sent).toBe(5);
+      expect(sendErrorMock).toHaveBeenCalledTimes(5);
     });
   });
 
@@ -178,7 +175,7 @@ describe("errors", () => {
       initErrors({ enabled: true, sample_rate: 0 });
       fireError("should be dropped");
 
-      expect(callsSince(sendErrorMock, sendBefore)).toBe(0);
+      expect(sendErrorMock).not.toHaveBeenCalled();
     });
   });
 
@@ -197,18 +194,17 @@ describe("errors", () => {
     initErrors({ enabled: true, sample_rate: 1.0 });
     fireError("replay notify test");
 
-    expect(callsSince(replayOnError, replayBefore)).toBeGreaterThanOrEqual(1);
+    expect(replayOnError).toHaveBeenCalledTimes(1);
   });
 
   it("adds error breadcrumb", () => {
     initErrors({ enabled: true, sample_rate: 1.0 });
     fireError("breadcrumb test error");
 
-    const recentCalls = addBreadcrumbMock.mock.calls.slice(breadcrumbBefore);
-    const errorBreadcrumb = recentCalls.find(
-      (call: unknown[]) => call[0]?.category === "error",
+    const errorBreadcrumb = addBreadcrumbMock.mock.calls.find(
+      (call: unknown[]) => (call[0] as { category: string }).category === "error",
     );
     expect(errorBreadcrumb).toBeTruthy();
-    expect(errorBreadcrumb[0].message).toContain("breadcrumb test error");
+    expect(errorBreadcrumb![0].message).toContain("breadcrumb test error");
   });
 });

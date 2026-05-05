@@ -6,8 +6,6 @@ import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, filterQueryParams } from "./utils.js";
 import { getConsent } from "./consent.js";
 
-// Initialized with default capacity so addBreadcrumb works before initBreadcrumbs
-// (collect-before-config model). Replaced with server config capacity on init.
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
 let collectEndpoint = "";
@@ -66,14 +64,11 @@ export function initBreadcrumbs(
   serverConfig: ServerConfig["breadcrumbs"],
   endpoint: string,
 ): void {
+  destroyBreadcrumbs();
+
   config = serverConfig;
   collectEndpoint = endpoint;
   buffer = new RingBuffer<Breadcrumb>(config.capacity);
-
-  // Reset navigation hook state so repeat calls (tests, HMR) don't accumulate listeners
-  preNavListeners = [];
-  postNavListeners = [];
-  navigationHookInstalled = false;
 
   if (config.clicks) initClicks();
   initNavigation();
@@ -92,6 +87,7 @@ export function initBreadcrumbs(
   if (config.form_abandonment) initFormAbandonment();
   if (config.user_timing) initUserTiming();
   initVisibility();
+  initTabLifecycle();
 }
 
 export function addBreadcrumb(crumb: Breadcrumb): void {
@@ -1085,6 +1081,30 @@ function initVisibility(): void {
   };
   document.addEventListener("visibilitychange", handler);
   cleanups.push(() => document.removeEventListener("visibilitychange", handler));
+}
+
+// --- Tab lifecycle tracking ---
+
+function initTabLifecycle(): void {
+  addBreadcrumb({
+    timestamp: Date.now(),
+    category: "tab",
+    message: "Tab opened",
+    data: { event: "open" },
+  });
+
+  // pagehide is the cross-browser tab-close signal; beforeunload is unreliable on mobile.
+  // We don't branch on e.persisted — bfcache resumes will emit fresh breadcrumbs on the same tab_id.
+  const handler = () => {
+    addBreadcrumb({
+      timestamp: Date.now(),
+      category: "tab",
+      message: "Tab closed",
+      data: { event: "close" },
+    });
+  };
+  window.addEventListener("pagehide", handler);
+  cleanups.push(() => window.removeEventListener("pagehide", handler));
 }
 
 // --- Destroy ---

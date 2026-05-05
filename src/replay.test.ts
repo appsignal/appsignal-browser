@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initReplay, applyReplaySampling, onError, stopReplay, discardReplay, nextChunkIndex } from "./replay.js";
+import { initReplay, applyReplaySampling, onError, stopReplay, discardReplay } from "./replay.js";
 import * as transport from "./transport.js";
 import * as consent from "./consent.js";
 import type { ServerConfig } from "./types.js";
@@ -21,9 +21,13 @@ vi.mock("./consent.js", () => ({
   onConsentGranted: (cb: () => void) => consentGrantedCallbacks.push(cb),
 }));
 
-// Mock session
+// Mock session — reads at call time so tests can change identity mid-flight
+let mockSessionId = "test-session-id";
+let mockTabId = "test-tab-id";
+
 vi.mock("./session.js", () => ({
-  getSessionId: () => "test-session-id",
+  getSessionId: () => mockSessionId,
+  getTabId: () => mockTabId,
 }));
 
 // Mock breadcrumbs navigation hook
@@ -61,6 +65,9 @@ describe("replay", () => {
     consentState = "granted";
     consentDeniedCallbacks.length = 0;
     consentGrantedCallbacks.length = 0;
+    mockSessionId = "test-session-id";
+    mockTabId = "test-tab-id";
+    sessionStorage.clear();
   });
 
   afterEach(() => {
@@ -96,6 +103,7 @@ describe("replay", () => {
     const chunk = sendChunkMock.mock.calls[0][0];
     expect(chunk.type).toBe("replay");
     expect(chunk.session_id).toBe("test-session-id");
+    expect(chunk.tab_id).toBe("test-tab-id");
     expect(chunk.events).toHaveLength(2);
     expect(chunk.chunk_index).toBe(0);
   });
@@ -179,6 +187,32 @@ describe("replay", () => {
     expect(idx1).toBe(idx0 + 1);
   });
 
+  it("keeps chunk_index per tab — switching tabs starts a fresh counter", async () => {
+    // Headline contract of (session_id, tab_id, chunk_index): two tabs of one
+    // session must not collide. Each tab's counter is independent and starts
+    // at 0; the server disambiguates by the full triple.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    rrwebEmit!({ type: 1, data: "a" });
+    vi.advanceTimersByTime(5000);
+    rrwebEmit!({ type: 1, data: "b" });
+    vi.advanceTimersByTime(5000);
+
+    // Switch to a sibling tab in the same session.
+    mockTabId = "other-tab-id";
+    rrwebEmit!({ type: 1, data: "c" });
+    vi.advanceTimersByTime(5000);
+
+    expect(sendChunkMock).toHaveBeenCalledTimes(3);
+    expect(sendChunkMock.mock.calls[0][0].tab_id).toBe("test-tab-id");
+    expect(sendChunkMock.mock.calls[0][0].chunk_index).toBe(0);
+    expect(sendChunkMock.mock.calls[1][0].tab_id).toBe("test-tab-id");
+    expect(sendChunkMock.mock.calls[1][0].chunk_index).toBe(1);
+    expect(sendChunkMock.mock.calls[2][0].tab_id).toBe("other-tab-id");
+    expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
+  });
+
   it("does not flush empty buffer", async () => {
     initReplay(defaultReplayConfig());
     await vi.advanceTimersByTimeAsync(10);
@@ -186,40 +220,5 @@ describe("replay", () => {
     // No events emitted
     vi.advanceTimersByTime(5000);
     expect(sendChunkMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("nextChunkIndex", () => {
-  beforeEach(() => {
-    sessionStorage.clear();
-  });
-
-  it("starts at 0 for a fresh session", () => {
-    expect(nextChunkIndex("sess-a")).toBe(0);
-  });
-
-  it("increments monotonically on repeated calls for the same session", () => {
-    expect(nextChunkIndex("sess-a")).toBe(0);
-    expect(nextChunkIndex("sess-a")).toBe(1);
-    expect(nextChunkIndex("sess-a")).toBe(2);
-  });
-
-  it("persists the counter in sessionStorage keyed by session_id", () => {
-    // The headline fix: reloading a page within a session must resume the
-    // counter instead of restarting at 0 and colliding with chunks already
-    // stored server-side under the same session_id.
-    nextChunkIndex("sess-a");
-    nextChunkIndex("sess-a");
-    nextChunkIndex("sess-a");
-
-    expect(sessionStorage.getItem("appsignal_replay_chunk_index_sess-a")).toBe("3");
-    expect(nextChunkIndex("sess-a")).toBe(3);
-  });
-
-  it("keeps counters for different session_ids independent", () => {
-    nextChunkIndex("sess-a");
-    nextChunkIndex("sess-a");
-    expect(nextChunkIndex("sess-b")).toBe(0);
-    expect(nextChunkIndex("sess-a")).toBe(2);
   });
 });

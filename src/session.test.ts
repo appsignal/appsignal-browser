@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { initSession, getSessionId, getAnonymousId, setUser, clearUser, getSessionContext, touchActivity, endSession } from "./session.js";
+import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, getSessionContext, touchActivity, endSession } from "./session.js";
 
 describe("session", () => {
   beforeEach(() => {
@@ -113,6 +113,113 @@ describe("session", () => {
     expect(newId).not.toBe(firstId);
     const ctx = getSessionContext();
     expect(ctx.user_id).toBeUndefined();
+  });
+
+  describe("tab_id", () => {
+    it("mints a tab_id on init and exposes it via getTabId", () => {
+      initSession(1800000);
+      const tabId = getTabId();
+      expect(tabId).toMatch(/^[0-9a-f]{8}-/);
+      // Persisted in sessionStorage so it survives in-tab reloads but not
+      // tab close. Confirms the per-tab scoping rather than per-session.
+      expect(sessionStorage.getItem("appsignal_tab_id")).toBe(tabId);
+    });
+
+    it("returns the same tab_id across re-init (simulated reload in same tab)", () => {
+      initSession(1800000);
+      const first = getTabId();
+      // Second init in the same tab — sessionStorage persists across reloads.
+      initSession(1800000);
+      expect(getTabId()).toBe(first);
+    });
+
+    it("includes tab_id in session context", () => {
+      initSession(1800000);
+      const ctx = getSessionContext();
+      expect(ctx.tab_id).toBeTruthy();
+      expect(ctx.tab_id).toBe(getTabId());
+    });
+
+    it("mints a different tab_id when sessionStorage is cleared (simulated new tab)", () => {
+      // sessionStorage is per-tab; clearing it imitates opening a fresh
+      // tab on the same origin, which gets its own tab_id while sharing
+      // session_id via localStorage.
+      initSession(1800000);
+      const firstTab = getTabId();
+      const sessionId = getSessionId();
+
+      sessionStorage.clear();
+      initSession(1800000);
+
+      expect(getTabId()).not.toBe(firstTab);
+      // Same session_id (via localStorage) — different tab_id.
+      expect(getSessionId()).toBe(sessionId);
+    });
+  });
+
+  describe("cross-tab sync via storage events", () => {
+    it("adopts a session_id rotated by another tab", () => {
+      initSession(1800000);
+      const original = getSessionId();
+
+      // Another tab rotated the session in localStorage and the storage
+      // event fires in this tab. The handler must update our in-memory
+      // currentSessionId so the next emit uses the new id.
+      const next = "11111111-1111-1111-1111-111111111111";
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "appsignal_session_id",
+        newValue: next,
+        oldValue: original,
+        storageArea: localStorage,
+      }));
+
+      expect(getSessionId()).toBe(next);
+    });
+
+    it("adopts last_activity bumped by another tab so visible-but-idle tab does not rotate", () => {
+      // Regression for visible-tab drift: tab A is visible but idle,
+      // tab B is active. Without sync, tab A's in-memory lastActivityMs
+      // ages out and A rotates while B keeps using the original session.
+      const timeout = 1800000;
+      initSession(timeout);
+      const original = getSessionId();
+
+      // Simulate 25 minutes passing — close to but under the timeout.
+      vi.advanceTimersByTime(25 * 60 * 1000);
+
+      // Another tab's touchActivity wrote a fresh timestamp to localStorage
+      // and the browser fires a storage event in this tab. Real cross-tab
+      // behaviour requires both: localStorage carries the truth, the event
+      // wakes other tabs up to it.
+      const fresh = Date.now();
+      localStorage.setItem("appsignal_last_activity", String(fresh));
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "appsignal_last_activity",
+        newValue: String(fresh),
+        storageArea: localStorage,
+      }));
+
+      // Another 20 minutes pass (45 since init). Without the sync, the
+      // 30-min timer would have fired by now and rotated. With sync, the
+      // cross-tab activity at t=25 keeps us under the 30-min threshold.
+      vi.advanceTimersByTime(20 * 60 * 1000);
+
+      expect(getSessionId()).toBe(original);
+    });
+
+    it("clears user when another tab clears it", () => {
+      initSession(1800000);
+      setUser({ id: "u1", email: "test@test.com" });
+      expect(getSessionContext().user_id).toBe("u1");
+
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "appsignal_user",
+        newValue: null,
+        storageArea: localStorage,
+      }));
+
+      expect(getSessionContext().user_id).toBeUndefined();
+    });
   });
 
   it("persists session_id across simulated tab close and reopen", () => {

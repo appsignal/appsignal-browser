@@ -22,7 +22,7 @@ interface DedupeEntry {
   firstSeen: number;
 }
 
-const dedupeWindow: DedupeEntry[] = [];
+let dedupeWindow: DedupeEntry[] = [];
 const DEDUPE_MAX_COUNT = 5;
 const DEDUPE_WINDOW_MS = 10_000;
 
@@ -39,6 +39,8 @@ export function initErrors(
   beforeSend?: (event: BrowserError) => BrowserError | null,
   ignore?: (string | RegExp)[],
 ): void {
+  destroyErrors();
+
   config = serverConfig;
   appVersion = version;
   beforeSendHook = beforeSend;
@@ -77,6 +79,8 @@ export function destroyErrors(): void {
     window.removeEventListener("unhandledrejection", rejectionHandler);
     rejectionHandler = null;
   }
+  dedupeWindow = [];
+  lastErrorTimestamp = 0;
 }
 
 /** Report an error through the full pipeline. Used by captureError for framework plugins. */

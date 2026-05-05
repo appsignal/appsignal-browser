@@ -208,22 +208,11 @@ describe("breadcrumbs", () => {
   });
 
   describe("console breadcrumbs", () => {
-    // Only init once for console tests to avoid double-patching
-    let consoleInited = false;
-
-    function ensureConsoleInit() {
-      if (!consoleInited) {
-        initBreadcrumbs(
-          { ...defaultBreadcrumbConfig, console: true },
-          "http://localhost/ingest/browser",
-        );
-        consoleInited = true;
-      }
-      clearBreadcrumbs();
-    }
-
     it("records console.warn", () => {
-      ensureConsoleInit();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        "http://localhost/ingest/browser",
+      );
       console.warn("test warning");
 
       const consoleBreadcrumbs = getSnapshot().filter(
@@ -235,7 +224,10 @@ describe("breadcrumbs", () => {
     });
 
     it("records console.error", () => {
-      ensureConsoleInit();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        "http://localhost/ingest/browser",
+      );
       console.error("test error");
 
       const consoleBreadcrumbs = getSnapshot().filter(
@@ -246,7 +238,10 @@ describe("breadcrumbs", () => {
     });
 
     it("truncates long console messages to 200 chars", () => {
-      ensureConsoleInit();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        "http://localhost/ingest/browser",
+      );
       console.warn("x".repeat(300));
 
       const consoleBreadcrumbs = getSnapshot().filter(
@@ -457,6 +452,31 @@ describe("breadcrumbs", () => {
       const vis = getSnapshot().filter((b) => b.category === "visibility");
       expect(vis.length).toBeGreaterThanOrEqual(1);
       expect(vis[0].data?.state).toBeDefined();
+    });
+  });
+
+  describe("tab lifecycle breadcrumbs", () => {
+    it("emits exactly one tab_open per init", () => {
+      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+
+      const open = getSnapshot().filter(
+        (b) => b.category === "tab" && b.data?.event === "open",
+      );
+      expect(open).toHaveLength(1);
+      expect(open[0].message).toBe("Tab opened");
+    });
+
+    it("emits exactly one tab_close per pagehide", () => {
+      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+      clearBreadcrumbs();
+
+      window.dispatchEvent(new Event("pagehide"));
+
+      const close = getSnapshot().filter(
+        (b) => b.category === "tab" && b.data?.event === "close",
+      );
+      expect(close).toHaveLength(1);
+      expect(close[0].message).toBe("Tab closed");
     });
   });
 });

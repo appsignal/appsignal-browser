@@ -1,9 +1,11 @@
 import type { SessionContext, UserContext } from "./types.js";
 import { uuidv7 } from "uuidv7";
+import { storage } from "./utils.js";
 
 const SESSION_KEY = "appsignal_session_id";
 const ANON_KEY = "appsignal_anonymous_id";
 const LAST_ACTIVITY_KEY = "appsignal_last_activity";
+const TAB_KEY = "appsignal_tab_id";
 
 let currentSessionId: string | null = null;
 let currentUser: UserContext | null = null;
@@ -16,6 +18,7 @@ let activityTrackingStarted = false;
 export function initSession(timeoutMs: number): void {
   inactivityTimeoutMs = timeoutMs;
   ensureAnonymousId();
+  ensureTabId();
   restoreOrCreateSession();
   restoreUser();
   if (!activityTrackingStarted) {
@@ -24,15 +27,25 @@ export function initSession(timeoutMs: number): void {
   }
 }
 
+function ensureTabId(): void {
+  if (!storage.getString(sessionStorage, TAB_KEY)) {
+    storage.setString(sessionStorage, TAB_KEY, uuidv7());
+  }
+}
+
+export function getTabId(): string {
+  return storage.getString(sessionStorage, TAB_KEY) || "";
+}
+
 function ensureAnonymousId(): void {
-  if (!localStorage.getItem(ANON_KEY)) {
-    localStorage.setItem(ANON_KEY, uuidv7());
+  if (!storage.getString(localStorage, ANON_KEY)) {
+    storage.setString(localStorage, ANON_KEY, uuidv7());
   }
 }
 
 function restoreOrCreateSession(): void {
-  const stored = localStorage.getItem(SESSION_KEY);
-  lastActivityMs = Number(localStorage.getItem(LAST_ACTIVITY_KEY) || "0");
+  const stored = storage.getString(localStorage, SESSION_KEY);
+  lastActivityMs = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
   const now = Date.now();
 
   if (stored && now - lastActivityMs < inactivityTimeoutMs) {
@@ -45,11 +58,10 @@ function restoreOrCreateSession(): void {
 
 function newSession(): void {
   currentSessionId = uuidv7();
-  localStorage.setItem(SESSION_KEY, currentSessionId);
-  // Update timestamp directly — don't call touchActivity() which
-  // checks for gaps and could recurse back into newSession().
+  storage.setString(localStorage, SESSION_KEY, currentSessionId);
+  // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();
-  localStorage.setItem(LAST_ACTIVITY_KEY, String(lastActivityMs));
+  storage.setString(localStorage, LAST_ACTIVITY_KEY, String(lastActivityMs));
   resetInactivityTimer();
 }
 
@@ -57,8 +69,9 @@ export function getSessionId(): string {
   if (!currentSessionId) {
     restoreOrCreateSession();
   }
-  // Check expiry before returning — ensures the first event after a
-  // gap gets the new session, not the stale one.
+  const stored = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
+  if (stored > lastActivityMs) lastActivityMs = stored;
+
   const now = Date.now();
   const elapsed = now - lastActivityMs;
   if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
@@ -68,27 +81,25 @@ export function getSessionId(): string {
 }
 
 export function getAnonymousId(): string {
-  return localStorage.getItem(ANON_KEY) || "";
+  return storage.getString(localStorage, ANON_KEY) || "";
 }
 
 const USER_KEY = "appsignal_user";
 
 export function setUser(user: UserContext): void {
   currentUser = user;
-  try { localStorage.setItem(USER_KEY, JSON.stringify(user)) } catch { /* ignore */ }
+  storage.setJSON(localStorage, USER_KEY, user);
 }
 
 export function clearUser(): void {
   currentUser = null;
-  localStorage.removeItem(USER_KEY);
+  storage.remove(localStorage, USER_KEY);
 }
 
 function restoreUser(): void {
   if (currentUser) return;
-  try {
-    const stored = localStorage.getItem(USER_KEY);
-    if (stored) currentUser = JSON.parse(stored);
-  } catch { /* ignore */ }
+  const stored = storage.getJSON<UserContext>(localStorage, USER_KEY);
+  if (stored) currentUser = stored;
 }
 
 /** End the current session. Clears session storage so next init creates a fresh session. */
@@ -96,9 +107,9 @@ export function endSession(): void {
   currentSessionId = null;
   currentUser = null;
   lastActivityMs = 0;
-  localStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(LAST_ACTIVITY_KEY);
-  localStorage.removeItem(USER_KEY);
+  storage.remove(localStorage, SESSION_KEY);
+  storage.remove(localStorage, LAST_ACTIVITY_KEY);
+  storage.remove(localStorage, USER_KEY);
   if (activityTimer) {
     clearTimeout(activityTimer);
     activityTimer = null;
@@ -106,49 +117,67 @@ export function endSession(): void {
 }
 
 export function touchActivity(): void {
-  // Check if the session expired during a gap (e.g. laptop sleep).
-  // Also handles clock skew: if time jumped backward, treat as expired
-  // to avoid a session that can never expire.
+  // elapsed < 0 catches backward clock skew so the session can still expire.
   const now = Date.now();
   const elapsed = now - lastActivityMs;
   if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
     newSession();
   }
   lastActivityMs = now;
-  localStorage.setItem(LAST_ACTIVITY_KEY, String(now));
+  storage.setString(localStorage, LAST_ACTIVITY_KEY, String(now));
   resetInactivityTimer();
 }
 
 function resetInactivityTimer(): void {
   if (activityTimer) clearTimeout(activityTimer);
   activityTimer = setTimeout(() => {
-    // Session expired due to inactivity — next activity starts a new one
     currentSessionId = null;
   }, inactivityTimeoutMs);
 }
 
 let activityHandler: (() => void) | null = null;
 let visibilityHandler: (() => void) | null = null;
+let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ["click", "keydown", "scroll"];
 
 function startActivityTracking(): void {
   activityHandler = () => touchActivity();
   for (const event of ACTIVITY_EVENTS) {
-    document.addEventListener(event, activityHandler, { passive: true, capture: true });
+    document.addEventListener(event, activityHandler, {
+      passive: true,
+      capture: true,
+    });
   }
 
   visibilityHandler = () => {
     if (document.visibilityState === "hidden") {
       currentSessionId = null;
     } else if (document.visibilityState === "visible") {
-      lastActivityMs = Number(localStorage.getItem(LAST_ACTIVITY_KEY) || "0");
+      lastActivityMs = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
       if (Date.now() - lastActivityMs >= inactivityTimeoutMs) {
         currentSessionId = null;
-        localStorage.removeItem(SESSION_KEY);
+        storage.remove(localStorage, SESSION_KEY);
       }
     }
   };
   document.addEventListener("visibilitychange", visibilityHandler);
+
+  storageHandler = (e: StorageEvent) => {
+    if (e.key === SESSION_KEY) {
+      // Adopt the new value; getSessionId() mints a fresh one if null.
+      currentSessionId = e.newValue;
+    } else if (e.key === LAST_ACTIVITY_KEY) {
+      const v = Number(e.newValue || "0");
+      if (v > lastActivityMs) lastActivityMs = v;
+    } else if (e.key === USER_KEY) {
+      try {
+        currentUser = e.newValue ? JSON.parse(e.newValue) : null;
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  window.addEventListener("storage", storageHandler);
 }
 
 export function destroySession(): void {
@@ -163,11 +192,17 @@ export function destroySession(): void {
     document.removeEventListener("visibilitychange", visibilityHandler);
     visibilityHandler = null;
   }
+  if (storageHandler) {
+    window.removeEventListener("storage", storageHandler);
+    storageHandler = null;
+  }
+  activityTrackingStarted = false;
 }
 
 export function getSessionContext(): SessionContext {
   const ctx: SessionContext = {
     session_id: getSessionId(),
+    tab_id: getTabId(),
     anonymous_id: getAnonymousId(),
     page_url: location.href,
     referrer: document.referrer,
