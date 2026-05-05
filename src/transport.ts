@@ -21,7 +21,7 @@ const MAX_QUEUE_SIZE = 100;
 
 // Queued payloads — covers three cases: offline, pending consent, and
 // payloads whose in-line retries were exhausted on 429/5xx or network error.
-const retryQueue: string[] = [];
+let retryQueue: string[] = [];
 let listeningForOnline = false;
 // Pending in-line retry setTimeouts. Tracked so destroyTransport() can
 // cancel them instead of letting a stray fetch fire against a torn-down SDK.
@@ -38,7 +38,7 @@ export function initTransport(ep: string, key: string): void {
 
   // When consent is denied, drop all queued payloads
   onConsentDenied(() => {
-    retryQueue.length = 0;
+    retryQueue = [];
   });
 }
 
@@ -56,7 +56,7 @@ export function destroyTransport(): void {
     window.removeEventListener("online", flushOnline);
     listeningForOnline = false;
   }
-  retryQueue.length = 0;
+  retryQueue = [];
   endpoint = "";
   ingestionKey = "";
 }
