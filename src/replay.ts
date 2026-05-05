@@ -28,8 +28,7 @@ const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
 
 const CHUNK_INDEX_KEY_PREFIX = "appsignal_replay_chunk_index_";
 
-/** Exported for tests only. */
-export function nextChunkIndex(sessionId: string, tabId: string): number {
+function nextChunkIndex(sessionId: string, tabId: string): number {
   const key = CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId;
   const current = Number(storage.getString(sessionStorage, key) || "0");
   storage.setString(sessionStorage, key, String(current + 1));

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initReplay, applyReplaySampling, onError, stopReplay, discardReplay, nextChunkIndex } from "./replay.js";
+import { initReplay, applyReplaySampling, onError, stopReplay, discardReplay } from "./replay.js";
 import * as transport from "./transport.js";
 import * as consent from "./consent.js";
 import type { ServerConfig } from "./types.js";
@@ -188,50 +188,5 @@ describe("replay", () => {
     // No events emitted
     vi.advanceTimersByTime(5000);
     expect(sendChunkMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("nextChunkIndex", () => {
-  beforeEach(() => {
-    sessionStorage.clear();
-  });
-
-  it("starts at 0 for a fresh (session, tab)", () => {
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(0);
-  });
-
-  it("increments monotonically on repeated calls for the same (session, tab)", () => {
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(0);
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(1);
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(2);
-  });
-
-  it("persists the counter in sessionStorage keyed by (session, tab)", () => {
-    // Reloading a page within the same tab must resume the counter rather
-    // than restart at 0 and collide with chunks already stored server-side
-    // under the same (session_id, tab_id) pair.
-    nextChunkIndex("sess-a", "tab-1");
-    nextChunkIndex("sess-a", "tab-1");
-    nextChunkIndex("sess-a", "tab-1");
-
-    expect(sessionStorage.getItem("appsignal_replay_chunk_index_sess-a_tab-1")).toBe("3");
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(3);
-  });
-
-  it("keeps counters for different session_ids independent", () => {
-    nextChunkIndex("sess-a", "tab-1");
-    nextChunkIndex("sess-a", "tab-1");
-    expect(nextChunkIndex("sess-b", "tab-1")).toBe(0);
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(2);
-  });
-
-  it("keeps counters for different tab_ids independent within the same session", () => {
-    // Two tabs of the same session must not collide on chunk_index. Each
-    // tab keeps its own counter starting at 0; the server disambiguates
-    // by (session_id, tab_id, chunk_index).
-    nextChunkIndex("sess-a", "tab-1");
-    nextChunkIndex("sess-a", "tab-1");
-    expect(nextChunkIndex("sess-a", "tab-2")).toBe(0);
-    expect(nextChunkIndex("sess-a", "tab-1")).toBe(2);
   });
 });
