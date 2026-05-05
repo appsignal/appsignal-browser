@@ -208,22 +208,11 @@ describe("breadcrumbs", () => {
   });
 
   describe("console breadcrumbs", () => {
-    // Only init once for console tests to avoid double-patching
-    let consoleInited = false;
-
-    function ensureConsoleInit() {
-      if (!consoleInited) {
-        initBreadcrumbs(
-          { ...defaultBreadcrumbConfig, console: true },
-          "http://localhost/ingest/browser",
-        );
-        consoleInited = true;
-      }
-      clearBreadcrumbs();
-    }
-
     it("records console.warn", () => {
-      ensureConsoleInit();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        "http://localhost/ingest/browser",
+      );
       console.warn("test warning");
 
       const consoleBreadcrumbs = getSnapshot().filter(
@@ -235,7 +224,10 @@ describe("breadcrumbs", () => {
     });
 
     it("records console.error", () => {
-      ensureConsoleInit();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        "http://localhost/ingest/browser",
+      );
       console.error("test error");
 
       const consoleBreadcrumbs = getSnapshot().filter(
@@ -246,7 +238,10 @@ describe("breadcrumbs", () => {
     });
 
     it("truncates long console messages to 200 chars", () => {
-      ensureConsoleInit();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        "http://localhost/ingest/browser",
+      );
       console.warn("x".repeat(300));
 
       const consoleBreadcrumbs = getSnapshot().filter(
@@ -461,31 +456,26 @@ describe("breadcrumbs", () => {
   });
 
   describe("tab lifecycle breadcrumbs", () => {
-    it("emits tab_open on init", () => {
+    it("emits exactly one tab_open per init", () => {
       initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
 
       const open = getSnapshot().filter(
         (b) => b.category === "tab" && b.data?.event === "open",
       );
-      expect(open.length).toBeGreaterThanOrEqual(1);
+      expect(open).toHaveLength(1);
       expect(open[0].message).toBe("Tab opened");
     });
 
-    it("emits tab_close on pagehide (non-persisted)", () => {
+    it("emits exactly one tab_close per pagehide", () => {
       initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
       clearBreadcrumbs();
 
-      // PageTransitionEvent constructor isn't in jsdom; dispatch a generic
-      // Event and rely on the persisted check defaulting to false/undefined.
-      // Note: the test suite shares module state and previous initBreadcrumbs
-      // calls leak pagehide listeners — assert >= 1 and check shape, like
-      // the other breadcrumb tests in this file.
       window.dispatchEvent(new Event("pagehide"));
 
       const close = getSnapshot().filter(
         (b) => b.category === "tab" && b.data?.event === "close",
       );
-      expect(close.length).toBeGreaterThanOrEqual(1);
+      expect(close).toHaveLength(1);
       expect(close[0].message).toBe("Tab closed");
     });
   });

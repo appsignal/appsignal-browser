@@ -39,6 +39,10 @@ export function initErrors(
   beforeSend?: (event: BrowserError) => BrowserError | null,
   ignore?: (string | RegExp)[],
 ): void {
+  // Make init idempotent: a second init must not stack listeners or carry
+  // dedupe state from the previous instance (HMR, tests, double-init).
+  destroyErrors();
+
   config = serverConfig;
   appVersion = version;
   beforeSendHook = beforeSend;
@@ -77,6 +81,8 @@ export function destroyErrors(): void {
     window.removeEventListener("unhandledrejection", rejectionHandler);
     rejectionHandler = null;
   }
+  dedupeWindow.length = 0;
+  lastErrorTimestamp = 0;
 }
 
 /** Report an error through the full pipeline. Used by captureError for framework plugins. */

@@ -66,14 +66,13 @@ export function initBreadcrumbs(
   serverConfig: ServerConfig["breadcrumbs"],
   endpoint: string,
 ): void {
+  // Make init idempotent: a second init must tear down previous listeners,
+  // patches, and observers so we don't stack handlers (HMR, tests, double-init).
+  destroyBreadcrumbs();
+
   config = serverConfig;
   collectEndpoint = endpoint;
   buffer = new RingBuffer<Breadcrumb>(config.capacity);
-
-  // Reset navigation hook state so repeat calls (tests, HMR) don't accumulate listeners
-  preNavListeners = [];
-  postNavListeners = [];
-  navigationHookInstalled = false;
 
   if (config.clicks) initClicks();
   initNavigation();
