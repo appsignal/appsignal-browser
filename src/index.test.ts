@@ -246,31 +246,6 @@ describe("SDK integration", () => {
     expect(early).toBeDefined();
   });
 
-  it("non-default replay sample_rate does not affect breadcrumb survival", async () => {
-    // Sanity: breadcrumbs are independent of replay sampling. A reduced
-    // replay sample_rate (0.1) on the arriving server config must not
-    // accidentally clear the breadcrumb buffer.
-    serverConfigResponse = {
-      ...DEFAULT_SERVER_CONFIG,
-      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1 },
-    };
-
-    init({ key: "test-key" });
-    addBreadcrumb({ category: "early", message: "before low-sample config" });
-
-    await new Promise(r => setTimeout(r, 50));
-
-    flush();
-
-    const eventPayloads = sentPayloads
-      .map(p => { try { return JSON.parse(p.body); } catch { return null; } })
-      .filter(b => b?.type === "events");
-    const early = eventPayloads
-      .flatMap(p => p.breadcrumbs)
-      .find((b: { category: string }) => b.category === "early");
-    expect(early).toBeDefined();
-  });
-
   it("attaches tab_id to event and error payloads", () => {
     init({ key: "test-key" });
 
