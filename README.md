@@ -456,11 +456,3 @@ const SafeWidget = withErrorBoundary(Widget, {
   fallback: <p>Widget failed to load</p>,
 });
 ```
-
-### Future plugins
-
-- **Vue** — `app.config.errorHandler` plugin that calls `captureError`.
-- **Angular** — custom `ErrorHandler` that calls `captureError`.
-- **Svelte** — `<svelte:boundary>` wrapper.
-
-
