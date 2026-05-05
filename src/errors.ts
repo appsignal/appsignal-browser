@@ -22,7 +22,7 @@ interface DedupeEntry {
   firstSeen: number;
 }
 
-const dedupeWindow: DedupeEntry[] = [];
+let dedupeWindow: DedupeEntry[] = [];
 const DEDUPE_MAX_COUNT = 5;
 const DEDUPE_WINDOW_MS = 10_000;
 
@@ -79,7 +79,7 @@ export function destroyErrors(): void {
     window.removeEventListener("unhandledrejection", rejectionHandler);
     rejectionHandler = null;
   }
-  dedupeWindow.length = 0;
+  dedupeWindow = [];
   lastErrorTimestamp = 0;
 }
 
