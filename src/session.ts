@@ -59,8 +59,7 @@ function restoreOrCreateSession(): void {
 function newSession(): void {
   currentSessionId = uuidv7();
   storage.setString(localStorage, SESSION_KEY, currentSessionId);
-  // Update timestamp directly — don't call touchActivity() which
-  // checks for gaps and could recurse back into newSession().
+  // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();
   storage.setString(localStorage, LAST_ACTIVITY_KEY, String(lastActivityMs));
   resetInactivityTimer();
@@ -70,16 +69,9 @@ export function getSessionId(): string {
   if (!currentSessionId) {
     restoreOrCreateSession();
   }
-  // Re-read lastActivityMs from storage before the timeout check so two
-  // concurrently-visible tabs don't drift onto separate sessions: tab A
-  // staying idle while tab B is active needs to see B's activity. The
-  // visibility handler already does this on hidden→visible transitions,
-  // but tabs that never lose focus would otherwise miss the update.
   const stored = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
   if (stored > lastActivityMs) lastActivityMs = stored;
 
-  // Check expiry before returning — ensures the first event after a
-  // gap gets the new session, not the stale one.
   const now = Date.now();
   const elapsed = now - lastActivityMs;
   if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
@@ -125,9 +117,7 @@ export function endSession(): void {
 }
 
 export function touchActivity(): void {
-  // Check if the session expired during a gap (e.g. laptop sleep).
-  // Also handles clock skew: if time jumped backward, treat as expired
-  // to avoid a session that can never expire.
+  // elapsed < 0 catches backward clock skew so the session can still expire.
   const now = Date.now();
   const elapsed = now - lastActivityMs;
   if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
@@ -141,7 +131,6 @@ export function touchActivity(): void {
 function resetInactivityTimer(): void {
   if (activityTimer) clearTimeout(activityTimer);
   activityTimer = setTimeout(() => {
-    // Session expired due to inactivity — next activity starts a new one
     currentSessionId = null;
   }, inactivityTimeoutMs);
 }
@@ -173,15 +162,9 @@ function startActivityTracking(): void {
   };
   document.addEventListener("visibilitychange", visibilityHandler);
 
-  // Cross-tab sync: storage events fire in *other* tabs whenever any tab
-  // mutates localStorage. When another tab rotates the session or records
-  // activity, mirror the change in our in-memory state so two open tabs
-  // stay on the same logical session — without this, a tab that's been
-  // idle while another rotates the session keeps emitting under the old id.
   storageHandler = (e: StorageEvent) => {
     if (e.key === SESSION_KEY) {
-      // Another tab replaced or cleared the session. Adopt the new value;
-      // the next getSessionId() will create a fresh session if both are null.
+      // Adopt the new value; getSessionId() mints a fresh one if null.
       currentSessionId = e.newValue;
     } else if (e.key === LAST_ACTIVITY_KEY) {
       const v = Number(e.newValue || "0");
