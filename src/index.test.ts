@@ -3,9 +3,26 @@ import { init, destroy, endSession, setUser, clearUser, addBreadcrumb, captureEr
 import type { ServerConfig } from "./types.js";
 import { DEFAULT_SERVER_CONFIG } from "./types.js";
 
-// Mock rrweb — replay tries to dynamically import it
+// jsdom's Blob may lack .text(); polyfill via FileReader so the sendBeacon
+// mock below can read body strings out of beacon calls.
+if (typeof Blob.prototype.text !== "function") {
+  Blob.prototype.text = function () {
+    return new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.readAsText(this as unknown as Blob);
+    });
+  };
+}
+
+// Mock rrweb — replay tries to dynamically import it. Capture the emit
+// hook so tests can simulate rrweb pushing events through replay's pipeline.
+let rrwebEmit: ((event: unknown, isCheckout?: boolean) => void) | null = null;
 vi.mock("@rrweb/record", () => ({
-  record: vi.fn(() => () => {}),
+  record: (opts: Record<string, unknown>) => {
+    rrwebEmit = opts.emit as typeof rrwebEmit;
+    return () => {};
+  },
 }));
 
 // Track what the SDK sends
@@ -29,7 +46,16 @@ describe("SDK integration", () => {
   beforeEach(() => {
     sentPayloads = [];
     serverConfigResponse = { ...DEFAULT_SERVER_CONFIG };
+    rrwebEmit = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(mockFetch);
+    // jsdom's sendBeacon doesn't route through our fetch mock; record the
+    // body into sentPayloads ourselves so beacon flushes (page hide,
+    // endSession) are visible to assertions.
+    (navigator as unknown as { sendBeacon: (url: string, blob: Blob) => boolean }).sendBeacon =
+      (url, blob) => {
+        blob.text().then(body => sentPayloads.push({ url, body }));
+        return true;
+      };
     // Reset per-tab replay counters (sessionStorage) and session identity
     // (localStorage) so each test starts with no SDK state.
     sessionStorage.clear();
@@ -244,6 +270,65 @@ describe("SDK integration", () => {
       .flatMap(p => p.breadcrumbs)
       .find((b: { category: string }) => b.category === "early");
     expect(early).toBeDefined();
+  });
+
+  it("replay buffer is discarded when server config narrows sample_rate to exclude this session", async () => {
+    // Fallback config has sample_rate 1.0 so recording starts immediately.
+    // When the real config narrows to 0.1, the per-session random roll is
+    // re-evaluated against the new threshold; if the session is no longer
+    // sampled (and error_replay is off), the buffered events are discarded.
+    vi.spyOn(Math, "random").mockReturnValue(0.5); // 0.5 > 0.1 → not sampled
+    serverConfigResponse = {
+      ...DEFAULT_SERVER_CONFIG,
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1, error_replay: false },
+    };
+
+    init({ key: "test-key" });
+
+    // Let the rrweb dynamic import resolve so emit is captured, then push
+    // some events through the fallback-window pipeline.
+    await new Promise(r => setTimeout(r, 20));
+    rrwebEmit?.({ type: 1, data: "fallback snapshot" });
+    rrwebEmit?.({ type: 3, data: "fallback mutation" });
+
+    // Wait for the config to arrive and applyServerConfig → applyReplaySampling
+    // to discard the buffer.
+    await new Promise(r => setTimeout(r, 50));
+
+    // Anything pushed after the discard would also be ignored.
+    rrwebEmit?.({ type: 3, data: "post-config" });
+    flush();
+
+    const replayPayloads = sentPayloads
+      .map(p => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter(b => b?.type === "replay");
+    expect(replayPayloads).toHaveLength(0);
+  });
+
+  it("replay buffer is flushed when server config keeps the session sampled", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.05); // 0.05 < 0.1 → sampled
+    serverConfigResponse = {
+      ...DEFAULT_SERVER_CONFIG,
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1 },
+    };
+
+    init({ key: "test-key" });
+
+    await new Promise(r => setTimeout(r, 20));
+    rrwebEmit?.({ type: 1, data: "snapshot" });
+    rrwebEmit?.({ type: 3, data: "mutation" });
+
+    await new Promise(r => setTimeout(r, 50));
+
+    endSession();
+    // Beacon sends record into sentPayloads asynchronously (Blob.text()).
+    await new Promise(r => setTimeout(r, 10));
+
+    const replayPayloads = sentPayloads
+      .map(p => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter(b => b?.type === "replay");
+    expect(replayPayloads.length).toBeGreaterThan(0);
+    expect(replayPayloads[0].events.length).toBeGreaterThan(0);
   });
 
   it("attaches tab_id to event and error payloads", () => {
