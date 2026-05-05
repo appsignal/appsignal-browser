@@ -66,8 +66,6 @@ export function initBreadcrumbs(
   serverConfig: ServerConfig["breadcrumbs"],
   endpoint: string,
 ): void {
-  // Make init idempotent: a second init must tear down previous listeners,
-  // patches, and observers so we don't stack handlers (HMR, tests, double-init).
   destroyBreadcrumbs();
 
   config = serverConfig;

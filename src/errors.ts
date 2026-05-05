@@ -39,8 +39,6 @@ export function initErrors(
   beforeSend?: (event: BrowserError) => BrowserError | null,
   ignore?: (string | RegExp)[],
 ): void {
-  // Make init idempotent: a second init must not stack listeners or carry
-  // dedupe state from the previous instance (HMR, tests, double-init).
   destroyErrors();
 
   config = serverConfig;
