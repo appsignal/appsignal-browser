@@ -26,15 +26,9 @@ let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
 
-// Chunk index is persisted per (session, tab) so it survives page reloads in
-// the same tab without colliding with chunks emitted by other tabs of the
-// same session. The key is in sessionStorage (per-tab); including tab_id
-// makes the namespacing explicit and matches the server-side key tuple
-// (session_id, tab_id, chunk_index).
 const CHUNK_INDEX_KEY_PREFIX = "appsignal_replay_chunk_index_";
 
-/** Exported for tests only. Returns the next chunk_index to emit for the
- * given (session, tab) pair and advances the persisted counter by one. */
+/** Exported for tests only. */
 export function nextChunkIndex(sessionId: string, tabId: string): number {
   const key = CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId;
   const current = Number(storage.getString(sessionStorage, key) || "0");
@@ -42,9 +36,7 @@ export function nextChunkIndex(sessionId: string, tabId: string): number {
   return current;
 }
 
-/** Clear the persisted chunk counter for a session in this tab. Called when
- * the session ends so orphaned keys don't accumulate in sessionStorage on
- * long-lived tabs that rotate through many sessions. */
+/** Clear chunk counter on session end so keys don't pile up in long-lived tabs. */
 export function clearChunkIndex(sessionId: string, tabId: string): void {
   storage.remove(sessionStorage, CHUNK_INDEX_KEY_PREFIX + sessionId + "_" + tabId);
 }
@@ -58,9 +50,7 @@ export function initReplay(
 
   if (!config.enabled) return;
 
-  // Roll once per session — reused when the real config arrives.
-  // The fallback config has sample_rate 1.0 so this records everything
-  // on first init. applyReplaySampling() narrows the decision.
+  // Sampling roll, narrowed by applyReplaySampling() when server config arrives.
   sessionRandom = Math.random();
   sampled = sessionRandom < config.sample_rate;
 
@@ -77,7 +67,6 @@ export function initReplay(
       if (isRecording) flushChunk();
     });
 
-    // Pause/resume on offline/online
     window.addEventListener("offline", pauseRecording);
     window.addEventListener("online", resumeRecording);
 
@@ -98,7 +87,6 @@ export function initReplay(
     };
     window.addEventListener("pagehide", replayPagehideHandler);
 
-    // Stop recording when consent is denied, resume when granted
     onConsentDenied(() => {
       if (isRecording) stopReplay();
     });
@@ -190,7 +178,6 @@ async function startRecording(): Promise<void> {
 function pauseRecording(): void {
   if (!isRecording) return;
 
-  // Stop rrweb and flush what we have
   clearTimers();
   flushChunk();
   if (recorder) {
@@ -257,9 +244,7 @@ export function stopReplay(): void {
   isPaused = false;
 }
 
-/** Flush any buffered replay events under the current session_id without
- * stopping the recorder. Used by endSession() so chunks are attributed to
- * the session that recorded them, not to the session that replaces it.
+/** Flush buffered replay under the current session without stopping the recorder.
  * Pass `useBeacon=true` when a navigation is imminent (e.g. logout). */
 export function flushReplay(useBeacon = false): void {
   if (isRecording) flushChunk(useBeacon);
