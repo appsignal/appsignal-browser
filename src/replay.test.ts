@@ -21,10 +21,13 @@ vi.mock("./consent.js", () => ({
   onConsentGranted: (cb: () => void) => consentGrantedCallbacks.push(cb),
 }));
 
-// Mock session
+// Mock session — reads at call time so tests can change identity mid-flight
+let mockSessionId = "test-session-id";
+let mockTabId = "test-tab-id";
+
 vi.mock("./session.js", () => ({
-  getSessionId: () => "test-session-id",
-  getTabId: () => "test-tab-id",
+  getSessionId: () => mockSessionId,
+  getTabId: () => mockTabId,
 }));
 
 // Mock breadcrumbs navigation hook
@@ -62,6 +65,9 @@ describe("replay", () => {
     consentState = "granted";
     consentDeniedCallbacks.length = 0;
     consentGrantedCallbacks.length = 0;
+    mockSessionId = "test-session-id";
+    mockTabId = "test-tab-id";
+    sessionStorage.clear();
   });
 
   afterEach(() => {
@@ -179,6 +185,32 @@ describe("replay", () => {
     const idx0 = sendChunkMock.mock.calls[0][0].chunk_index;
     const idx1 = sendChunkMock.mock.calls[1][0].chunk_index;
     expect(idx1).toBe(idx0 + 1);
+  });
+
+  it("keeps chunk_index per tab — switching tabs starts a fresh counter", async () => {
+    // Headline contract of (session_id, tab_id, chunk_index): two tabs of one
+    // session must not collide. Each tab's counter is independent and starts
+    // at 0; the server disambiguates by the full triple.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    rrwebEmit!({ type: 1, data: "a" });
+    vi.advanceTimersByTime(5000);
+    rrwebEmit!({ type: 1, data: "b" });
+    vi.advanceTimersByTime(5000);
+
+    // Switch to a sibling tab in the same session.
+    mockTabId = "other-tab-id";
+    rrwebEmit!({ type: 1, data: "c" });
+    vi.advanceTimersByTime(5000);
+
+    expect(sendChunkMock).toHaveBeenCalledTimes(3);
+    expect(sendChunkMock.mock.calls[0][0].tab_id).toBe("test-tab-id");
+    expect(sendChunkMock.mock.calls[0][0].chunk_index).toBe(0);
+    expect(sendChunkMock.mock.calls[1][0].tab_id).toBe("test-tab-id");
+    expect(sendChunkMock.mock.calls[1][0].chunk_index).toBe(1);
+    expect(sendChunkMock.mock.calls[2][0].tab_id).toBe("other-tab-id");
+    expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
   it("does not flush empty buffer", async () => {
