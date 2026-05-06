@@ -140,6 +140,32 @@ describe("breadcrumbs", () => {
     // patching here, but we verify the function doesn't throw.
   });
 
+  it("updateBreadcrumbConfig disabling clicks stops new click breadcrumbs", () => {
+    // Per-category toggles must respond to runtime updates from the server.
+    // Otherwise narrowing config (e.g. disabling clicks via remote config)
+    // is silently ignored because listeners were registered at init time.
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, clicks: true },
+      "http://localhost/ingest/browser",
+    );
+
+    const button = document.createElement("button");
+    button.textContent = "Submit";
+    document.body.appendChild(button);
+
+    button.click();
+    const before = getSnapshot().filter(b => b.category === "click").length;
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    updateBreadcrumbConfig({ ...defaultBreadcrumbConfig, clicks: false });
+
+    button.click();
+    const after = getSnapshot().filter(b => b.category === "click").length;
+    expect(after).toBe(before);
+
+    document.body.removeChild(button);
+  });
+
   describe("click breadcrumbs", () => {
     it("records click events", () => {
       initBreadcrumbs(

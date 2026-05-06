@@ -70,22 +70,25 @@ export function initBreadcrumbs(
   collectEndpoint = endpoint;
   buffer = new RingBuffer<Breadcrumb>(config.capacity);
 
-  if (config.clicks) initClicks();
+  // Register all collectors unconditionally — each handler reads the
+  // module-level `config` and short-circuits when its category is off.
+  // Gating at registration time would freeze the toggles at init, so a
+  // remote config narrowing (e.g. disable clicks) couldn't take effect
+  // without an SDK reinit.
+  initClicks();
   initNavigation();
   if (document.readyState === "complete") {
     recordDocumentLoad();
   } else {
     window.addEventListener("load", () => recordDocumentLoad(), { once: true });
   }
-  if (config.network) {
-    initResourceTimingObserver();
-    initNetwork();
-  }
-  if (config.console) initConsole();
-  if (config.long_tasks) initLongTasks();
-  if (config.scroll_depth) initScrollDepth();
-  if (config.form_abandonment) initFormAbandonment();
-  if (config.user_timing) initUserTiming();
+  initResourceTimingObserver();
+  initNetwork();
+  initConsole();
+  initLongTasks();
+  initScrollDepth();
+  initFormAbandonment();
+  initUserTiming();
   initVisibility();
   initTabLifecycle();
 }
@@ -146,6 +149,7 @@ function clickDistance(a: ClickRecord, b: ClickRecord): number {
 
 function initClicks(): void {
   const handler = (e: MouseEvent) => {
+      if (!config.clicks) return;
       const now = Date.now();
       const selector = elementSelector(e.target as Element);
 
@@ -607,7 +611,7 @@ function initNetwork(): void {
           ? input.href
           : input.url;
 
-    if (isCollectEndpoint(url) || isBlocklisted(url)) {
+    if (!config.network || isCollectEndpoint(url) || isBlocklisted(url)) {
       return origFetch(input, init);
     }
 
@@ -716,7 +720,7 @@ function initNetwork(): void {
     };
     const url = xhr._asUrl;
 
-    if (!url || isCollectEndpoint(url) || isBlocklisted(url)) {
+    if (!config.network || !url || isCollectEndpoint(url) || isBlocklisted(url)) {
       return origXhrSend.call(this, body);
     }
 
@@ -809,22 +813,26 @@ function initConsole(): void {
   origConsoleError = console.error.bind(console);
 
   console.warn = function (...args: unknown[]) {
-    addBreadcrumb({
-      timestamp: Date.now(),
-      category: "console",
-      message: formatConsoleArgs(args).slice(0, 200),
-      data: { level: "warn" },
-    });
+    if (config.console) {
+      addBreadcrumb({
+        timestamp: Date.now(),
+        category: "console",
+        message: formatConsoleArgs(args).slice(0, 200),
+        data: { level: "warn" },
+      });
+    }
     origConsoleWarn(...args);
   };
 
   console.error = function (...args: unknown[]) {
-    addBreadcrumb({
-      timestamp: Date.now(),
-      category: "console",
-      message: formatConsoleArgs(args).slice(0, 200),
-      data: { level: "error" },
-    });
+    if (config.console) {
+      addBreadcrumb({
+        timestamp: Date.now(),
+        category: "console",
+        message: formatConsoleArgs(args).slice(0, 200),
+        data: { level: "error" },
+      });
+    }
     origConsoleError(...args);
   };
 
@@ -846,6 +854,7 @@ function initLongTasks(): void {
   // Try Long Animation Frame API first (Chrome 123+) — has script attribution
   try {
     const observer = new PerformanceObserver((list) => {
+      if (!config.long_tasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
           // LoAF entries have a .scripts array (not in TS lib types yet)
@@ -889,6 +898,7 @@ function initLongTasks(): void {
   // Fallback: basic longtask observer (no attribution)
   try {
     const observer = new PerformanceObserver((list) => {
+      if (!config.long_tasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
           addBreadcrumb({
@@ -933,7 +943,7 @@ function getScrollPercent(target?: EventTarget | null): number {
 }
 
 function flushScrollDepth(): void {
-  if (maxScrollPercent > 0 && lastScrollUrl) {
+  if (config.scroll_depth && maxScrollPercent > 0 && lastScrollUrl) {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "scroll_depth",
@@ -955,6 +965,7 @@ function initScrollDepth(): void {
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
   let lastScrollTarget: EventTarget | null = null;
   const scrollHandler = (e: Event) => {
+    if (!config.scroll_depth) return;
     lastScrollTarget = e.target;
     if (throttleTimer) return;
     throttleTimer = setTimeout(() => {
@@ -992,6 +1003,7 @@ function initFormAbandonment(): void {
   const submittedForms = new WeakSet<HTMLFormElement>();
 
   const inputHandler = (e: Event) => {
+    if (!config.form_abandonment) return;
     const target = e.target as Element;
     if (!(target instanceof HTMLInputElement
       || target instanceof HTMLTextAreaElement
@@ -1006,6 +1018,7 @@ function initFormAbandonment(): void {
   document.addEventListener("input", inputHandler, { capture: true, passive: true });
 
   const submitHandler = (e: SubmitEvent) => {
+    if (!config.form_abandonment) return;
     const form = e.target as HTMLFormElement;
     submittedForms.add(form);
     interactedForms.delete(form);
@@ -1014,6 +1027,7 @@ function initFormAbandonment(): void {
 
   // On navigation, emit abandonment for forms interacted with but not submitted
   const emitAbandonments = () => {
+    if (!config.form_abandonment) return;
     for (const [form, interactionTime] of interactedForms) {
       if (submittedForms.has(form)) continue;
       const selector = elementSelector(form);
@@ -1045,6 +1059,7 @@ function initUserTiming(): void {
 
   try {
     const observer = new PerformanceObserver((list) => {
+      if (!config.user_timing) return;
       for (const entry of list.getEntries()) {
         const isMeasure = entry.entryType === "measure";
         addBreadcrumb({
