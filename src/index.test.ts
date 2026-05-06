@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { init, destroy, endSession, setUser, clearUser, addBreadcrumb, captureError, flush } from "./index.js";
 import type { ServerConfig } from "./types.js";
 import { DEFAULT_SERVER_CONFIG } from "./types.js";
+import { RingBuffer } from "./ring-buffer.js";
 
 // jsdom's Blob may lack .text(); polyfill via FileReader so the sendBeacon
 // mock below can read body strings out of beacon calls.
@@ -355,6 +356,24 @@ describe("SDK integration", () => {
     expect(eventTab).toBe(errorTab);
     // tab_id is distinct from session_id.
     expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
+  });
+
+  it("destroy fully unwinds the fetch patch chain when tracing is enabled", async () => {
+    // Both breadcrumbs and tracing patch window.fetch. Tracing patches *after*
+    // breadcrumbs, so it is the outer wrapper. If destroy unwinds in the wrong
+    // order, window.fetch is left pointing at the orphaned breadcrumbs wrapper
+    // — fetches still work, but every fetch silently pushes a "network"
+    // breadcrumb into a buffer nobody drains.
+    const pushSpy = vi.spyOn(RingBuffer.prototype, "push");
+
+    init({ key: "test-key", tracePropagationTargets: ["**/*"] });
+
+    destroy();
+    const baseline = pushSpy.mock.calls.length;
+
+    await fetch("http://random.example.com/api");
+
+    expect(pushSpy.mock.calls.length).toBe(baseline);
   });
 
   it("setUser attaches user context to payloads", () => {

@@ -214,10 +214,13 @@ function applyServerConfig(cfg: ServerConfig): void {
 }
 
 function stopCollection(): void {
-  // Order matters: breadcrumbs before tracing (unwinding patch chain)
+  // Unwind the fetch/XHR patch chain from the outside in. Breadcrumbs is
+  // patched first in startCollection, then tracing — so tracing is the outer
+  // wrapper and must be removed first, otherwise window.fetch is left
+  // pointing at the orphaned breadcrumbs wrapper.
   destroyReplay();
-  destroyBreadcrumbs();
   destroyTracing();
+  destroyBreadcrumbs();
   destroyErrors();
   destroyVitals();
 
