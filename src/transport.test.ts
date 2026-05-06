@@ -215,6 +215,42 @@ describe("transport", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("evicts oldest queued payloads when total bytes exceed the cap", async () => {
+    // The retry queue used to be count-bounded (100 items). Replay chunks
+    // can be ~10 MB each, so an offline tab could pin ~1 GB. Switch the
+    // bound to bytes — when the cap is reached, drop the oldest entries
+    // until the new payload fits.
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, "onLine", { value: false, configurable: true });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+
+    // Each payload's serialised body is ≈9 MB; the cap is 32 MB. Queueing
+    // four of them pushes the total over the cap, so the oldest gets evicted
+    // and only three drain when we go back online.
+    const tagged = (id: string): ReplayChunk => ({
+      type: "replay",
+      session_id: "s",
+      tab_id: "t",
+      chunk_index: 0,
+      events: [id, "x".repeat(9 * 1024 * 1024)],
+    });
+
+    sendReplayChunk(tagged("#1"));
+    sendReplayChunk(tagged("#2"));
+    sendReplayChunk(tagged("#3"));
+    sendReplayChunk(tagged("#4"));
+
+    Object.defineProperty(navigator, "onLine", { value: true, configurable: true });
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const sentBodies = fetchSpy.mock.calls.map((c) => c[1]?.body as string);
+    expect(sentBodies.some((b) => b.includes('"#1"'))).toBe(false);
+    expect(sentBodies.some((b) => b.includes('"#2"'))).toBe(true);
+    expect(sentBodies.some((b) => b.includes('"#4"'))).toBe(true);
+  });
+
   it("re-enqueues a chunk on network error after retries exhausted", async () => {
     vi.useFakeTimers();
     const fetchSpy = vi

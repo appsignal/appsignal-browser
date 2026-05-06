@@ -17,11 +17,16 @@ const BEACON_MAX_BYTES = 64 * 1024;
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_RETRIES = 3;
 const BASE_RETRY_MS = 1000;
-const MAX_QUEUE_SIZE = 100;
+// Byte-bounded queue. Per-payload limit is 10 MB (MAX_PAYLOAD_BYTES); a
+// count-based cap of 100 would let an offline tab pin ~1 GB of replay
+// chunks. 32 MB still holds many normal-sized chunks (~50–500 KB each)
+// while bounding worst-case memory.
+const MAX_QUEUE_BYTES = 32 * 1024 * 1024;
 
 // Queued payloads — covers three cases: offline, pending consent, and
 // payloads whose in-line retries were exhausted on 429/5xx or network error.
 let retryQueue: string[] = [];
+let retryQueueBytes = 0;
 let listeningForOnline = false;
 // Pending in-line retry setTimeouts. Tracked so destroyTransport() can
 // cancel them instead of letting a stray fetch fire against a torn-down SDK.
@@ -39,6 +44,7 @@ export function initTransport(ep: string, key: string): void {
   // When consent is denied, drop all queued payloads
   onConsentDenied(() => {
     retryQueue = [];
+    retryQueueBytes = 0;
   });
 }
 
@@ -57,6 +63,7 @@ export function destroyTransport(): void {
     listeningForOnline = false;
   }
   retryQueue = [];
+  retryQueueBytes = 0;
   endpoint = "";
   ingestionKey = "";
 }
@@ -122,10 +129,16 @@ function send(body: string): void {
 }
 
 function enqueue(body: string): void {
-  if (retryQueue.length >= MAX_QUEUE_SIZE) {
-    retryQueue.shift();
+  // A single body that already exceeds the cap can't ever fit; drop it
+  // rather than evicting everything else trying to make room.
+  if (body.length > MAX_QUEUE_BYTES) return;
+  // Evict oldest entries until the new body fits under the byte cap.
+  while (retryQueue.length > 0 && retryQueueBytes + body.length > MAX_QUEUE_BYTES) {
+    const dropped = retryQueue.shift()!;
+    retryQueueBytes -= dropped.length;
   }
   retryQueue.push(body);
+  retryQueueBytes += body.length;
   startOnlineListener();
   scheduleRetryDrain();
 }
@@ -164,6 +177,7 @@ function scheduleRetryDrain(): void {
 function drainQueue(): void {
   if (getConsent() !== "granted") return;
   const items = retryQueue.splice(0);
+  retryQueueBytes = 0;
   for (const body of items) {
     doFetch(body, 0);
   }
