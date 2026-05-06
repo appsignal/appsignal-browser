@@ -5,8 +5,11 @@ let origFetch: typeof window.fetch | null = null;
 let origXhrOpen: typeof XMLHttpRequest.prototype.open;
 let origXhrSend: typeof XMLHttpRequest.prototype.send | null = null;
 
-// Store trace IDs keyed by URL so breadcrumbs can attach them
-const pendingTraceIds = new Map<string, string>();
+// Store trace IDs as a FIFO queue per URL so breadcrumbs can attach them.
+// Concurrent same-URL fetches each record their own ID; consumers (the
+// breadcrumb wrapper) read in the same order they were recorded.
+const pendingTraceIds = new Map<string, string[]>();
+const MAX_PENDING_TRACES = 200;
 
 export function initTracing(tracePropagationTargets: string[]): void {
   targets = tracePropagationTargets;
@@ -16,11 +19,13 @@ export function initTracing(tracePropagationTargets: string[]): void {
   patchXhr();
 }
 
-/** Get and consume the trace ID generated for a request URL. */
+/** Get and consume the trace ID generated for a request URL. FIFO per URL. */
 export function consumeTraceId(url: string): string | undefined {
-  const traceId = pendingTraceIds.get(url);
-  if (traceId) pendingTraceIds.delete(url);
-  return traceId;
+  const queue = pendingTraceIds.get(url);
+  if (!queue || queue.length === 0) return undefined;
+  const id = queue.shift();
+  if (queue.length === 0) pendingTraceIds.delete(url);
+  return id;
 }
 
 function shouldPropagate(url: string): boolean {
@@ -44,11 +49,24 @@ function generateSpanId(): string {
 
 function recordTrace(url: string): string {
   const traceId = generateTraceId();
-  pendingTraceIds.set(url, traceId);
-  // Prevent unbounded growth
-  if (pendingTraceIds.size > 200) {
+  const queue = pendingTraceIds.get(url);
+  if (queue) {
+    queue.push(traceId);
+  } else {
+    pendingTraceIds.set(url, [traceId]);
+  }
+  // Bound total entries across all queues. Without this, requests whose
+  // breadcrumb never lands (cross-origin fetch with opaque response, fire-
+  // and-forget XHR) would accumulate indefinitely.
+  let total = 0;
+  for (const q of pendingTraceIds.values()) total += q.length;
+  if (total > MAX_PENDING_TRACES) {
     const firstKey = pendingTraceIds.keys().next().value;
-    if (firstKey) pendingTraceIds.delete(firstKey);
+    if (firstKey !== undefined) {
+      const q = pendingTraceIds.get(firstKey)!;
+      q.shift();
+      if (q.length === 0) pendingTraceIds.delete(firstKey);
+    }
   }
   return traceId;
 }
