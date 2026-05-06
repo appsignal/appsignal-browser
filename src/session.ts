@@ -73,12 +73,17 @@ export function getSessionId(): string {
   const stored = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
   if (stored > lastActivityMs) lastActivityMs = stored;
 
-  const now = Date.now();
-  const elapsed = now - lastActivityMs;
-  if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
-    newSession();
-  }
+  if (isInactive()) newSession();
   return currentSessionId!;
+}
+
+/** True when the inactivity window has elapsed since the last touch.
+ * Returns true on backward clock skew (elapsed < 0) so a clock that drifted
+ * backward still rotates the session rather than freezing it forever. */
+function isInactive(): boolean {
+  if (lastActivityMs <= 0) return false;
+  const elapsed = Date.now() - lastActivityMs;
+  return elapsed >= inactivityTimeoutMs || elapsed < 0;
 }
 
 export function getAnonymousId(): string {
@@ -118,12 +123,8 @@ export function endSession(): void {
 }
 
 export function touchActivity(): void {
-  // elapsed < 0 catches backward clock skew so the session can still expire.
+  if (isInactive()) newSession();
   const now = Date.now();
-  const elapsed = now - lastActivityMs;
-  if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
-    newSession();
-  }
   lastActivityMs = now;
   storage.setString(localStorage, LAST_ACTIVITY_KEY, String(now));
   resetInactivityTimer();
