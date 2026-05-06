@@ -198,32 +198,66 @@ export function destroySession(): void {
     storageHandler = null;
   }
   activityTrackingStarted = false;
+  staticContextFields = null;
+}
+
+// Stable for the lifetime of a page; cached lazily on first read so we don't
+// recompute Intl.DateTimeFormat on every payload (errors, event flushes,
+// replay chunks). Reset on destroySession so a re-init picks up changes
+// (test reloads, jsdom env mutations).
+interface StaticContextFields {
+  referrer: string;
+  user_agent: string;
+  screen_width: number;
+  screen_height: number;
+  language: string;
+  timezone: string;
+  device_memory?: number;
+}
+let staticContextFields: StaticContextFields | null = null;
+
+function getStaticContextFields(): StaticContextFields {
+  if (staticContextFields) return staticContextFields;
+  const fields: StaticContextFields = {
+    referrer: document.referrer,
+    user_agent: navigator.userAgent,
+    screen_width: screen.width,
+    screen_height: screen.height,
+    language: navigator.language,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+  const nav = navigator as unknown as Record<string, unknown>;
+  if (typeof nav.deviceMemory === "number") {
+    fields.device_memory = nav.deviceMemory as number;
+  }
+  staticContextFields = fields;
+  return fields;
 }
 
 export function getSessionContext(): SessionContext {
+  const stat = getStaticContextFields();
   const ctx: SessionContext = {
     session_id: getSessionId(),
     tab_id: getTabId(),
     anonymous_id: getAnonymousId(),
     page_url: location.href,
-    referrer: document.referrer,
-    user_agent: navigator.userAgent,
-    screen_width: screen.width,
-    screen_height: screen.height,
+    referrer: stat.referrer,
+    user_agent: stat.user_agent,
+    screen_width: stat.screen_width,
+    screen_height: stat.screen_height,
+    // Viewport changes on resize and orientation change; read live.
     viewport_width: window.innerWidth,
     viewport_height: window.innerHeight,
-    language: navigator.language,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    language: stat.language,
+    timezone: stat.timezone,
   };
+  if (stat.device_memory !== undefined) ctx.device_memory = stat.device_memory;
 
-  // Optional fields
+  // connection.effectiveType can shift mid-session (4G ↔ wifi); read live.
   const nav = navigator as unknown as Record<string, unknown>;
   const conn = nav.connection as Record<string, unknown> | undefined;
   if (conn?.effectiveType) {
     ctx.connection_type = conn.effectiveType as string;
-  }
-  if (typeof nav.deviceMemory === "number") {
-    ctx.device_memory = nav.deviceMemory as number;
   }
 
   // User context
