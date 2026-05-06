@@ -1,6 +1,7 @@
 import type { SessionContext, UserContext } from "./types.js";
 import { uuidv7 } from "uuidv7";
 import { storage } from "./utils.js";
+import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
 const ANON_KEY = "appsignal_anonymous_id";
@@ -136,7 +137,7 @@ function resetInactivityTimer(): void {
 }
 
 let activityHandler: (() => void) | null = null;
-let visibilityHandler: (() => void) | null = null;
+let unsubVisibility: (() => void) | null = null;
 let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ["click", "keydown", "scroll"];
 
@@ -149,18 +150,17 @@ function startActivityTracking(): void {
     });
   }
 
-  visibilityHandler = () => {
-    if (document.visibilityState === "hidden") {
+  unsubVisibility = onVisibilityChange((state) => {
+    if (state === "hidden") {
       currentSessionId = null;
-    } else if (document.visibilityState === "visible") {
+    } else if (state === "visible") {
       lastActivityMs = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
       if (Date.now() - lastActivityMs >= inactivityTimeoutMs) {
         currentSessionId = null;
         storage.remove(localStorage, SESSION_KEY);
       }
     }
-  };
-  document.addEventListener("visibilitychange", visibilityHandler);
+  });
 
   storageHandler = (e: StorageEvent) => {
     if (e.key === SESSION_KEY) {
@@ -188,9 +188,9 @@ export function destroySession(): void {
     }
     activityHandler = null;
   }
-  if (visibilityHandler) {
-    document.removeEventListener("visibilitychange", visibilityHandler);
-    visibilityHandler = null;
+  if (unsubVisibility) {
+    unsubVisibility();
+    unsubVisibility = null;
   }
   if (storageHandler) {
     window.removeEventListener("storage", storageHandler);

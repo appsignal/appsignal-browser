@@ -6,6 +6,7 @@ import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, filterQueryParams } from "./utils.js";
 import { getConsent } from "./consent.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
+import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
@@ -877,14 +878,13 @@ function initScrollDepth(): void {
 
   onBeforeNavigation(flushScrollDepth);
 
-  const scrollVisHandler = () => {
-    if (document.visibilityState === "hidden") flushScrollDepth();
-  };
-  document.addEventListener("visibilitychange", scrollVisHandler);
+  const offVis = onVisibilityChange((state) => {
+    if (state === "hidden") flushScrollDepth();
+  });
 
   cleanups.push(
     () => document.removeEventListener("scroll", scrollHandler, { capture: true }),
-    () => document.removeEventListener("visibilitychange", scrollVisHandler),
+    offVis,
   );
 }
 
@@ -984,17 +984,15 @@ function initUserTiming(): void {
 // --- Visibility tracking ---
 
 function initVisibility(): void {
-  const handler = () => {
-    const state = document.visibilityState;
+  const off = onVisibilityChange((state) => {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "visibility",
       message: `Tab became ${state}`,
       data: { state },
     });
-  };
-  document.addEventListener("visibilitychange", handler);
-  cleanups.push(() => document.removeEventListener("visibilitychange", handler));
+  });
+  cleanups.push(off);
 }
 
 // --- Tab lifecycle tracking ---
@@ -1008,17 +1006,16 @@ function initTabLifecycle(): void {
   });
 
   // pagehide is the cross-browser tab-close signal; beforeunload is unreliable on mobile.
-  // We don't branch on e.persisted — bfcache resumes will emit fresh breadcrumbs on the same tab_id.
-  const handler = () => {
+  // We don't branch on persisted — bfcache resumes will emit fresh breadcrumbs on the same tab_id.
+  const off = onPageHide(() => {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "tab",
       message: "Tab closed",
       data: { event: "close" },
     });
-  };
-  window.addEventListener("pagehide", handler);
-  cleanups.push(() => window.removeEventListener("pagehide", handler));
+  });
+  cleanups.push(off);
 }
 
 // --- Destroy ---
