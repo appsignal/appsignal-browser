@@ -24,7 +24,39 @@ export function initVitals(queryParamsAllowlist: string[]): void {
   // lifetime as they update, and pushOrReplaceVital keeps only the latest
   // per (metric, page) so we don't pollute parquet with intermediate rows.
   // FCP and TTFB fire once early in the page, so they don't need this.
-  onLCP((metric: LCPMetricWithAttribution) => {
+  onLCP(
+    reporter<LCPMetricWithAttribution>((m) => ({
+      element: m.attribution.element || undefined,
+    })),
+    { reportAllChanges: true },
+  );
+
+  onCLS(
+    reporter<CLSMetricWithAttribution>((m) => ({
+      element: m.attribution.largestShiftTarget || undefined,
+    })),
+    { reportAllChanges: true },
+  );
+
+  onINP(
+    reporter<INPMetricWithAttribution>((m) => ({
+      element: m.attribution.interactionTarget || undefined,
+      interaction_type: m.attribution.interactionType,
+    })),
+    { reportAllChanges: true },
+  );
+
+  // FCP/TTFB fire once each, with no per-target attribution to add.
+  onFCP(reporter<MetricWithAttribution>(() => ({})));
+  onTTFB(reporter<MetricWithAttribution>(() => ({})));
+}
+
+/** Build a web-vitals callback. The extractor adds metric-specific fields
+ * (element, interaction_type) on top of the common name/value/rating shape. */
+function reporter<T extends MetricWithAttribution>(
+  extract: (m: T) => Partial<VitalEntry>,
+): (metric: T) => void {
+  return (metric: T) => {
     if (destroyed) return;
     pushOrReplaceVital({
       name: `web.vital.${metric.name.toLowerCase()}`,
@@ -32,48 +64,9 @@ export function initVitals(queryParamsAllowlist: string[]): void {
       rating: metric.rating,
       page_url: filterQueryParams(location.href, allowlist),
       timestamp: Date.now(),
-      element: metric.attribution.element || undefined,
-    });
-  }, { reportAllChanges: true });
-
-  onCLS((metric: CLSMetricWithAttribution) => {
-    if (destroyed) return;
-    pushOrReplaceVital({
-      name: `web.vital.${metric.name.toLowerCase()}`,
-      value: metric.value,
-      rating: metric.rating,
-      page_url: filterQueryParams(location.href, allowlist),
-      timestamp: Date.now(),
-      element: metric.attribution.largestShiftTarget || undefined,
-    });
-  }, { reportAllChanges: true });
-
-  onINP((metric: INPMetricWithAttribution) => {
-    if (destroyed) return;
-    pushOrReplaceVital({
-      name: `web.vital.${metric.name.toLowerCase()}`,
-      value: metric.value,
-      rating: metric.rating,
-      page_url: filterQueryParams(location.href, allowlist),
-      timestamp: Date.now(),
-      element: metric.attribution.interactionTarget || undefined,
-      interaction_type: metric.attribution.interactionType,
-    });
-  }, { reportAllChanges: true });
-
-  const basicHandler = (metric: MetricWithAttribution) => {
-    if (destroyed) return;
-    collectedVitals.push({
-      name: `web.vital.${metric.name.toLowerCase()}`,
-      value: metric.value,
-      rating: metric.rating,
-      page_url: filterQueryParams(location.href, allowlist),
-      timestamp: Date.now(),
+      ...extract(metric),
     });
   };
-
-  onFCP(basicHandler);
-  onTTFB(basicHandler);
 }
 
 let destroyed = false;
