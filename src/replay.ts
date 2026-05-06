@@ -19,12 +19,14 @@ let eventSizes: number[] = [];
 let totalMemoryBytes = 0;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let maxRecordingTimer: ReturnType<typeof setTimeout> | null = null;
+let errorReplayTimer: ReturnType<typeof setTimeout> | null = null;
 let recordFn: ((opts: Record<string, unknown>) => (() => void) | undefined) | null = null;
 let replayVisibilityHandler: (() => void) | null = null;
 let replayPagehideHandler: EventListener | null = null;
 let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
+const ERROR_REPLAY_WINDOW_MS = 30_000;
 
 /** Map a session_id string to a stable float in [0, 1). FNV-1a over the
  * UUIDv7 string. The lower 64 bits of a UUIDv7 are random (rand_b), so the
@@ -132,7 +134,15 @@ export function applyReplaySampling(realConfig: ServerConfig["replay"]): void {
 }
 
 export function onError(): void {
+  // Sliding window: each error extends the post-error ship window. Without
+  // resetting hadError, a single error early in the session would cause every
+  // subsequent flush to ship for hours.
   hadError = true;
+  if (errorReplayTimer) clearTimeout(errorReplayTimer);
+  errorReplayTimer = setTimeout(() => {
+    hadError = false;
+    errorReplayTimer = null;
+  }, ERROR_REPLAY_WINDOW_MS);
 }
 
 async function startRecording(): Promise<void> {
@@ -246,6 +256,10 @@ function clearTimers(): void {
   if (maxRecordingTimer) {
     clearTimeout(maxRecordingTimer);
     maxRecordingTimer = null;
+  }
+  if (errorReplayTimer) {
+    clearTimeout(errorReplayTimer);
+    errorReplayTimer = null;
   }
 }
 

@@ -213,6 +213,33 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
+  it("error_replay window expires so a single early error doesn't ship the whole session", async () => {
+    // Without bounding, one onError() flips hadError true forever — every
+    // subsequent flush ships, so a single error 30 s into a 4-hour session
+    // uploads all 4 hours of replay. The window should re-close after a
+    // bounded post-error tail with no new errors.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    applyReplaySampling({ ...defaultReplayConfig(), sample_rate: 0, error_replay: true });
+
+    rrwebEmit!({ type: 3, data: "before error" });
+    onError();
+
+    vi.advanceTimersByTime(5000);
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    sendChunkMock.mockClear();
+
+    // Drift well past the post-error window with no new errors.
+    vi.advanceTimersByTime(60_000);
+
+    // New activity, no new error → must not ship.
+    rrwebEmit!({ type: 3, data: "long after window" });
+    vi.advanceTimersByTime(5000);
+
+    expect(sendChunkMock).not.toHaveBeenCalled();
+  });
+
   it("sampling decision is stable across reinit within the same session", async () => {
     // sessionRandom must be derived from session_id, not Math.random — otherwise
     // a multi-page app re-rolls on every page load and "% of sessions" becomes
