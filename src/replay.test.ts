@@ -213,6 +213,31 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
+  it("sampling decision is stable across reinit within the same session", async () => {
+    // sessionRandom must be derived from session_id, not Math.random — otherwise
+    // a multi-page app re-rolls on every page load and "% of sessions" becomes
+    // "% of page loads". With Math.random returning 0.1 then 0.9 against a
+    // sample_rate of 0.5, the bug gives sampled=true then sampled=false on the
+    // two inits; the fix gives the same decision both times.
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0.1)
+      .mockReturnValueOnce(0.9);
+
+    const config = { ...defaultReplayConfig(), sample_rate: 0.5 };
+
+    initReplay(config);
+    await vi.advanceTimersByTimeAsync(10);
+    const firstActive = rrwebEmit !== null;
+    rrwebEmit = null;
+    discardReplay();
+
+    initReplay(config);
+    await vi.advanceTimersByTimeAsync(10);
+    const secondActive = rrwebEmit !== null;
+
+    expect(secondActive).toBe(firstActive);
+  });
+
   it("does not flush empty buffer", async () => {
     initReplay(defaultReplayConfig());
     await vi.advanceTimersByTimeAsync(10);

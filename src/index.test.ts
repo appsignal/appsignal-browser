@@ -275,13 +275,15 @@ describe("SDK integration", () => {
 
   it("replay buffer is discarded when server config narrows sample_rate to exclude this session", async () => {
     // Fallback config has sample_rate 1.0 so recording starts immediately.
-    // When the real config narrows to 0.1, the per-session random roll is
-    // re-evaluated against the new threshold; if the session is no longer
+    // When the real config narrows to 0.5, the session-derived sampling roll
+    // is re-evaluated against the new threshold; if the session is no longer
     // sampled (and error_replay is off), the buffered events are discarded.
-    vi.spyOn(Math, "random").mockReturnValue(0.5); // 0.5 > 0.1 → not sampled
+    // session_id "sample-low" hashes to ≈0.7497, which sits above 0.5.
+    localStorage.setItem("appsignal_session_id", "sample-low");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
     serverConfigResponse = {
       ...DEFAULT_SERVER_CONFIG,
-      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1, error_replay: false },
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.5, error_replay: false },
     };
 
     init({ key: "test-key" });
@@ -307,7 +309,9 @@ describe("SDK integration", () => {
   });
 
   it("replay buffer is flushed when server config keeps the session sampled", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.05); // 0.05 < 0.1 → sampled
+    // session_id "s2" hashes to ≈0.0208, well below sample_rate 0.1.
+    localStorage.setItem("appsignal_session_id", "s2");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
     serverConfigResponse = {
       ...DEFAULT_SERVER_CONFIG,
       replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1 },
