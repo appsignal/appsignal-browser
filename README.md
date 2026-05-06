@@ -132,7 +132,7 @@ The fallback is safe and captures everything:
 
 During the config fetch window (~100ms), the plugin may collect slightly more than the server config allows (breadcrumbs from blocklisted URLs, errors at 100% vs. server rate). Acceptable: collecting too much briefly beats missing early session data.
 
-**Not honored at runtime after init.** The breadcrumb category toggles (`breadcrumbs.console`, `clicks`, `network`, `long_tasks`, `scroll_depth`, `form_abandonment`, `user_timing`) and `breadcrumbs.enabled` are wired only at init based on the fallback config. If the server config changes any of these from the fallback, the listeners stay attached and breadcrumbs of those categories continue to be collected for the rest of the page lifetime. To disable them, the server must return `enabled: false` (which tears down all collection) or the customer must redeploy with a different fallback. Future work may add runtime category gating.
+**Honored at runtime.** Every per-category breadcrumb toggle (`breadcrumbs.console`, `clicks`, `network`, `long_tasks`, `scroll_depth`, `form_abandonment`, `user_timing`) is gated inside its handler against the live config, so flipping a category off in server config takes effect on the next event without a reinit. Listeners stay attached either way — the gate is at the call site — keeping the cost of an "off" toggle to one branch per event. To stop *all* collection (not just breadcrumbs), the server returns top-level `enabled: false`, which tears down every collector.
 
 If the config request fails, the plugin continues with the fallback. Not cached across page loads; fetched fresh on every `init()`.
 
