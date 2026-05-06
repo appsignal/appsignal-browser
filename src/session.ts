@@ -1,5 +1,4 @@
 import type { SessionContext, UserContext } from "./types.js";
-import { uuidv7 } from "uuidv7";
 import { storage } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
@@ -30,7 +29,7 @@ export function initSession(timeoutMs: number): void {
 
 function ensureTabId(): void {
   if (!storage.getString(sessionStorage, TAB_KEY)) {
-    storage.setString(sessionStorage, TAB_KEY, uuidv7());
+    storage.setString(sessionStorage, TAB_KEY, crypto.randomUUID());
   }
 }
 
@@ -40,7 +39,7 @@ export function getTabId(): string {
 
 function ensureAnonymousId(): void {
   if (!storage.getString(localStorage, ANON_KEY)) {
-    storage.setString(localStorage, ANON_KEY, uuidv7());
+    storage.setString(localStorage, ANON_KEY, crypto.randomUUID());
   }
 }
 
@@ -58,7 +57,7 @@ function restoreOrCreateSession(): void {
 }
 
 function newSession(): void {
-  currentSessionId = uuidv7();
+  currentSessionId = crypto.randomUUID();
   storage.setString(localStorage, SESSION_KEY, currentSessionId);
   // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();
