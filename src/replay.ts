@@ -3,7 +3,7 @@ import { getSessionId, getTabId } from "./session.js";
 import { sendReplayChunk } from "./transport.js";
 import { getConsent, onConsentDenied, onConsentGranted } from "./consent.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
-import { storage } from "./utils.js";
+import { storage, seededRandom } from "./utils.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let config: ServerConfig["replay"];
@@ -27,22 +27,6 @@ let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
 const ERROR_REPLAY_WINDOW_MS = 30_000;
-
-/** Map a session_id string to a stable float in [0, 1). FNV-1a over the
- * UUIDv7 string. The lower 64 bits of a UUIDv7 are random (rand_b), so the
- * hash inherits enough entropy to spread evenly across the sampling space.
- * Using session_id rather than Math.random() makes the sampling decision
- * stable across page loads in one session — a multi-page app re-runs
- * initReplay on every navigation, and we want "% of sessions" semantics,
- * not "% of page loads". */
-function hashToFloat(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) / 0x100000000;
-}
 
 const chunkIndexKey = (sessionId: string, tabId: string) =>
   `appsignal_replay_chunk_index_${sessionId}_${tabId}`;
@@ -69,7 +53,7 @@ export function initReplay(
   if (!config.enabled) return;
 
   // Sampling roll, narrowed by applyReplaySampling() when server config arrives.
-  sessionRandom = hashToFloat(getSessionId());
+  sessionRandom = seededRandom(getSessionId());
   sampled = sessionRandom < config.sample_rate;
 
   if (sampled && getConsent() === "granted") {

@@ -61,3 +61,22 @@ export function globMatch(pattern: string, input: string): boolean {
     .replace(/⁑/g, ".*");
   return new RegExp(`^${regex}$`).test(input);
 }
+
+/** Deterministic Math.random() replacement keyed on a seed string. Returns a
+ * value uniformly distributed in [0, 1) — given any threshold T, exactly the
+ * fraction T of inputs hash below it. The same seed always produces the same
+ * output, which is what makes session-stable sampling work: every page load
+ * within a session lands on the same side of the threshold.
+ *
+ * Implemented as 32-bit FNV-1a over the input bytes, then divided by 2^32 to
+ * map into the unit interval. Math.imul keeps the multiplication in 32-bit
+ * unsigned space; (h >>> 0) coerces the signed result back to unsigned before
+ * the divide. */
+export function seededRandom(seed: string): number {
+  let h = 2166136261; // FNV offset basis
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619); // FNV prime
+  }
+  return (h >>> 0) / 0x100000000;
+}
