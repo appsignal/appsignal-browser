@@ -5,6 +5,7 @@ import { getConsent, onConsentDenied, onConsentGranted } from "./consent.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
 import { storage, seededRandom } from "./utils.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
+import { onErrorReported } from "./errors.js";
 
 let config: ServerConfig["replay"];
 let appVersion: string | undefined;
@@ -94,6 +95,11 @@ export function initReplay(
         startRecording();
       }
     });
+
+    // Trigger the post-error tail only for errors that actually shipped —
+    // errors.ts publishes after beforeSend approval, so dropped errors don't
+    // open the window.
+    lifecycleUnsubscribers.push(onErrorReported(() => onError()));
   }
 }
 

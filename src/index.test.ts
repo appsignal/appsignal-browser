@@ -362,6 +362,51 @@ describe("SDK integration", () => {
     expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
   });
 
+  it("beforeSend dropping the error also suppresses the error_replay tail", async () => {
+    // The error_replay window should fire only for errors that actually
+    // shipped. If beforeSend returns null, the error never reached the
+    // server — so the replay tail it would have triggered should also be
+    // suppressed. session_id "sample-low" hashes ≈0.7497, well above the
+    // sample_rate of 0; the only path to a replay flush is via hadError,
+    // which beforeSend's null return must prevent.
+    localStorage.setItem("appsignal_session_id", "sample-low");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
+    serverConfigResponse = {
+      ...DEFAULT_SERVER_CONFIG,
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0, error_replay: true },
+    };
+
+    init({
+      key: "test-key",
+      beforeSend: () => null,
+    });
+
+    // Wait for server config to apply (sampled=false, errorReplay=true).
+    await new Promise((r) => setTimeout(r, 50));
+
+    // rrweb dynamic-import resolves; emit some events so the buffer isn't empty.
+    rrwebEmit?.({ type: 1, data: "snapshot" });
+    rrwebEmit?.({ type: 3, data: "mutation" });
+
+    // Error fires; beforeSend drops it.
+    captureError(new Error("dropped by beforeSend"));
+
+    // endSession force-flushes the replay buffer via beacon.
+    endSession();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const replayPayloads = sentPayloads
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "replay");
+    expect(replayPayloads).toHaveLength(0);
+
+    // Sanity check: the error itself didn't ship either.
+    const errorPayloads = sentPayloads
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "error");
+    expect(errorPayloads).toHaveLength(0);
+  });
+
   it("destroy fully unwinds the fetch patch chain when tracing is enabled", async () => {
     // Both breadcrumbs and tracing patch window.fetch. Tracing patches *after*
     // breadcrumbs, so it is the outer wrapper. If destroy unwinds in the wrong

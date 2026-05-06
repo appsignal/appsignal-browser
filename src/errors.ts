@@ -2,8 +2,22 @@ import type { BrowserError, ServerConfig } from "./types.js";
 import { getSessionContext } from "./session.js";
 import { addBreadcrumb, getSnapshot } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { onError as notifyReplay } from "./replay.js";
 import { getConsent } from "./consent.js";
+
+// Subscribers fired after an error has cleared every gate (consent,
+// sample_rate, ignoreErrors, dedupe, beforeSend) and been handed to
+// transport. Other modules subscribe instead of being imperatively poked
+// from inside handleError — same pattern as onConsentDenied,
+// onBeforeNavigation, onAfterRequest, etc.
+const errorListeners: ((event: BrowserError) => void)[] = [];
+
+export function onErrorReported(fn: (event: BrowserError) => void): () => void {
+  errorListeners.push(fn);
+  return () => {
+    const i = errorListeners.indexOf(fn);
+    if (i >= 0) errorListeners.splice(i, 1);
+  };
+}
 
 let config: ServerConfig["errors"];
 let appVersion: string | undefined;
@@ -81,6 +95,7 @@ export function destroyErrors(): void {
   }
   dedupeWindow = [];
   lastErrorTimestamp = 0;
+  errorListeners.length = 0;
 }
 
 /** Report an error through the full pipeline. Used by captureError for framework plugins. */
@@ -134,9 +149,6 @@ function handleError(
   const dedupeKey = dedupeKeyFor(message, stack);
   if (checkDedupe(dedupeKey, now)) return;
 
-  // Notify replay that an error occurred
-  notifyReplay();
-
   let payload: BrowserError | null = {
     type: "error",
     timestamp: now,
@@ -152,7 +164,9 @@ function handleError(
     context,
   };
 
-  // beforeSend hook
+  // beforeSend hook — runs before subscribers so a dropped error doesn't
+  // trigger downstream side effects (e.g. replay shipping its post-error
+  // tail for an error the user explicitly suppressed).
   if (beforeSendHook) {
     const result = beforeSendHook(payload);
     if (!result) return;
@@ -160,6 +174,10 @@ function handleError(
   }
 
   sendError(payload);
+
+  for (const l of errorListeners) {
+    try { l(payload); } catch { /* don't break the chain */ }
+  }
 }
 
 const SDK_MARKERS = ["@appsignal/browser", "browser.umd.js", "browser.esm.js"];

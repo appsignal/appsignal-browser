@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { initErrors, destroyErrors, getLastErrorTimestamp } from "./errors.js";
+import {
+  initErrors,
+  destroyErrors,
+  getLastErrorTimestamp,
+  onErrorReported,
+} from "./errors.js";
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
 import * as session from "./session.js";
-import * as replay from "./replay.js";
 import type { BrowserError } from "./types.js";
 
 vi.mock("./transport.js", () => ({
@@ -31,12 +35,7 @@ vi.mock("./session.js", () => ({
   })),
 }));
 
-vi.mock("./replay.js", () => ({
-  onError: vi.fn(),
-}));
-
 const sendErrorMock = transport.sendError as ReturnType<typeof vi.fn>;
-const replayOnError = replay.onError as ReturnType<typeof vi.fn>;
 const addBreadcrumbMock = breadcrumbs.addBreadcrumb as ReturnType<typeof vi.fn>;
 
 function fireError(message: string, stack?: string): void {
@@ -56,7 +55,6 @@ describe("errors", () => {
     // each test starts from zero and assertions can use direct counts.
     destroyErrors();
     sendErrorMock.mockClear();
-    replayOnError.mockClear();
     addBreadcrumbMock.mockClear();
   });
 
@@ -190,11 +188,30 @@ describe("errors", () => {
     expect(ts).toBeLessThanOrEqual(after);
   });
 
-  it("notifies replay on error", () => {
+  it("notifies onErrorReported subscribers after the error has shipped", () => {
     initErrors({ enabled: true, sample_rate: 1.0 });
-    fireError("replay notify test");
+    const subscriber = vi.fn();
+    onErrorReported(subscriber);
 
-    expect(replayOnError).toHaveBeenCalledTimes(1);
+    fireError("subscriber test");
+
+    expect(subscriber).toHaveBeenCalledTimes(1);
+    expect(subscriber.mock.calls[0][0].message).toBe("subscriber test");
+  });
+
+  it("does not notify subscribers when beforeSend drops the error", () => {
+    initErrors(
+      { enabled: true, sample_rate: 1.0 },
+      undefined,
+      () => null,
+    );
+    const subscriber = vi.fn();
+    onErrorReported(subscriber);
+
+    fireError("dropped by beforeSend");
+
+    expect(sendErrorMock).not.toHaveBeenCalled();
+    expect(subscriber).not.toHaveBeenCalled();
   });
 
   it("adds error breadcrumb", () => {
