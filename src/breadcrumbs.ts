@@ -5,15 +5,13 @@ import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, filterQueryParams } from "./utils.js";
 import { getConsent } from "./consent.js";
+import { onAfterRequest, type RequestResult } from "./network-hook.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
 let collectEndpoint = "";
 
 // Original references for patching
-let origFetch: typeof fetch;
-let origXhrOpen: typeof XMLHttpRequest.prototype.open;
-let origXhrSend: typeof XMLHttpRequest.prototype.send;
 let origConsoleWarn: typeof console.warn;
 let origConsoleError: typeof console.error;
 
@@ -601,209 +599,110 @@ function truncateBody(
 }
 
 function initNetwork(): void {
-  // Patch fetch
-  origFetch = window.fetch.bind(window);
-  window.fetch = async function (input, init) {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url;
-
-    if (!config.network || isCollectEndpoint(url) || isBlocklisted(url)) {
-      return origFetch(input, init);
-    }
-
-    const method = init?.method || "GET";
-    const start = Date.now();
-    let requestBody: string | undefined;
-
-    // Capture request body if enabled
-    if (
-      config.network_payloads.enabled &&
-      config.network_payloads.request_body &&
-      init?.body &&
-      typeof init.body === "string"
-    ) {
-      requestBody = init.body;
-    }
-
-    try {
-      const response = await origFetch(input, init);
-      const duration = Date.now() - start;
-      const data: Record<string, unknown> = {
-        initiator: "fetch",
-        method,
-        url: filterQueryParams(url, config.query_params_allowlist),
-        status: response.status,
-        duration,
-      };
-
-      // Attach trace ID if distributed tracing generated one for this request
-      const traceId = consumeTraceId(url);
-      if (traceId) data.trace_id = traceId;
-
-      // Capture response body if enabled
-      if (
-        config.network_payloads.enabled &&
-        config.network_payloads.response_body &&
-        shouldCapturePayload(response.headers.get("content-type"))
-      ) {
-        try {
-          const cloned = response.clone();
-          const text = await cloned.text();
-          const result = truncateBody(text);
-          data.response_body = result.body;
-          if (result.truncated) data.truncated = true;
-        } catch {
-          // Ignore body read failures
-        }
-      }
-
-      if (requestBody && config.network_payloads.enabled) {
-        const result = truncateBody(requestBody);
-        data.request_body = result.body;
-        if (result.truncated) data.request_truncated = true;
-      }
-
-      // Try synchronous lookup first, fall back to async (observer may not have fired yet)
-      const rt = getResourceTiming(url);
-      if (rt) {
-        data.resource_timing = rt;
-      } else {
-        setTimeout(() => {
-          const timing = getResourceTiming(url);
-          if (timing) data.resource_timing = timing;
-        }, 150);
-      }
-
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} ${response.status}`,
-        data,
-      });
-      touchActivity();
-      return response;
-    } catch (err) {
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} (error)`,
-        data: { initiator: "fetch", method, url: filterQueryParams(url, config.query_params_allowlist), error: true },
-      });
-      throw err;
-    }
-  };
-
-  // Patch XMLHttpRequest
-  origXhrOpen = XMLHttpRequest.prototype.open;
-  origXhrSend = XMLHttpRequest.prototype.send;
-
-  XMLHttpRequest.prototype.open = function (
-    method: string,
-    url: string | URL,
-    ...rest: unknown[]
-  ) {
-    (this as XMLHttpRequest & { _asMethod: string; _asUrl: string })._asMethod =
-      method;
-    (this as XMLHttpRequest & { _asUrl: string })._asUrl =
-      typeof url === "string" ? url : url.href;
-    return origXhrOpen.call(this, method, url, ...(rest as [boolean, string?, string?]));
-  };
-
-  XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
-    const xhr = this as XMLHttpRequest & {
-      _asMethod: string;
-      _asUrl: string;
-    };
-    const url = xhr._asUrl;
-
-    if (!config.network || !url || isCollectEndpoint(url) || isBlocklisted(url)) {
-      return origXhrSend.call(this, body);
-    }
-
-    const method = xhr._asMethod || "GET";
-    const start = Date.now();
-
-    // Capture request body if enabled
-    let requestBody: string | undefined;
-    if (
-      config.network_payloads.enabled &&
-      config.network_payloads.request_body &&
-      body &&
-      typeof body === "string"
-    ) {
-      requestBody = body;
-    }
-
-    xhr.addEventListener("load", () => {
-      const duration = Date.now() - start;
-      const data: Record<string, unknown> = {
-        initiator: "xhr",
-        method,
-        url: filterQueryParams(url, config.query_params_allowlist),
-        status: xhr.status,
-        duration,
-      };
-
-      // Attach trace ID if distributed tracing generated one for this request
-      const traceId = consumeTraceId(url);
-      if (traceId) data.trace_id = traceId;
-
-      if (
-        config.network_payloads.enabled &&
-        config.network_payloads.response_body &&
-        shouldCapturePayload(xhr.getResponseHeader("content-type"))
-      ) {
-        try {
-          const result = truncateBody(xhr.responseText);
-          data.response_body = result.body;
-          if (result.truncated) data.truncated = true;
-        } catch {
-          // Ignore
-        }
-      }
-
-      if (requestBody && config.network_payloads.enabled) {
-        const result = truncateBody(requestBody);
-        data.request_body = result.body;
-        if (result.truncated) data.request_truncated = true;
-      }
-
-      // Enrich with resource timing after a microtask
-      setTimeout(() => {
-        const timing = getResourceTiming(url);
-        if (timing) data.resource_timing = timing;
-      }, 0);
-
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} ${xhr.status}`,
-        data,
-      });
-      touchActivity();
-    });
-
-    xhr.addEventListener("error", () => {
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} (error)`,
-        data: { initiator: "xhr", method, url: filterQueryParams(url, config.query_params_allowlist), error: true },
-      });
-    });
-
-    return origXhrSend.call(this, body);
-  };
-
-  cleanups.push(() => {
-    window.fetch = origFetch;
-    XMLHttpRequest.prototype.open = origXhrOpen;
-    XMLHttpRequest.prototype.send = origXhrSend;
+  const offAfter = onAfterRequest((result) => {
+    if (!config.network) return;
+    if (isCollectEndpoint(result.url) || isBlocklisted(result.url)) return;
+    recordNetworkBreadcrumb(result);
   });
+  cleanups.push(offAfter);
+}
+
+function recordNetworkBreadcrumb(result: RequestResult): void {
+  const initiator = result.xhr ? "xhr" : "fetch";
+  const filteredUrl = filterQueryParams(result.url, config.query_params_allowlist);
+
+  if (result.error && result.status === undefined) {
+    // Network error — no response received
+    addBreadcrumb({
+      timestamp: result.startTime,
+      category: "network",
+      message: `${result.method} ${filteredUrl} (error)`,
+      data: { initiator, method: result.method, url: filteredUrl, error: true },
+    });
+    return;
+  }
+
+  const data: Record<string, unknown> = {
+    initiator,
+    method: result.method,
+    url: filteredUrl,
+    status: result.status,
+    duration: result.endTime - result.startTime,
+  };
+
+  const traceId = consumeTraceId(result.url);
+  if (traceId) data.trace_id = traceId;
+
+  if (
+    result.requestBody &&
+    config.network_payloads.enabled &&
+    config.network_payloads.request_body
+  ) {
+    const truncated = truncateBody(result.requestBody);
+    data.request_body = truncated.body;
+    if (truncated.truncated) data.request_truncated = true;
+  }
+
+  // Resource timing — sync first, fall back to a short async retry since the
+  // PerformanceObserver may not have flushed the entry yet.
+  const rt = getResourceTiming(result.url);
+  if (rt) {
+    data.resource_timing = rt;
+  } else {
+    setTimeout(() => {
+      const timing = getResourceTiming(result.url);
+      if (timing) data.resource_timing = timing;
+    }, 150);
+  }
+
+  // Response body — XHR is sync, fetch needs an async clone+read. Add the
+  // breadcrumb synchronously without the body, then patch the body in once
+  // it's read; ordering on the consumer doesn't change because the breadcrumb
+  // is anchored on startTime.
+  if (
+    result.xhr &&
+    config.network_payloads.enabled &&
+    config.network_payloads.response_body &&
+    shouldCapturePayload(result.xhr.getResponseHeader("content-type"))
+  ) {
+    try {
+      const truncated = truncateBody(result.xhr.responseText);
+      data.response_body = truncated.body;
+      if (truncated.truncated) data.truncated = true;
+    } catch {
+      // ignore
+    }
+  } else if (
+    result.response &&
+    config.network_payloads.enabled &&
+    config.network_payloads.response_body &&
+    shouldCapturePayload(result.response.headers.get("content-type"))
+  ) {
+    result.response
+      .clone()
+      .text()
+      .then((text) => {
+        const truncated = truncateBody(text);
+        data.response_body = truncated.body;
+        if (truncated.truncated) data.truncated = true;
+      })
+      .catch(() => {
+        // ignore body read failures
+      });
+  }
+
+  const message = result.error
+    ? `${result.method} ${filteredUrl} (error)`
+    : `${result.method} ${filteredUrl} ${result.status}`;
+
+  addBreadcrumb({
+    timestamp: result.startTime,
+    category: "network",
+    message,
+    data,
+  });
+
+  if (!result.error) touchActivity();
 }
 
 // --- Console tracking ---

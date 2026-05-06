@@ -8,6 +8,7 @@ import { initReplay, applyReplaySampling, destroyReplay, discardReplay, flushRep
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
+import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { setConsent as setConsentState, getConsent, onConsentDenied, destroyConsent } from "./consent.js";
 import type { ConsentState } from "./consent.js";
 
@@ -146,6 +147,10 @@ function startCollection(endpoint: string): void {
   const cfg = DEFAULT_SERVER_CONFIG;
 
   initSession(cfg.session.inactivity_timeout_ms);
+  // Patch fetch/XHR once. Breadcrumbs and tracing both subscribe to the
+  // hook instead of patching independently — that's what made destroy order
+  // load-bearing.
+  initNetworkHook();
   initBreadcrumbs(cfg.breadcrumbs, endpoint + COLLECT_PATH);
   initErrors(
     cfg.errors,
@@ -214,15 +219,14 @@ function applyServerConfig(cfg: ServerConfig): void {
 }
 
 function stopCollection(): void {
-  // Unwind the fetch/XHR patch chain from the outside in. Breadcrumbs is
-  // patched first in startCollection, then tracing — so tracing is the outer
-  // wrapper and must be removed first, otherwise window.fetch is left
-  // pointing at the orphaned breadcrumbs wrapper.
+  // Unregister listeners before tearing down the hook so the hook doesn't
+  // call into half-destroyed modules during in-flight requests.
   destroyReplay();
   destroyTracing();
   destroyBreadcrumbs();
   destroyErrors();
   destroyVitals();
+  destroyNetworkHook();
 
   if (flushTimer) {
     clearInterval(flushTimer);

@@ -1,9 +1,8 @@
 import { safeUrl, globMatch } from "./utils.js";
+import { onBeforeRequest } from "./network-hook.js";
 
 let targets: string[] = [];
-let origFetch: typeof window.fetch | null = null;
-let origXhrOpen: typeof XMLHttpRequest.prototype.open;
-let origXhrSend: typeof XMLHttpRequest.prototype.send | null = null;
+let unregister: (() => void) | null = null;
 
 // Store trace IDs as a FIFO queue per URL so breadcrumbs can attach them.
 // Concurrent same-URL fetches each record their own ID; consumers (the
@@ -15,8 +14,12 @@ export function initTracing(tracePropagationTargets: string[]): void {
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
 
-  patchFetch();
-  patchXhr();
+  unregister = onBeforeRequest((ctx) => {
+    if (!shouldPropagate(ctx.url)) return;
+    const traceId = recordTrace(ctx.url);
+    const spanId = generateSpanId();
+    ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+  });
 }
 
 /** Get and consume the trace ID generated for a request URL. FIFO per URL. */
@@ -71,72 +74,11 @@ function recordTrace(url: string): string {
   return traceId;
 }
 
-function patchFetch(): void {
-  origFetch = window.fetch;
-  const currentFetch = window.fetch;
-  window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url;
-
-    if (!shouldPropagate(url)) {
-      return currentFetch.call(window, input, init);
-    }
-
-    const traceId = recordTrace(url);
-    const spanId = generateSpanId();
-    const traceparent = `00-${traceId}-${spanId}-01`;
-    const headers = new Headers(init?.headers);
-    headers.set("traceparent", traceparent);
-
-    return currentFetch.call(window, input, { ...init, headers });
-  };
-}
-
-function patchXhr(): void {
-  origXhrOpen = XMLHttpRequest.prototype.open;
-  origXhrSend = XMLHttpRequest.prototype.send;
-
-  const origSend = XMLHttpRequest.prototype.send;
-
-  XMLHttpRequest.prototype.open = function (
-    method: string,
-    url: string | URL,
-    ...rest: unknown[]
-  ) {
-    (this as XMLHttpRequest & { _traceUrl: string })._traceUrl =
-      typeof url === "string" ? url : url.href;
-    return origXhrOpen.call(this, method, url, ...(rest as [boolean, string?, string?]));
-  };
-
-  XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
-    const xhr = this as XMLHttpRequest & { _traceUrl: string };
-    if (xhr._traceUrl && shouldPropagate(xhr._traceUrl)) {
-      const traceId = recordTrace(xhr._traceUrl);
-      const spanId = generateSpanId();
-      const traceparent = `00-${traceId}-${spanId}-01`;
-      xhr.setRequestHeader("traceparent", traceparent);
-    }
-    return origSend.call(this, body);
-  };
-}
-
 export function destroyTracing(): void {
-  if (origFetch) {
-    window.fetch = origFetch;
-    origFetch = null;
-  }
-  if (origXhrOpen) {
-    XMLHttpRequest.prototype.open = origXhrOpen;
-  }
-  if (origXhrSend) {
-    XMLHttpRequest.prototype.send = origXhrSend;
-    origXhrSend = null;
+  if (unregister) {
+    unregister();
+    unregister = null;
   }
   targets = [];
   pendingTraceIds.clear();
 }
-
