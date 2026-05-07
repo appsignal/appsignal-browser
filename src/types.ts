@@ -51,14 +51,10 @@ export interface ServerConfig {
     enabled: boolean;
     sample_rate: number;
     error_replay: boolean;
-    /** How long the post-error ship window stays open after each error.
-     * Each new error within the window slides it forward. */
-    error_replay_window_ms: number;
     mask_all_inputs: boolean;
     mask_selectors: string[];
     block_selectors: string[];
     max_duration_ms: number;
-    checkout_interval_ms: number;
   };
   session: { inactivity_timeout_ms: number };
 }
@@ -170,12 +166,10 @@ export const DEFAULT_SERVER_CONFIG: ServerConfig = {
     enabled: true,
     sample_rate: 1.0,
     error_replay: true,
-    error_replay_window_ms: 30_000,
     mask_all_inputs: true,
     mask_selectors: [],
     block_selectors: [],
     max_duration_ms: 14_400_000, // 4 hours
-    checkout_interval_ms: 60_000, // 1 minute
   },
   session: { inactivity_timeout_ms: 1_800_000 },
 };

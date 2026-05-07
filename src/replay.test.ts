@@ -134,10 +134,15 @@ describe("replay", () => {
 
     rrwebEmit!({ type: 3, data: "before error" });
     onError();
-    rrwebEmit!({ type: 3, data: "after error" });
-
-    vi.advanceTimersByTime(5000);
+    // First chunk shipped immediately at the error: pre-error context.
     expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    expect(sendChunkMock.mock.calls[0][0].events).toContainEqual({ type: 3, data: "before error" });
+
+    // Activity during the post-error tail keeps shipping.
+    rrwebEmit!({ type: 3, data: "after error" });
+    vi.advanceTimersByTime(5000);
+    expect(sendChunkMock).toHaveBeenCalledTimes(2);
+    expect(sendChunkMock.mock.calls[1][0].events).toContainEqual({ type: 3, data: "after error" });
   });
 
   it("discards buffer without flushing", async () => {
@@ -213,41 +218,11 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
-  it("respects a server-configured error_replay_window_ms", async () => {
-    // The post-error ship window should be tunable via server config, not
-    // baked in. With a 10 s window, a flush 15 s after the error (with no
-    // new error) must not ship — a hardcoded 30 s default would still ship.
-    initReplay(defaultReplayConfig());
-    await vi.advanceTimersByTimeAsync(10);
-
-    applyReplaySampling({
-      ...defaultReplayConfig(),
-      sample_rate: 0,
-      error_replay: true,
-      error_replay_window_ms: 10_000,
-    });
-
-    rrwebEmit!({ type: 3, data: "before error" });
-    onError();
-
-    vi.advanceTimersByTime(5000);
-    expect(sendChunkMock).toHaveBeenCalledTimes(1);
-    sendChunkMock.mockClear();
-
-    // Past the configured 10 s window (default would still be 30 s).
-    vi.advanceTimersByTime(11_000);
-
-    rrwebEmit!({ type: 3, data: "after window" });
-    vi.advanceTimersByTime(5000);
-
-    expect(sendChunkMock).not.toHaveBeenCalled();
-  });
-
-  it("error_replay window expires so a single early error doesn't ship the whole session", async () => {
+  it("post-error tail expires so a single early error doesn't ship the whole session", async () => {
     // Without bounding, one onError() flips hadError true forever — every
     // subsequent flush ships, so a single error 30 s into a 4-hour session
-    // uploads all 4 hours of replay. The window should re-close after a
-    // bounded post-error tail with no new errors.
+    // uploads all 4 hours of replay. The post-error tail must re-close
+    // after a bounded window with no new errors.
     initReplay(defaultReplayConfig());
     await vi.advanceTimersByTimeAsync(10);
 
@@ -256,7 +231,7 @@ describe("replay", () => {
     rrwebEmit!({ type: 3, data: "before error" });
     onError();
 
-    vi.advanceTimersByTime(5000);
+    // Immediate flush of pre-error context.
     expect(sendChunkMock).toHaveBeenCalledTimes(1);
     sendChunkMock.mockClear();
 
@@ -268,6 +243,42 @@ describe("replay", () => {
     vi.advanceTimersByTime(5000);
 
     expect(sendChunkMock).not.toHaveBeenCalled();
+  });
+
+  it("absorbs additional errors that fire during the active post-error tail", async () => {
+    // Each error opens a single fixed window. Errors that land while the
+    // tail is still active are absorbed — they don't trigger a fresh flush
+    // or extend the window. This bounds per-session upload for cascading
+    // errors. The first error's tail keeps shipping subsequent activity
+    // anyway, so the second error's context is already captured.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    applyReplaySampling({ ...defaultReplayConfig(), sample_rate: 0, error_replay: true });
+
+    rrwebEmit!({ type: 3, data: "first" });
+    onError();
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+
+    // Second error 2 s into the 5 s tail. Should NOT trigger another
+    // immediate flush — buffer is empty anyway, but the absorb policy
+    // means even if there were buffered events, no fresh flush fires.
+    vi.advanceTimersByTime(2000);
+    rrwebEmit!({ type: 3, data: "second" });
+    onError();
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+
+    // The original tail still ships subsequent activity via flushTimer.
+    vi.advanceTimersByTime(3000); // total 5 s after first error → tail closes
+    expect(sendChunkMock).toHaveBeenCalledTimes(2);
+    expect(sendChunkMock.mock.calls[1][0].events).toContainEqual({ type: 3, data: "second" });
+
+    // After tail closes, a fresh error opens a new window.
+    sendChunkMock.mockClear();
+    vi.advanceTimersByTime(10_000);
+    rrwebEmit!({ type: 3, data: "third" });
+    onError();
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
   });
 
   it("sampling decision is stable across reinit within the same session", async () => {
