@@ -17,10 +17,11 @@ let sampled = true;
 let errorReplayEnabled = false;
 let hadError = false;
 // Holds rrweb events since the most recent FullSnapshot. Capped naturally by
-// CHECKOUT_INTERVAL_MS — on every checkout the buffer is reset (and either
-// shipped, for sampled sessions, or dropped, for unsampled ones). Anything
-// older than the last checkout is unrenderable on the server because the
-// FullSnapshot it depended on is gone, so there's no value in keeping it.
+// FULL_SNAPSHOT_INTERVAL_MS — on every full-snapshot boundary the buffer is
+// reset (and either shipped, for sampled sessions, or dropped, for unsampled
+// ones). Anything older than the last full snapshot is unrenderable on the
+// server because the FullSnapshot it depended on is gone, so there's no value
+// in keeping it.
 let eventBuffer: unknown[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let maxRecordingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -31,10 +32,10 @@ let listenersRegistered = false;
 
 // Implementation details, not server-tunable. The pre-error window the
 // unsampled+error_replay path captures is implicitly equal to
-// CHECKOUT_INTERVAL_MS (the buffer holds events since the latest FullSnapshot).
+// FULL_SNAPSHOT_INTERVAL_MS (the buffer holds events since the latest FullSnapshot).
 // POST_ERROR_TAIL_MS is how long we keep shipping after an error so the
 // immediate user reaction lands in the replay too.
-const CHECKOUT_INTERVAL_MS = 60_000;
+const FULL_SNAPSHOT_INTERVAL_MS = 60_000;
 const POST_ERROR_TAIL_MS = 5_000;
 const FLUSH_INTERVAL_MS = 5_000;
 
@@ -159,10 +160,11 @@ async function startRecording(): Promise<void> {
         if (isCheckout) {
           // rrweb is about to push a fresh FullSnapshot. The previous
           // chunk's events are still anchored on the *old* FullSnapshot;
-          // for sampled sessions we ship them now (one chunk per checkout
-          // window). For unsampled sessions the previous events are
-          // unrenderable without the old snapshot we're about to lose, so
-          // we drop them — the replay starts fresh from this checkout.
+          // for sampled sessions we ship them now (one chunk per
+          // full-snapshot interval). For unsampled sessions the previous
+          // events are unrenderable without the old snapshot we're about
+          // to lose, so we drop them — replay starts fresh from this
+          // boundary.
           if (sampled && eventBuffer.length > 0) {
             flushChunk();
           } else {
@@ -171,7 +173,9 @@ async function startRecording(): Promise<void> {
         }
         eventBuffer.push(event);
       },
-      checkoutEveryNms: CHECKOUT_INTERVAL_MS,
+      // rrweb's API uses "checkout" terminology for what we call a
+      // full-snapshot interval — same concept, different word.
+      checkoutEveryNms: FULL_SNAPSHOT_INTERVAL_MS,
       maskAllInputs: config.mask_all_inputs,
       maskTextSelector: config.mask_selectors.length
         ? config.mask_selectors.join(", ")
