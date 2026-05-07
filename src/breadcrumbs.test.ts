@@ -179,6 +179,43 @@ describe("breadcrumbs", () => {
       expect(networkCrumb!.data?.error).toBeUndefined();
     });
 
+    it("does not push the breadcrumb until deferred work (body, resource_timing) has settled", async () => {
+      // The fix in 4538dd3 awaits resource-timing lookup before
+      // addBreadcrumb, mirroring the body-capture fix. A regression to the
+      // old setTimeout-and-mutate pattern would re-open a window where a
+      // flush between fetch resolution and the timing entry's arrival
+      // would serialise an incomplete breadcrumb. Catch that by asserting
+      // that draining immediately after the user's fetch resolves returns
+      // no network crumb yet.
+      window.fetch = async () =>
+        new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        "http://localhost/ingest/browser",
+      );
+
+      await window.fetch("http://example.com/api/sync");
+
+      // recordNetworkBreadcrumb is suspended on `await response.clone().text()`
+      // (and then the resource-timing await) — the breadcrumb must not be in
+      // the buffer yet.
+      const drainedNetwork = drainBreadcrumbs().filter(
+        (b) => b.category === "network",
+      );
+      expect(drainedNetwork).toHaveLength(0);
+
+      // Past the 150 ms resource-timing await, the breadcrumb lands.
+      await new Promise((r) => setTimeout(r, 200));
+      const eventual = getSnapshot().filter((b) => b.category === "network");
+      expect(eventual).toHaveLength(1);
+      expect(eventual[0].data?.status).toBe(200);
+    });
+
     it("emits '(error)' only for true transport failures", async () => {
       window.fetch = async () => {
         throw new TypeError("Network error");
