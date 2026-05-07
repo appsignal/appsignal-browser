@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AppSignal Browser SDK · e2e fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
+      button { display: block; margin: 0.5rem 0; padding: 0.5rem 1rem; }
+      pre { background: #f3f3f3; padding: 0.75rem; font-size: 0.85rem; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>SDK e2e fixture</h1>
+    <p>This page is loaded by Playwright tests. The SDK init reads config from URL params:</p>
+    <ul>
+      <li><code>?key=...</code> — ingestion key (default <code>e2e</code>)</li>
+      <li><code>?tracePropagationTargets=glob,glob</code> — comma-separated globs</li>
+      <li><code>?beforeSendDrops=1</code> — install a <code>beforeSend</code> that returns null</li>
+      <li><code>?ignoreErrors=foo,bar</code> — comma-separated patterns</li>
+    </ul>
+
+    <button id="trigger-fetch">fetch /api/echo (200)</button>
+    <button id="trigger-fetch-404">fetch /api/echo?status=404</button>
+    <button id="trigger-fetch-error">fetch /api/does-not-exist (network error)</button>
+    <button id="throw-error">throw an Error</button>
+    <button id="capture-error">captureError(...)</button>
+    <button id="add-breadcrumb">addBreadcrumb(...)</button>
+    <button id="flush">flush()</button>
+
+    <pre id="status">SDK loading…</pre>
+
+    <script src="/dist/browser.umd.js"></script>
+    <script>
+      (function () {
+        const params = new URLSearchParams(location.search);
+        const config = {
+          key: params.get("key") ?? "e2e",
+          endpoint: location.origin,
+        };
+        if (params.has("tracePropagationTargets")) {
+          config.tracePropagationTargets = params.get("tracePropagationTargets").split(",");
+        }
+        if (params.get("beforeSendDrops") === "1") {
+          config.beforeSend = function () { return null; };
+        }
+        if (params.has("ignoreErrors")) {
+          config.ignoreErrors = params.get("ignoreErrors").split(",");
+        }
+
+        AppsignalBrowser.init(config);
+        document.getElementById("status").textContent =
+          "SDK initialised with: " + JSON.stringify(config);
+
+        document.getElementById("trigger-fetch").addEventListener("click", function () {
+          fetch("/api/echo");
+        });
+        document.getElementById("trigger-fetch-404").addEventListener("click", function () {
+          fetch("/api/echo?status=404");
+        });
+        document.getElementById("trigger-fetch-error").addEventListener("click", function () {
+          // hit a non-existent host so the fetch rejects rather than 404s
+          fetch("http://localhost:1/no-such-server").catch(function () {});
+        });
+        document.getElementById("throw-error").addEventListener("click", function () {
+          // Async to escape the click handler — window.onerror needs an
+          // uncaught throw on the event loop.
+          setTimeout(function () { throw new Error("e2e thrown error"); }, 0);
+        });
+        document.getElementById("capture-error").addEventListener("click", function () {
+          AppsignalBrowser.captureError(new Error("e2e captured error"));
+        });
+        document.getElementById("add-breadcrumb").addEventListener("click", function () {
+          AppsignalBrowser.addBreadcrumb({
+            category: "test",
+            message: "manual breadcrumb",
+            data: { from: "e2e" },
+          });
+        });
+        document.getElementById("flush").addEventListener("click", function () {
+          AppsignalBrowser.flush();
+        });
+      })();
+    </script>
+  </body>
+</html>
