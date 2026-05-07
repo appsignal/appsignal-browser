@@ -17,12 +17,15 @@
     }
   },
   "files": ["dist"],
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "scripts": {
     "build": "tsc && node build.mjs",
     "prepare": "bun run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "bun run build && bunx --bun playwright test",
+    "test:e2e": "bun run build && playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
