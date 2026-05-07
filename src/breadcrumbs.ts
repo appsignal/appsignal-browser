@@ -5,15 +5,14 @@ import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, filterQueryParams } from "./utils.js";
 import { getConsent } from "./consent.js";
+import { onAfterRequest, type RequestResult } from "./network-hook.js";
+import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
 let collectEndpoint = "";
 
 // Original references for patching
-let origFetch: typeof fetch;
-let origXhrOpen: typeof XMLHttpRequest.prototype.open;
-let origXhrSend: typeof XMLHttpRequest.prototype.send;
 let origConsoleWarn: typeof console.warn;
 let origConsoleError: typeof console.error;
 
@@ -70,22 +69,35 @@ export function initBreadcrumbs(
   collectEndpoint = endpoint;
   buffer = new RingBuffer<Breadcrumb>(config.capacity);
 
-  if (config.clicks) initClicks();
+  // Register all collectors unconditionally — each handler reads the
+  // module-level `config` and short-circuits when its category is off.
+  // Gating at registration time would freeze the toggles at init, so a
+  // remote config narrowing (e.g. disable clicks) couldn't take effect
+  // without an SDK reinit.
+  initClicks();
   initNavigation();
   if (document.readyState === "complete") {
     recordDocumentLoad();
   } else {
     window.addEventListener("load", () => recordDocumentLoad(), { once: true });
   }
-  if (config.network) {
-    initResourceTimingObserver();
-    initNetwork();
-  }
-  if (config.console) initConsole();
-  if (config.long_tasks) initLongTasks();
-  if (config.scroll_depth) initScrollDepth();
-  if (config.form_abandonment) initFormAbandonment();
-  if (config.user_timing) initUserTiming();
+  initResourceTimingObserver();
+  cleanups.push(
+    onAfterRequest((result) => {
+      if (!config.network) return;
+      if (isCollectEndpoint(result.url) || isBlocklisted(result.url)) return;
+      // Fire-and-forget — recordNetworkBreadcrumb awaits any deferred work
+      // (body capture) before pushing, so the breadcrumb is complete on
+      // push. The user's fetch promise has already resolved by the time
+      // the after-request listener fires.
+      void recordNetworkBreadcrumb(result);
+    }),
+  );
+  initConsole();
+  initLongTasks();
+  initScrollDepth();
+  initFormAbandonment();
+  initUserTiming();
   initVisibility();
   initTabLifecycle();
 }
@@ -146,6 +158,7 @@ function clickDistance(a: ClickRecord, b: ClickRecord): number {
 
 function initClicks(): void {
   const handler = (e: MouseEvent) => {
+      if (!config.clicks) return;
       const now = Date.now();
       const selector = elementSelector(e.target as Element);
 
@@ -596,210 +609,98 @@ function truncateBody(
   return { body, truncated: false };
 }
 
-function initNetwork(): void {
-  // Patch fetch
-  origFetch = window.fetch.bind(window);
-  window.fetch = async function (input, init) {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url;
+async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
+  const initiator = result.xhr ? "xhr" : "fetch";
+  const filteredUrl = filterQueryParams(result.url, config.query_params_allowlist);
 
-    if (isCollectEndpoint(url) || isBlocklisted(url)) {
-      return origFetch(input, init);
-    }
+  if (result.error) {
+    // Transport failure — no response received.
+    addBreadcrumb({
+      timestamp: result.startTime,
+      category: "network",
+      message: `${result.method} ${filteredUrl} (error)`,
+      data: { initiator, method: result.method, url: filteredUrl, error: true },
+    });
+    return;
+  }
 
-    const method = init?.method || "GET";
-    const start = Date.now();
-    let requestBody: string | undefined;
-
-    // Capture request body if enabled
-    if (
-      config.network_payloads.enabled &&
-      config.network_payloads.request_body &&
-      init?.body &&
-      typeof init.body === "string"
-    ) {
-      requestBody = init.body;
-    }
-
-    try {
-      const response = await origFetch(input, init);
-      const duration = Date.now() - start;
-      const data: Record<string, unknown> = {
-        initiator: "fetch",
-        method,
-        url: filterQueryParams(url, config.query_params_allowlist),
-        status: response.status,
-        duration,
-      };
-
-      // Attach trace ID if distributed tracing generated one for this request
-      const traceId = consumeTraceId(url);
-      if (traceId) data.trace_id = traceId;
-
-      // Capture response body if enabled
-      if (
-        config.network_payloads.enabled &&
-        config.network_payloads.response_body &&
-        shouldCapturePayload(response.headers.get("content-type"))
-      ) {
-        try {
-          const cloned = response.clone();
-          const text = await cloned.text();
-          const result = truncateBody(text);
-          data.response_body = result.body;
-          if (result.truncated) data.truncated = true;
-        } catch {
-          // Ignore body read failures
-        }
-      }
-
-      if (requestBody && config.network_payloads.enabled) {
-        const result = truncateBody(requestBody);
-        data.request_body = result.body;
-        if (result.truncated) data.request_truncated = true;
-      }
-
-      // Try synchronous lookup first, fall back to async (observer may not have fired yet)
-      const rt = getResourceTiming(url);
-      if (rt) {
-        data.resource_timing = rt;
-      } else {
-        setTimeout(() => {
-          const timing = getResourceTiming(url);
-          if (timing) data.resource_timing = timing;
-        }, 150);
-      }
-
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} ${response.status}`,
-        data,
-      });
-      touchActivity();
-      return response;
-    } catch (err) {
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} (error)`,
-        data: { initiator: "fetch", method, url: filterQueryParams(url, config.query_params_allowlist), error: true },
-      });
-      throw err;
-    }
+  const data: Record<string, unknown> = {
+    initiator,
+    method: result.method,
+    url: filteredUrl,
+    status: result.status,
+    duration: result.endTime - result.startTime,
   };
 
-  // Patch XMLHttpRequest
-  origXhrOpen = XMLHttpRequest.prototype.open;
-  origXhrSend = XMLHttpRequest.prototype.send;
+  const traceId = consumeTraceId(result.url);
+  if (traceId) data.trace_id = traceId;
 
-  XMLHttpRequest.prototype.open = function (
-    method: string,
-    url: string | URL,
-    ...rest: unknown[]
+  if (
+    result.requestBody &&
+    config.network_payloads.enabled &&
+    config.network_payloads.request_body
   ) {
-    (this as XMLHttpRequest & { _asMethod: string; _asUrl: string })._asMethod =
-      method;
-    (this as XMLHttpRequest & { _asUrl: string })._asUrl =
-      typeof url === "string" ? url : url.href;
-    return origXhrOpen.call(this, method, url, ...(rest as [boolean, string?, string?]));
-  };
+    const truncated = truncateBody(result.requestBody);
+    data.request_body = truncated.body;
+    if (truncated.truncated) data.request_truncated = true;
+  }
 
-  XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
-    const xhr = this as XMLHttpRequest & {
-      _asMethod: string;
-      _asUrl: string;
-    };
-    const url = xhr._asUrl;
-
-    if (!url || isCollectEndpoint(url) || isBlocklisted(url)) {
-      return origXhrSend.call(this, body);
+  // Response body — XHR is sync, fetch needs clone+text(). Await before the
+  // addBreadcrumb so the buffered breadcrumb is complete on push. The user's
+  // fetch promise has already resolved by now (the hook returns the response
+  // before invoking after-listeners), so we're not adding latency to the
+  // caller.
+  if (
+    result.xhr &&
+    config.network_payloads.enabled &&
+    config.network_payloads.response_body &&
+    shouldCapturePayload(result.xhr.getResponseHeader("content-type"))
+  ) {
+    try {
+      const truncated = truncateBody(result.xhr.responseText);
+      data.response_body = truncated.body;
+      if (truncated.truncated) data.truncated = true;
+    } catch {
+      // ignore
     }
-
-    const method = xhr._asMethod || "GET";
-    const start = Date.now();
-
-    // Capture request body if enabled
-    let requestBody: string | undefined;
-    if (
-      config.network_payloads.enabled &&
-      config.network_payloads.request_body &&
-      body &&
-      typeof body === "string"
-    ) {
-      requestBody = body;
+  } else if (
+    result.response &&
+    config.network_payloads.enabled &&
+    config.network_payloads.response_body &&
+    shouldCapturePayload(result.response.headers.get("content-type"))
+  ) {
+    try {
+      const text = await result.response.clone().text();
+      const truncated = truncateBody(text);
+      data.response_body = truncated.body;
+      if (truncated.truncated) data.truncated = true;
+    } catch {
+      // ignore body read failures
     }
+  }
 
-    xhr.addEventListener("load", () => {
-      const duration = Date.now() - start;
-      const data: Record<string, unknown> = {
-        initiator: "xhr",
-        method,
-        url: filterQueryParams(url, config.query_params_allowlist),
-        status: xhr.status,
-        duration,
-      };
+  // Resource timing — the PerformanceObserver may not have flushed yet, so
+  // a sync read often returns nothing right after fetch resolution. Wait
+  // briefly and re-read before pushing, so the breadcrumb is complete on
+  // push (same pattern as body capture above). Without this, a flush
+  // between fetch resolution and the timing entry's arrival serialises
+  // without resource_timing — the case that matters most is a fetch right
+  // before a pagehide, which is exactly when timing detail is wanted.
+  let rt = getResourceTiming(result.url);
+  if (!rt) {
+    await new Promise((r) => setTimeout(r, 150));
+    rt = getResourceTiming(result.url);
+  }
+  if (rt) data.resource_timing = rt;
 
-      // Attach trace ID if distributed tracing generated one for this request
-      const traceId = consumeTraceId(url);
-      if (traceId) data.trace_id = traceId;
-
-      if (
-        config.network_payloads.enabled &&
-        config.network_payloads.response_body &&
-        shouldCapturePayload(xhr.getResponseHeader("content-type"))
-      ) {
-        try {
-          const result = truncateBody(xhr.responseText);
-          data.response_body = result.body;
-          if (result.truncated) data.truncated = true;
-        } catch {
-          // Ignore
-        }
-      }
-
-      if (requestBody && config.network_payloads.enabled) {
-        const result = truncateBody(requestBody);
-        data.request_body = result.body;
-        if (result.truncated) data.request_truncated = true;
-      }
-
-      // Enrich with resource timing after a microtask
-      setTimeout(() => {
-        const timing = getResourceTiming(url);
-        if (timing) data.resource_timing = timing;
-      }, 0);
-
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} ${xhr.status}`,
-        data,
-      });
-      touchActivity();
-    });
-
-    xhr.addEventListener("error", () => {
-      addBreadcrumb({
-        timestamp: start,
-        category: "network",
-        message: `${method} ${filterQueryParams(url, config.query_params_allowlist)} (error)`,
-        data: { initiator: "xhr", method, url: filterQueryParams(url, config.query_params_allowlist), error: true },
-      });
-    });
-
-    return origXhrSend.call(this, body);
-  };
-
-  cleanups.push(() => {
-    window.fetch = origFetch;
-    XMLHttpRequest.prototype.open = origXhrOpen;
-    XMLHttpRequest.prototype.send = origXhrSend;
+  addBreadcrumb({
+    timestamp: result.startTime,
+    category: "network",
+    message: `${result.method} ${filteredUrl} ${result.status}`,
+    data,
   });
+
+  touchActivity();
 }
 
 // --- Console tracking ---
@@ -809,22 +710,26 @@ function initConsole(): void {
   origConsoleError = console.error.bind(console);
 
   console.warn = function (...args: unknown[]) {
-    addBreadcrumb({
-      timestamp: Date.now(),
-      category: "console",
-      message: formatConsoleArgs(args).slice(0, 200),
-      data: { level: "warn" },
-    });
+    if (config.console) {
+      addBreadcrumb({
+        timestamp: Date.now(),
+        category: "console",
+        message: formatConsoleArgs(args).slice(0, 200),
+        data: { level: "warn" },
+      });
+    }
     origConsoleWarn(...args);
   };
 
   console.error = function (...args: unknown[]) {
-    addBreadcrumb({
-      timestamp: Date.now(),
-      category: "console",
-      message: formatConsoleArgs(args).slice(0, 200),
-      data: { level: "error" },
-    });
+    if (config.console) {
+      addBreadcrumb({
+        timestamp: Date.now(),
+        category: "console",
+        message: formatConsoleArgs(args).slice(0, 200),
+        data: { level: "error" },
+      });
+    }
     origConsoleError(...args);
   };
 
@@ -846,6 +751,7 @@ function initLongTasks(): void {
   // Try Long Animation Frame API first (Chrome 123+) — has script attribution
   try {
     const observer = new PerformanceObserver((list) => {
+      if (!config.long_tasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
           // LoAF entries have a .scripts array (not in TS lib types yet)
@@ -889,6 +795,7 @@ function initLongTasks(): void {
   // Fallback: basic longtask observer (no attribution)
   try {
     const observer = new PerformanceObserver((list) => {
+      if (!config.long_tasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
           addBreadcrumb({
@@ -933,7 +840,7 @@ function getScrollPercent(target?: EventTarget | null): number {
 }
 
 function flushScrollDepth(): void {
-  if (maxScrollPercent > 0 && lastScrollUrl) {
+  if (config.scroll_depth && maxScrollPercent > 0 && lastScrollUrl) {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "scroll_depth",
@@ -955,6 +862,7 @@ function initScrollDepth(): void {
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
   let lastScrollTarget: EventTarget | null = null;
   const scrollHandler = (e: Event) => {
+    if (!config.scroll_depth) return;
     lastScrollTarget = e.target;
     if (throttleTimer) return;
     throttleTimer = setTimeout(() => {
@@ -967,14 +875,13 @@ function initScrollDepth(): void {
 
   onBeforeNavigation(flushScrollDepth);
 
-  const scrollVisHandler = () => {
-    if (document.visibilityState === "hidden") flushScrollDepth();
-  };
-  document.addEventListener("visibilitychange", scrollVisHandler);
+  const offVis = onVisibilityChange((state) => {
+    if (state === "hidden") flushScrollDepth();
+  });
 
   cleanups.push(
     () => document.removeEventListener("scroll", scrollHandler, { capture: true }),
-    () => document.removeEventListener("visibilitychange", scrollVisHandler),
+    offVis,
   );
 }
 
@@ -992,6 +899,7 @@ function initFormAbandonment(): void {
   const submittedForms = new WeakSet<HTMLFormElement>();
 
   const inputHandler = (e: Event) => {
+    if (!config.form_abandonment) return;
     const target = e.target as Element;
     if (!(target instanceof HTMLInputElement
       || target instanceof HTMLTextAreaElement
@@ -1006,6 +914,7 @@ function initFormAbandonment(): void {
   document.addEventListener("input", inputHandler, { capture: true, passive: true });
 
   const submitHandler = (e: SubmitEvent) => {
+    if (!config.form_abandonment) return;
     const form = e.target as HTMLFormElement;
     submittedForms.add(form);
     interactedForms.delete(form);
@@ -1014,6 +923,7 @@ function initFormAbandonment(): void {
 
   // On navigation, emit abandonment for forms interacted with but not submitted
   const emitAbandonments = () => {
+    if (!config.form_abandonment) return;
     for (const [form, interactionTime] of interactedForms) {
       if (submittedForms.has(form)) continue;
       const selector = elementSelector(form);
@@ -1045,6 +955,7 @@ function initUserTiming(): void {
 
   try {
     const observer = new PerformanceObserver((list) => {
+      if (!config.user_timing) return;
       for (const entry of list.getEntries()) {
         const isMeasure = entry.entryType === "measure";
         addBreadcrumb({
@@ -1070,17 +981,15 @@ function initUserTiming(): void {
 // --- Visibility tracking ---
 
 function initVisibility(): void {
-  const handler = () => {
-    const state = document.visibilityState;
+  const off = onVisibilityChange((state) => {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "visibility",
       message: `Tab became ${state}`,
       data: { state },
     });
-  };
-  document.addEventListener("visibilitychange", handler);
-  cleanups.push(() => document.removeEventListener("visibilitychange", handler));
+  });
+  cleanups.push(off);
 }
 
 // --- Tab lifecycle tracking ---
@@ -1094,17 +1003,16 @@ function initTabLifecycle(): void {
   });
 
   // pagehide is the cross-browser tab-close signal; beforeunload is unreliable on mobile.
-  // We don't branch on e.persisted — bfcache resumes will emit fresh breadcrumbs on the same tab_id.
-  const handler = () => {
+  // We don't branch on persisted — bfcache resumes will emit fresh breadcrumbs on the same tab_id.
+  const off = onPageHide(() => {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "tab",
       message: "Tab closed",
       data: { event: "close" },
     });
-  };
-  window.addEventListener("pagehide", handler);
-  cleanups.push(() => window.removeEventListener("pagehide", handler));
+  });
+  cleanups.push(off);
 }
 
 // --- Destroy ---

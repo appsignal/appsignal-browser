@@ -1,6 +1,6 @@
 import type { SessionContext, UserContext } from "./types.js";
-import { uuidv7 } from "uuidv7";
 import { storage } from "./utils.js";
+import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
 const ANON_KEY = "appsignal_anonymous_id";
@@ -29,7 +29,7 @@ export function initSession(timeoutMs: number): void {
 
 function ensureTabId(): void {
   if (!storage.getString(sessionStorage, TAB_KEY)) {
-    storage.setString(sessionStorage, TAB_KEY, uuidv7());
+    storage.setString(sessionStorage, TAB_KEY, crypto.randomUUID());
   }
 }
 
@@ -39,7 +39,7 @@ export function getTabId(): string {
 
 function ensureAnonymousId(): void {
   if (!storage.getString(localStorage, ANON_KEY)) {
-    storage.setString(localStorage, ANON_KEY, uuidv7());
+    storage.setString(localStorage, ANON_KEY, crypto.randomUUID());
   }
 }
 
@@ -57,7 +57,7 @@ function restoreOrCreateSession(): void {
 }
 
 function newSession(): void {
-  currentSessionId = uuidv7();
+  currentSessionId = crypto.randomUUID();
   storage.setString(localStorage, SESSION_KEY, currentSessionId);
   // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();
@@ -72,12 +72,17 @@ export function getSessionId(): string {
   const stored = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
   if (stored > lastActivityMs) lastActivityMs = stored;
 
-  const now = Date.now();
-  const elapsed = now - lastActivityMs;
-  if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
-    newSession();
-  }
+  if (isInactive()) newSession();
   return currentSessionId!;
+}
+
+/** True when the inactivity window has elapsed since the last touch.
+ * Returns true on backward clock skew (elapsed < 0) so a clock that drifted
+ * backward still rotates the session rather than freezing it forever. */
+function isInactive(): boolean {
+  if (lastActivityMs <= 0) return false;
+  const elapsed = Date.now() - lastActivityMs;
+  return elapsed >= inactivityTimeoutMs || elapsed < 0;
 }
 
 export function getAnonymousId(): string {
@@ -117,12 +122,8 @@ export function endSession(): void {
 }
 
 export function touchActivity(): void {
-  // elapsed < 0 catches backward clock skew so the session can still expire.
+  if (isInactive()) newSession();
   const now = Date.now();
-  const elapsed = now - lastActivityMs;
-  if (lastActivityMs > 0 && (elapsed >= inactivityTimeoutMs || elapsed < 0)) {
-    newSession();
-  }
   lastActivityMs = now;
   storage.setString(localStorage, LAST_ACTIVITY_KEY, String(now));
   resetInactivityTimer();
@@ -136,7 +137,7 @@ function resetInactivityTimer(): void {
 }
 
 let activityHandler: (() => void) | null = null;
-let visibilityHandler: (() => void) | null = null;
+let unsubVisibility: (() => void) | null = null;
 let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ["click", "keydown", "scroll"];
 
@@ -149,18 +150,17 @@ function startActivityTracking(): void {
     });
   }
 
-  visibilityHandler = () => {
-    if (document.visibilityState === "hidden") {
+  unsubVisibility = onVisibilityChange((state) => {
+    if (state === "hidden") {
       currentSessionId = null;
-    } else if (document.visibilityState === "visible") {
+    } else if (state === "visible") {
       lastActivityMs = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
       if (Date.now() - lastActivityMs >= inactivityTimeoutMs) {
         currentSessionId = null;
         storage.remove(localStorage, SESSION_KEY);
       }
     }
-  };
-  document.addEventListener("visibilitychange", visibilityHandler);
+  });
 
   storageHandler = (e: StorageEvent) => {
     if (e.key === SESSION_KEY) {
@@ -188,41 +188,75 @@ export function destroySession(): void {
     }
     activityHandler = null;
   }
-  if (visibilityHandler) {
-    document.removeEventListener("visibilitychange", visibilityHandler);
-    visibilityHandler = null;
+  if (unsubVisibility) {
+    unsubVisibility();
+    unsubVisibility = null;
   }
   if (storageHandler) {
     window.removeEventListener("storage", storageHandler);
     storageHandler = null;
   }
   activityTrackingStarted = false;
+  staticContextFields = null;
+}
+
+// Stable for the lifetime of a page; cached lazily on first read so we don't
+// recompute Intl.DateTimeFormat on every payload (errors, event flushes,
+// replay chunks). Reset on destroySession so a re-init picks up changes
+// (test reloads, jsdom env mutations).
+interface StaticContextFields {
+  referrer: string;
+  user_agent: string;
+  screen_width: number;
+  screen_height: number;
+  language: string;
+  timezone: string;
+  device_memory?: number;
+}
+let staticContextFields: StaticContextFields | null = null;
+
+function getStaticContextFields(): StaticContextFields {
+  if (staticContextFields) return staticContextFields;
+  const fields: StaticContextFields = {
+    referrer: document.referrer,
+    user_agent: navigator.userAgent,
+    screen_width: screen.width,
+    screen_height: screen.height,
+    language: navigator.language,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+  const nav = navigator as unknown as Record<string, unknown>;
+  if (typeof nav.deviceMemory === "number") {
+    fields.device_memory = nav.deviceMemory as number;
+  }
+  staticContextFields = fields;
+  return fields;
 }
 
 export function getSessionContext(): SessionContext {
+  const stat = getStaticContextFields();
   const ctx: SessionContext = {
     session_id: getSessionId(),
     tab_id: getTabId(),
     anonymous_id: getAnonymousId(),
     page_url: location.href,
-    referrer: document.referrer,
-    user_agent: navigator.userAgent,
-    screen_width: screen.width,
-    screen_height: screen.height,
+    referrer: stat.referrer,
+    user_agent: stat.user_agent,
+    screen_width: stat.screen_width,
+    screen_height: stat.screen_height,
+    // Viewport changes on resize and orientation change; read live.
     viewport_width: window.innerWidth,
     viewport_height: window.innerHeight,
-    language: navigator.language,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    language: stat.language,
+    timezone: stat.timezone,
   };
+  if (stat.device_memory !== undefined) ctx.device_memory = stat.device_memory;
 
-  // Optional fields
+  // connection.effectiveType can shift mid-session (4G ↔ wifi); read live.
   const nav = navigator as unknown as Record<string, unknown>;
   const conn = nav.connection as Record<string, unknown> | undefined;
   if (conn?.effectiveType) {
     ctx.connection_type = conn.effectiveType as string;
-  }
-  if (typeof nav.deviceMemory === "number") {
-    ctx.device_memory = nav.deviceMemory as number;
   }
 
   // User context

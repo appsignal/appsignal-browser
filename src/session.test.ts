@@ -52,6 +52,24 @@ describe("session", () => {
     expect(getSessionId()).toBe(firstId);
   });
 
+  it("caches stable fields across getSessionContext calls", () => {
+    // user_agent / language / timezone / screen dimensions don't change
+    // for the lifetime of a page. Reading them on every payload (errors,
+    // event flushes, replay chunks) needlessly walks into platform APIs
+    // — Intl.DateTimeFormat in particular is non-trivial.
+    initSession(1800000);
+
+    // Prime the cache.
+    getSessionContext();
+
+    const intlSpy = vi.spyOn(Intl, "DateTimeFormat");
+    getSessionContext();
+    getSessionContext();
+    getSessionContext();
+
+    expect(intlSpy).not.toHaveBeenCalled();
+  });
+
   it("populates session context fields", () => {
     initSession(1800000);
     const ctx = getSessionContext();

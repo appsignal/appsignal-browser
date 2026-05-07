@@ -26,7 +26,6 @@
   },
   "dependencies": {
     "@rrweb/record": "^2.0.0-alpha.18",
-    "uuidv7": "^1.2.1",
     "web-vitals": "^4.2.4"
   },
   "peerDependencies": {

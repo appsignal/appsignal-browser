@@ -213,6 +213,88 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
+  it("respects a server-configured error_replay_window_ms", async () => {
+    // The post-error ship window should be tunable via server config, not
+    // baked in. With a 10 s window, a flush 15 s after the error (with no
+    // new error) must not ship — a hardcoded 30 s default would still ship.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    applyReplaySampling({
+      ...defaultReplayConfig(),
+      sample_rate: 0,
+      error_replay: true,
+      error_replay_window_ms: 10_000,
+    });
+
+    rrwebEmit!({ type: 3, data: "before error" });
+    onError();
+
+    vi.advanceTimersByTime(5000);
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    sendChunkMock.mockClear();
+
+    // Past the configured 10 s window (default would still be 30 s).
+    vi.advanceTimersByTime(11_000);
+
+    rrwebEmit!({ type: 3, data: "after window" });
+    vi.advanceTimersByTime(5000);
+
+    expect(sendChunkMock).not.toHaveBeenCalled();
+  });
+
+  it("error_replay window expires so a single early error doesn't ship the whole session", async () => {
+    // Without bounding, one onError() flips hadError true forever — every
+    // subsequent flush ships, so a single error 30 s into a 4-hour session
+    // uploads all 4 hours of replay. The window should re-close after a
+    // bounded post-error tail with no new errors.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    applyReplaySampling({ ...defaultReplayConfig(), sample_rate: 0, error_replay: true });
+
+    rrwebEmit!({ type: 3, data: "before error" });
+    onError();
+
+    vi.advanceTimersByTime(5000);
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    sendChunkMock.mockClear();
+
+    // Drift well past the post-error window with no new errors.
+    vi.advanceTimersByTime(60_000);
+
+    // New activity, no new error → must not ship.
+    rrwebEmit!({ type: 3, data: "long after window" });
+    vi.advanceTimersByTime(5000);
+
+    expect(sendChunkMock).not.toHaveBeenCalled();
+  });
+
+  it("sampling decision is stable across reinit within the same session", async () => {
+    // sessionRandom must be derived from session_id, not Math.random — otherwise
+    // a multi-page app re-rolls on every page load and "% of sessions" becomes
+    // "% of page loads". With Math.random returning 0.1 then 0.9 against a
+    // sample_rate of 0.5, the bug gives sampled=true then sampled=false on the
+    // two inits; the fix gives the same decision both times.
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0.1)
+      .mockReturnValueOnce(0.9);
+
+    const config = { ...defaultReplayConfig(), sample_rate: 0.5 };
+
+    initReplay(config);
+    await vi.advanceTimersByTimeAsync(10);
+    const firstActive = rrwebEmit !== null;
+    rrwebEmit = null;
+    discardReplay();
+
+    initReplay(config);
+    await vi.advanceTimersByTimeAsync(10);
+    const secondActive = rrwebEmit !== null;
+
+    expect(secondActive).toBe(firstActive);
+  });
+
   it("does not flush empty buffer", async () => {
     initReplay(defaultReplayConfig());
     await vi.advanceTimersByTimeAsync(10);

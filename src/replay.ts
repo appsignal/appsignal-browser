@@ -3,7 +3,9 @@ import { getSessionId, getTabId } from "./session.js";
 import { sendReplayChunk } from "./transport.js";
 import { getConsent, onConsentDenied, onConsentGranted } from "./consent.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
-import { storage } from "./utils.js";
+import { storage, seededRandom } from "./utils.js";
+import { onVisibilityChange, onPageHide } from "./lifecycle.js";
+import { onErrorReported } from "./errors.js";
 
 let config: ServerConfig["replay"];
 let appVersion: string | undefined;
@@ -19,9 +21,9 @@ let eventSizes: number[] = [];
 let totalMemoryBytes = 0;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let maxRecordingTimer: ReturnType<typeof setTimeout> | null = null;
+let errorReplayTimer: ReturnType<typeof setTimeout> | null = null;
 let recordFn: ((opts: Record<string, unknown>) => (() => void) | undefined) | null = null;
-let replayVisibilityHandler: (() => void) | null = null;
-let replayPagehideHandler: EventListener | null = null;
+let lifecycleUnsubscribers: (() => void)[] = [];
 let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -51,7 +53,7 @@ export function initReplay(
   if (!config.enabled) return;
 
   // Sampling roll, narrowed by applyReplaySampling() when server config arrives.
-  sessionRandom = Math.random();
+  sessionRandom = seededRandom(getSessionId());
   sampled = sessionRandom < config.sample_rate;
 
   if (sampled && getConsent() === "granted") {
@@ -73,19 +75,16 @@ export function initReplay(
     // Flush on page hide — use beacon so the request survives unload.
     // Plain fetch is cancelled mid-flight on unload, which drops the
     // first chunk (the one with rrweb's initial FullSnapshot).
-    replayVisibilityHandler = () => {
-      if (document.visibilityState === "hidden" && isRecording) {
-        flushChunk(true);
-      }
-    };
-    document.addEventListener("visibilitychange", replayVisibilityHandler);
-
-    replayPagehideHandler = (e: Event) => {
-      if (!(e as PageTransitionEvent).persisted && isRecording) {
-        flushChunk(true);
-      }
-    };
-    window.addEventListener("pagehide", replayPagehideHandler);
+    lifecycleUnsubscribers.push(
+      onVisibilityChange((state) => {
+        if (state === "hidden" && isRecording) flushChunk(true);
+      }),
+    );
+    lifecycleUnsubscribers.push(
+      onPageHide((persisted) => {
+        if (!persisted && isRecording) flushChunk(true);
+      }),
+    );
 
     onConsentDenied(() => {
       if (isRecording) stopReplay();
@@ -95,6 +94,11 @@ export function initReplay(
         startRecording();
       }
     });
+
+    // Trigger the post-error tail only for errors that actually shipped —
+    // errors.ts publishes after beforeSend approval, so dropped errors don't
+    // open the window.
+    lifecycleUnsubscribers.push(onErrorReported(() => onError()));
   }
 }
 
@@ -116,7 +120,16 @@ export function applyReplaySampling(realConfig: ServerConfig["replay"]): void {
 }
 
 export function onError(): void {
+  // Sliding window: each error extends the post-error ship window. Without
+  // resetting hadError, a single error early in the session would cause every
+  // subsequent flush to ship for hours. Window length is server-tunable via
+  // replay.error_replay_window_ms.
   hadError = true;
+  if (errorReplayTimer) clearTimeout(errorReplayTimer);
+  errorReplayTimer = setTimeout(() => {
+    hadError = false;
+    errorReplayTimer = null;
+  }, config.error_replay_window_ms);
 }
 
 async function startRecording(): Promise<void> {
@@ -231,6 +244,10 @@ function clearTimers(): void {
     clearTimeout(maxRecordingTimer);
     maxRecordingTimer = null;
   }
+  if (errorReplayTimer) {
+    clearTimeout(errorReplayTimer);
+    errorReplayTimer = null;
+  }
 }
 
 export function stopReplay(): void {
@@ -254,14 +271,8 @@ export function destroyReplay(): void {
   stopReplay();
   window.removeEventListener("offline", pauseRecording);
   window.removeEventListener("online", resumeRecording);
-  if (replayVisibilityHandler) {
-    document.removeEventListener("visibilitychange", replayVisibilityHandler);
-    replayVisibilityHandler = null;
-  }
-  if (replayPagehideHandler) {
-    window.removeEventListener("pagehide", replayPagehideHandler);
-    replayPagehideHandler = null;
-  }
+  for (const unsub of lifecycleUnsubscribers) unsub();
+  lifecycleUnsubscribers = [];
   hadError = false;
   listenersRegistered = false;
 }

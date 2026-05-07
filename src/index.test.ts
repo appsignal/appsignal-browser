@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { init, destroy, endSession, setUser, clearUser, addBreadcrumb, captureError, flush } from "./index.js";
 import type { ServerConfig } from "./types.js";
 import { DEFAULT_SERVER_CONFIG } from "./types.js";
+import { RingBuffer } from "./ring-buffer.js";
 
 // jsdom's Blob may lack .text(); polyfill via FileReader so the sendBeacon
 // mock below can read body strings out of beacon calls.
@@ -274,13 +275,15 @@ describe("SDK integration", () => {
 
   it("replay buffer is discarded when server config narrows sample_rate to exclude this session", async () => {
     // Fallback config has sample_rate 1.0 so recording starts immediately.
-    // When the real config narrows to 0.1, the per-session random roll is
-    // re-evaluated against the new threshold; if the session is no longer
+    // When the real config narrows to 0.5, the session-derived sampling roll
+    // is re-evaluated against the new threshold; if the session is no longer
     // sampled (and error_replay is off), the buffered events are discarded.
-    vi.spyOn(Math, "random").mockReturnValue(0.5); // 0.5 > 0.1 → not sampled
+    // session_id "sample-low" hashes to ≈0.7497, which sits above 0.5.
+    localStorage.setItem("appsignal_session_id", "sample-low");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
     serverConfigResponse = {
       ...DEFAULT_SERVER_CONFIG,
-      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1, error_replay: false },
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.5, error_replay: false },
     };
 
     init({ key: "test-key" });
@@ -306,7 +309,9 @@ describe("SDK integration", () => {
   });
 
   it("replay buffer is flushed when server config keeps the session sampled", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(0.05); // 0.05 < 0.1 → sampled
+    // session_id "s2" hashes to ≈0.0208, well below sample_rate 0.1.
+    localStorage.setItem("appsignal_session_id", "s2");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
     serverConfigResponse = {
       ...DEFAULT_SERVER_CONFIG,
       replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0.1 },
@@ -355,6 +360,69 @@ describe("SDK integration", () => {
     expect(eventTab).toBe(errorTab);
     // tab_id is distinct from session_id.
     expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
+  });
+
+  it("beforeSend dropping the error also suppresses the error_replay tail", async () => {
+    // The error_replay window should fire only for errors that actually
+    // shipped. If beforeSend returns null, the error never reached the
+    // server — so the replay tail it would have triggered should also be
+    // suppressed. session_id "sample-low" hashes ≈0.7497, well above the
+    // sample_rate of 0; the only path to a replay flush is via hadError,
+    // which beforeSend's null return must prevent.
+    localStorage.setItem("appsignal_session_id", "sample-low");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
+    serverConfigResponse = {
+      ...DEFAULT_SERVER_CONFIG,
+      replay: { ...DEFAULT_SERVER_CONFIG.replay, sample_rate: 0, error_replay: true },
+    };
+
+    init({
+      key: "test-key",
+      beforeSend: () => null,
+    });
+
+    // Wait for server config to apply (sampled=false, errorReplay=true).
+    await new Promise((r) => setTimeout(r, 50));
+
+    // rrweb dynamic-import resolves; emit some events so the buffer isn't empty.
+    rrwebEmit?.({ type: 1, data: "snapshot" });
+    rrwebEmit?.({ type: 3, data: "mutation" });
+
+    // Error fires; beforeSend drops it.
+    captureError(new Error("dropped by beforeSend"));
+
+    // endSession force-flushes the replay buffer via beacon.
+    endSession();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const replayPayloads = sentPayloads
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "replay");
+    expect(replayPayloads).toHaveLength(0);
+
+    // Sanity check: the error itself didn't ship either.
+    const errorPayloads = sentPayloads
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "error");
+    expect(errorPayloads).toHaveLength(0);
+  });
+
+  it("destroy fully unwinds the fetch patch chain when tracing is enabled", async () => {
+    // Both breadcrumbs and tracing patch window.fetch. Tracing patches *after*
+    // breadcrumbs, so it is the outer wrapper. If destroy unwinds in the wrong
+    // order, window.fetch is left pointing at the orphaned breadcrumbs wrapper
+    // — fetches still work, but every fetch silently pushes a "network"
+    // breadcrumb into a buffer nobody drains.
+    const pushSpy = vi.spyOn(RingBuffer.prototype, "push");
+
+    init({ key: "test-key", tracePropagationTargets: ["**/*"] });
+
+    destroy();
+    const baseline = pushSpy.mock.calls.length;
+
+    await fetch("http://random.example.com/api");
+
+    expect(pushSpy.mock.calls.length).toBe(baseline);
   });
 
   it("setUser attaches user context to payloads", () => {

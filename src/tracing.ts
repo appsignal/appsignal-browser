@@ -1,26 +1,81 @@
 import { safeUrl, globMatch } from "./utils.js";
+import { onBeforeRequest } from "./network-hook.js";
 
 let targets: string[] = [];
-let origFetch: typeof window.fetch | null = null;
-let origXhrOpen: typeof XMLHttpRequest.prototype.open;
-let origXhrSend: typeof XMLHttpRequest.prototype.send | null = null;
+let unregister: (() => void) | null = null;
 
-// Store trace IDs keyed by URL so breadcrumbs can attach them
-const pendingTraceIds = new Map<string, string>();
+// FIFO queue keyed by URL, with a global cap on total entries. Concurrent
+// same-URL fetches each push their own trace_id; the breadcrumb wrapper
+// shifts them in the order they were recorded. The global cap bounds memory
+// when a request's breadcrumb never lands (cross-origin opaque responses,
+// fire-and-forget XHR, etc.).
+class KeyedQueue<V> {
+  private readonly buckets = new Map<string, V[]>();
+  private total = 0;
+
+  constructor(private readonly maxTotal: number) {}
+
+  push(key: string, value: V): void {
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      this.buckets.set(key, bucket);
+    }
+    bucket.push(value);
+    this.total++;
+    if (this.total > this.maxTotal) this.evictOldest();
+  }
+
+  shift(key: string): V | undefined {
+    const bucket = this.buckets.get(key);
+    if (!bucket || bucket.length === 0) return undefined;
+    const value = bucket.shift();
+    this.total--;
+    if (bucket.length === 0) this.buckets.delete(key);
+    return value;
+  }
+
+  clear(): void {
+    this.buckets.clear();
+    this.total = 0;
+  }
+
+  private evictOldest(): void {
+    // Map iteration order is insertion order; the first key is the oldest
+    // bucket, and shift() drops the oldest entry within it.
+    const oldestKey = this.buckets.keys().next().value;
+    if (oldestKey === undefined) return;
+    this.shift(oldestKey);
+  }
+}
+
+const pendingTraces = new KeyedQueue<string>(200);
 
 export function initTracing(tracePropagationTargets: string[]): void {
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
 
-  patchFetch();
-  patchXhr();
+  unregister = onBeforeRequest((ctx) => {
+    if (!shouldPropagate(ctx.url)) return;
+    const traceId = randomHex(16);
+    const spanId = randomHex(8);
+    pendingTraces.push(ctx.url, traceId);
+    ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+  });
 }
 
-/** Get and consume the trace ID generated for a request URL. */
+/** Get and consume the trace ID generated for a request URL. FIFO per URL. */
 export function consumeTraceId(url: string): string | undefined {
-  const traceId = pendingTraceIds.get(url);
-  if (traceId) pendingTraceIds.delete(url);
-  return traceId;
+  return pendingTraces.shift(url);
+}
+
+export function destroyTracing(): void {
+  if (unregister) {
+    unregister();
+    unregister = null;
+  }
+  targets = [];
+  pendingTraces.clear();
 }
 
 function shouldPropagate(url: string): boolean {
@@ -30,95 +85,10 @@ function shouldPropagate(url: string): boolean {
   return targets.some((pattern) => globMatch(pattern, hostPath));
 }
 
-function generateTraceId(): string {
-  const bytes = new Uint8Array(16);
+/** N random bytes encoded as a lowercase hex string. Used for both the
+ * 128-bit trace_id and the 64-bit span_id of the W3C traceparent header. */
+function randomHex(numBytes: number): string {
+  const bytes = new Uint8Array(numBytes);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-function generateSpanId(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function recordTrace(url: string): string {
-  const traceId = generateTraceId();
-  pendingTraceIds.set(url, traceId);
-  // Prevent unbounded growth
-  if (pendingTraceIds.size > 200) {
-    const firstKey = pendingTraceIds.keys().next().value;
-    if (firstKey) pendingTraceIds.delete(firstKey);
-  }
-  return traceId;
-}
-
-function patchFetch(): void {
-  origFetch = window.fetch;
-  const currentFetch = window.fetch;
-  window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
-    const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url;
-
-    if (!shouldPropagate(url)) {
-      return currentFetch.call(window, input, init);
-    }
-
-    const traceId = recordTrace(url);
-    const spanId = generateSpanId();
-    const traceparent = `00-${traceId}-${spanId}-01`;
-    const headers = new Headers(init?.headers);
-    headers.set("traceparent", traceparent);
-
-    return currentFetch.call(window, input, { ...init, headers });
-  };
-}
-
-function patchXhr(): void {
-  origXhrOpen = XMLHttpRequest.prototype.open;
-  origXhrSend = XMLHttpRequest.prototype.send;
-
-  const origSend = XMLHttpRequest.prototype.send;
-
-  XMLHttpRequest.prototype.open = function (
-    method: string,
-    url: string | URL,
-    ...rest: unknown[]
-  ) {
-    (this as XMLHttpRequest & { _traceUrl: string })._traceUrl =
-      typeof url === "string" ? url : url.href;
-    return origXhrOpen.call(this, method, url, ...(rest as [boolean, string?, string?]));
-  };
-
-  XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
-    const xhr = this as XMLHttpRequest & { _traceUrl: string };
-    if (xhr._traceUrl && shouldPropagate(xhr._traceUrl)) {
-      const traceId = recordTrace(xhr._traceUrl);
-      const spanId = generateSpanId();
-      const traceparent = `00-${traceId}-${spanId}-01`;
-      xhr.setRequestHeader("traceparent", traceparent);
-    }
-    return origSend.call(this, body);
-  };
-}
-
-export function destroyTracing(): void {
-  if (origFetch) {
-    window.fetch = origFetch;
-    origFetch = null;
-  }
-  if (origXhrOpen) {
-    XMLHttpRequest.prototype.open = origXhrOpen;
-  }
-  if (origXhrSend) {
-    XMLHttpRequest.prototype.send = origXhrSend;
-    origXhrSend = null;
-  }
-  targets = [];
-  pendingTraceIds.clear();
-}
-

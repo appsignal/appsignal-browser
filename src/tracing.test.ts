@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { initTracing, consumeTraceId } from "./tracing.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { initTracing, consumeTraceId, destroyTracing } from "./tracing.js";
+import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 
 describe("tracing", () => {
   describe("consumeTraceId", () => {
@@ -15,6 +16,12 @@ describe("tracing", () => {
       originalFetch = window.fetch;
     });
 
+    afterEach(() => {
+      destroyTracing();
+      destroyNetworkHook();
+      window.fetch = originalFetch;
+    });
+
     it("injects traceparent header for matching URLs", async () => {
       let capturedHeaders: Headers | undefined;
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -22,6 +29,7 @@ describe("tracing", () => {
         return new Response();
       };
 
+      initNetworkHook();
       initTracing(["localhost/**"]);
 
       // The init patches fetch, so we need to call the patched version
@@ -39,6 +47,7 @@ describe("tracing", () => {
         return new Response();
       };
 
+      initNetworkHook();
       initTracing(["api.example.com/**"]);
 
       await window.fetch("http://other.com/api/test");
@@ -49,6 +58,7 @@ describe("tracing", () => {
     it("stores trace_id for consumption by breadcrumbs", async () => {
       window.fetch = async () => new Response();
 
+      initNetworkHook();
       initTracing(["localhost/**"]);
 
       await window.fetch("http://localhost/api/users");
@@ -60,6 +70,7 @@ describe("tracing", () => {
     it("consumeTraceId removes the trace after first read", async () => {
       window.fetch = async () => new Response();
 
+      initNetworkHook();
       initTracing(["localhost/**"]);
 
       await window.fetch("http://localhost/api/users");
@@ -69,6 +80,38 @@ describe("tracing", () => {
 
       expect(first).toBeTruthy();
       expect(second).toBeUndefined();
+    });
+
+    it("keeps trace IDs distinct for parallel same-URL requests", async () => {
+      // Real-world example: a polling component fires two GETs to the same
+      // URL while the first is still in flight. With a URL-keyed Map the
+      // second recordTrace clobbers the first, so the breadcrumb that
+      // consumes the ID gets attributed to the wrong request — or worse,
+      // the second consumer reads `undefined`.
+      const sentHeaders: Headers[] = [];
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentHeaders.push(new Headers(init?.headers));
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      const url = "http://localhost/api/poll";
+      await Promise.all([window.fetch(url), window.fetch(url)]);
+
+      const sent1 = sentHeaders[0].get("traceparent")?.split("-")[1];
+      const sent2 = sentHeaders[1].get("traceparent")?.split("-")[1];
+      expect(sent1).toBeTruthy();
+      expect(sent2).toBeTruthy();
+      expect(sent1).not.toBe(sent2);
+
+      const consumed1 = consumeTraceId(url);
+      const consumed2 = consumeTraceId(url);
+
+      expect(consumed1).toBeTruthy();
+      expect(consumed2).toBeTruthy();
+      expect([sent1, sent2].sort()).toEqual([consumed1, consumed2].sort());
     });
   });
 });

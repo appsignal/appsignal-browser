@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   initBreadcrumbs,
   addBreadcrumb,
@@ -8,6 +8,7 @@ import {
   updateBreadcrumbConfig,
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
+import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import type { ServerConfig } from "./types.js";
 
 vi.mock("./errors.js", () => ({
@@ -138,6 +139,128 @@ describe("breadcrumbs", () => {
     // The config reference is updated — new network breadcrumbs would
     // use the updated blocklist/allowlist. We can't easily test fetch
     // patching here, but we verify the function doesn't throw.
+  });
+
+  describe("network breadcrumbs", () => {
+    let originalFetch: typeof fetch;
+
+    beforeEach(() => {
+      originalFetch = window.fetch;
+    });
+
+    afterEach(() => {
+      destroyNetworkHook();
+      window.fetch = originalFetch;
+    });
+
+    it("includes the HTTP status code for non-2xx responses, not '(error)'", async () => {
+      // (error) belongs to true transport failures (thrown fetch / xhr error
+      // event). A 404 is a perfectly received response and should land as
+      // `GET <url> 404`, like a 200 lands as `GET <url> 200` — the breadcrumb
+      // timeline is more useful when status codes are visible.
+      window.fetch = async () =>
+        new Response("not found", { status: 404, headers: { "content-type": "text/plain" } });
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        "http://localhost/ingest/browser",
+      );
+
+      await window.fetch("http://example.com/api/missing");
+      // Allow any deferred body capture / resource timing to settle.
+      await new Promise((r) => setTimeout(r, 200));
+
+      const networkCrumb = getSnapshot().find((b) => b.category === "network");
+      expect(networkCrumb).toBeDefined();
+      expect(networkCrumb!.message).toBe("GET http://example.com/api/missing 404");
+      expect(networkCrumb!.message).not.toContain("(error)");
+      expect(networkCrumb!.data?.status).toBe(404);
+      expect(networkCrumb!.data?.error).toBeUndefined();
+    });
+
+    it("does not push the breadcrumb until deferred work (body, resource_timing) has settled", async () => {
+      // The fix in 4538dd3 awaits resource-timing lookup before
+      // addBreadcrumb, mirroring the body-capture fix. A regression to the
+      // old setTimeout-and-mutate pattern would re-open a window where a
+      // flush between fetch resolution and the timing entry's arrival
+      // would serialise an incomplete breadcrumb. Catch that by asserting
+      // that draining immediately after the user's fetch resolves returns
+      // no network crumb yet.
+      window.fetch = async () =>
+        new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        "http://localhost/ingest/browser",
+      );
+
+      await window.fetch("http://example.com/api/sync");
+
+      // recordNetworkBreadcrumb is suspended on `await response.clone().text()`
+      // (and then the resource-timing await) — the breadcrumb must not be in
+      // the buffer yet.
+      const drainedNetwork = drainBreadcrumbs().filter(
+        (b) => b.category === "network",
+      );
+      expect(drainedNetwork).toHaveLength(0);
+
+      // Past the 150 ms resource-timing await, the breadcrumb lands.
+      await new Promise((r) => setTimeout(r, 200));
+      const eventual = getSnapshot().filter((b) => b.category === "network");
+      expect(eventual).toHaveLength(1);
+      expect(eventual[0].data?.status).toBe(200);
+    });
+
+    it("emits '(error)' only for true transport failures", async () => {
+      window.fetch = async () => {
+        throw new TypeError("Network error");
+      };
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        "http://localhost/ingest/browser",
+      );
+
+      await window.fetch("http://example.com/api/down").catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+
+      const networkCrumb = getSnapshot().find((b) => b.category === "network");
+      expect(networkCrumb).toBeDefined();
+      expect(networkCrumb!.message).toBe("GET http://example.com/api/down (error)");
+      expect(networkCrumb!.data?.error).toBe(true);
+    });
+  });
+
+  it("updateBreadcrumbConfig disabling clicks stops new click breadcrumbs", () => {
+    // Per-category toggles must respond to runtime updates from the server.
+    // Otherwise narrowing config (e.g. disabling clicks via remote config)
+    // is silently ignored because listeners were registered at init time.
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, clicks: true },
+      "http://localhost/ingest/browser",
+    );
+
+    const button = document.createElement("button");
+    button.textContent = "Submit";
+    document.body.appendChild(button);
+
+    button.click();
+    const before = getSnapshot().filter(b => b.category === "click").length;
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    updateBreadcrumbConfig({ ...defaultBreadcrumbConfig, clicks: false });
+
+    button.click();
+    const after = getSnapshot().filter(b => b.category === "click").length;
+    expect(after).toBe(before);
+
+    document.body.removeChild(button);
   });
 
   describe("click breadcrumbs", () => {

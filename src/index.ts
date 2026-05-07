@@ -8,6 +8,8 @@ import { initReplay, applyReplaySampling, destroyReplay, discardReplay, flushRep
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
+import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
+import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 import { setConsent as setConsentState, getConsent, onConsentDenied, destroyConsent } from "./consent.js";
 import type { ConsentState } from "./consent.js";
 
@@ -18,9 +20,8 @@ let serverConfig: ServerConfig = DEFAULT_SERVER_CONFIG;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
 
-// Original references for teardown
-let visibilityHandler: (() => void) | null = null;
-let pagehideHandler: EventListener | null = null;
+// Lifecycle subscription teardowns
+let lifecycleUnsubscribers: (() => void)[] = [];
 
 const COLLECT_PATH = "/ingest/browser";
 const CONFIG_PATH = "/ingest/browser/config";
@@ -146,6 +147,10 @@ function startCollection(endpoint: string): void {
   const cfg = DEFAULT_SERVER_CONFIG;
 
   initSession(cfg.session.inactivity_timeout_ms);
+  // Patch fetch/XHR once. Breadcrumbs and tracing both subscribe to the
+  // hook instead of patching independently — that's what made destroy order
+  // load-bearing.
+  initNetworkHook();
   initBreadcrumbs(cfg.breadcrumbs, endpoint + COLLECT_PATH);
   initErrors(
     cfg.errors,
@@ -176,20 +181,17 @@ function startCollection(endpoint: string): void {
   // pushed as it updates rather than deferred to pagehide — web-vitals'
   // default finalisers run via `requestIdleCallback` which doesn't complete
   // before page unload and would otherwise lose the final value.
-  visibilityHandler = () => {
-    if (document.visibilityState === "hidden") {
-      flushEvents(true);
-    }
-  };
-  document.addEventListener("visibilitychange", visibilityHandler);
-
+  lifecycleUnsubscribers.push(
+    onVisibilityChange((state) => {
+      if (state === "hidden") flushEvents(true);
+    }),
+  );
   // Flush on tab close / navigation away
-  pagehideHandler = (e: Event) => {
-    if (!(e as PageTransitionEvent).persisted && initialized) {
-      flushEvents(true);
-    }
-  };
-  window.addEventListener("pagehide", pagehideHandler);
+  lifecycleUnsubscribers.push(
+    onPageHide((persisted) => {
+      if (!persisted && initialized) flushEvents(true);
+    }),
+  );
 
   // Flush on SPA navigation — use breadcrumbs' central navigation hook
   // instead of wrapping history methods again. Fire *after* the hook so
@@ -214,25 +216,22 @@ function applyServerConfig(cfg: ServerConfig): void {
 }
 
 function stopCollection(): void {
-  // Order matters: breadcrumbs before tracing (unwinding patch chain)
+  // Unregister listeners before tearing down the hook so the hook doesn't
+  // call into half-destroyed modules during in-flight requests.
   destroyReplay();
-  destroyBreadcrumbs();
   destroyTracing();
+  destroyBreadcrumbs();
   destroyErrors();
   destroyVitals();
+  destroyNetworkHook();
 
   if (flushTimer) {
     clearInterval(flushTimer);
     flushTimer = null;
   }
-  if (visibilityHandler) {
-    document.removeEventListener("visibilitychange", visibilityHandler);
-    visibilityHandler = null;
-  }
-  if (pagehideHandler) {
-    window.removeEventListener("pagehide", pagehideHandler);
-    pagehideHandler = null;
-  }
+  for (const unsub of lifecycleUnsubscribers) unsub();
+  lifecycleUnsubscribers = [];
+  destroyLifecycle();
 }
 
 function flushEvents(useBeacon: boolean): void {

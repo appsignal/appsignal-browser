@@ -122,7 +122,7 @@ When the config arrives, it propagates to all modules:
 - If `enabled` is false, buffers are discarded and collection stops.
 - Breadcrumbs: real `network_blocklist`, `query_params_allowlist`, and `network_payloads` replace fallbacks. Blocked/stripped requests are handled correctly from this point.
 - Errors: real `sample_rate` takes effect for subsequent errors.
-- Replay sampling: a per-session random (rolled once at init) is compared against the real `sample_rate`. Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs.
+- Replay sampling: a per-session sampling roll is derived from `session_id` (FNV-1a hash → `[0, 1)`) and compared against the real `sample_rate`. Because the roll is a function of the session ID, the decision is stable across page loads within one session — multi-page apps don't re-roll on every navigation, so "10 % of sessions" stays "10 % of sessions" rather than collapsing into "10 % of page loads". Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs, and only for the post-error window (`error_replay_window_ms`).
 
 The fallback is safe and captures everything:
 - All collectors enabled so no data is missed.
@@ -132,7 +132,7 @@ The fallback is safe and captures everything:
 
 During the config fetch window (~100ms), the plugin may collect slightly more than the server config allows (breadcrumbs from blocklisted URLs, errors at 100% vs. server rate). Acceptable: collecting too much briefly beats missing early session data.
 
-**Not honored at runtime after init.** The breadcrumb category toggles (`breadcrumbs.console`, `clicks`, `network`, `long_tasks`, `scroll_depth`, `form_abandonment`, `user_timing`) and `breadcrumbs.enabled` are wired only at init based on the fallback config. If the server config changes any of these from the fallback, the listeners stay attached and breadcrumbs of those categories continue to be collected for the rest of the page lifetime. To disable them, the server must return `enabled: false` (which tears down all collection) or the customer must redeploy with a different fallback. Future work may add runtime category gating.
+**Honored at runtime.** Every per-category breadcrumb toggle (`breadcrumbs.console`, `clicks`, `network`, `long_tasks`, `scroll_depth`, `form_abandonment`, `user_timing`) is gated inside its handler against the live config, so flipping a category off in server config takes effect on the next event without a reinit. Listeners stay attached either way — the gate is at the call site — keeping the cost of an "off" toggle to one branch per event. To stop *all* collection (not just breadcrumbs), the server returns top-level `enabled: false`, which tears down every collector.
 
 If the config request fails, the plugin continues with the fallback. Not cached across page loads; fetched fresh on every `init()`.
 
@@ -167,9 +167,12 @@ The response is a JSON object matching the resolved `BrowserConfig` for the key'
     "enabled": true,
     "sample_rate": 0.1,
     "error_replay": true,
+    "error_replay_window_ms": 30000,
     "mask_all_inputs": true,
     "mask_selectors": [],
-    "block_selectors": []
+    "block_selectors": [],
+    "max_duration_ms": 14400000,
+    "checkout_interval_ms": 60000
   },
   "session": { "inactivity_timeout_ms": 1800000 }
 }
@@ -179,17 +182,17 @@ The response is a JSON object matching the resolved `BrowserConfig` for the key'
 
 A session is a continuous period of user activity on a website.
 
-**Session start:** First page load, or a page load after the inactivity timeout (`session.inactivity_timeout`, default 30 minutes). Each session gets a `session_id` (UUIDv7) generated client-side.
+**Session start:** First page load, or a page load after the inactivity timeout (`session.inactivity_timeout`, default 30 minutes). Each session gets a `session_id` (UUIDv4 via `crypto.randomUUID()`) generated client-side. The server should treat it as an opaque string — it is not lexicographically sortable by creation time. If a future server design wants time-sorted IDs (e.g. for a B-tree primary-key index), use the event timestamp or switch to v7 here; do not assume `session_id` order.
 
 **Session continuation:** Activity resets the inactivity timer. Activity = click, keyboard input, scroll, navigation, or XHR/fetch completion. Every activity touch checks the gap since the previous activity. If it exceeds the timeout (e.g. laptop asleep for hours), a new session is created before recording. This is the primary expiry mechanism, regardless of timer or visibility event ordering.
 
 **Session end:** On `visibilitychange` to hidden, the in-memory session ID is cleared so the next activity checks the timestamp. When visible again, if the inactivity timeout elapsed during sleep, the session is expired and a new one starts on the next event. These visibility checks are secondary; the activity-based check is authoritative. Session duration is computed server-side from first and last event timestamps.
 
-**Session storage:** `session_id`, `last_activity`, and user context (from `setUser()`) live in `localStorage` so a session persists across tab close/reopen and is shared between tabs on the same origin. Session identity is bounded by the 30-minute inactivity timeout, not the tab lifecycle. `anonymous_id` (UUIDv7) is also in `localStorage` to correlate sessions from the same browser across longer gaps. Neither is a user identifier.
+**Session storage:** `session_id`, `last_activity`, and user context (from `setUser()`) live in `localStorage` so a session persists across tab close/reopen and is shared between tabs on the same origin. Session identity is bounded by the 30-minute inactivity timeout, not the tab lifecycle. `anonymous_id` (UUIDv4) is also in `localStorage` to correlate sessions from the same browser across longer gaps. Neither is a user identifier.
 
 **Cross-tab sync:** Two tabs on the same origin share one `session_id`. The SDK listens for `storage` events on `appsignal_session_id`, `appsignal_last_activity`, and `appsignal_user`, mirroring changes from other tabs into in-memory state. `getSessionId()` also re-reads `last_activity` from `localStorage` before its timeout check, so a tab that stays visible but idle still picks up activity in another tab and doesn't drift onto a separate session. The visibility handler covers the hidden→visible transition; the storage events and the re-read cover concurrently-visible tabs.
 
-**Per-tab id:** Each tab gets a `tab_id` (UUIDv7) minted once per tab in `sessionStorage`. It survives in-tab reloads, dies with the tab. Every payload includes both `session_id` and `tab_id` in the session block, so the server can group concurrent activity from multiple tabs under one session and reconstruct the per-tab journey. Replay chunks are uniquely keyed by `(session_id, tab_id, chunk_index)` — two tabs of one session can record in parallel without colliding on `chunk_index`. The chunk counter lives in `sessionStorage` keyed by `appsignal_replay_chunk_index_<session_id>_<tab_id>` and is naturally tab-scoped.
+**Per-tab id:** Each tab gets a `tab_id` (UUIDv4) minted once per tab in `sessionStorage`. It survives in-tab reloads, dies with the tab. Every payload includes both `session_id` and `tab_id` in the session block, so the server can group concurrent activity from multiple tabs under one session and reconstruct the per-tab journey. Replay chunks are uniquely keyed by `(session_id, tab_id, chunk_index)` — two tabs of one session can record in parallel without colliding on `chunk_index`. The chunk counter lives in `sessionStorage` keyed by `appsignal_replay_chunk_index_<session_id>_<tab_id>` and is naturally tab-scoped.
 
 **Explicit session end:** `endSession()` flushes pending events and replay chunks under the current `session_id`, then clears session and user state so the next event starts a fresh session. Call on logout. `clearUser()` only clears user identity — it does not rotate the session. `destroy()` tears down the SDK entirely and clears all session storage.
 
@@ -335,9 +338,9 @@ Stack traces are sent as raw strings. Source map processing is server-side (futu
 
 Uses [@rrweb/record](https://github.com/rrweb-io/rrweb) (recorder-only, not the full rrweb bundle) to record the DOM as an event sequence.
 
-**When to record.** Recording always starts immediately on `init()` because the fallback config has `replay.sample_rate: 1.0`. A per-session random is rolled once at init and stored. When the server config arrives, the random is compared against the real sample rate:
-- `sessionRandom < replay.sample_rate`: sampled. Recording continues; chunks flush normally.
-- Not sampled, `replay.error_replay = true`: recording continues but chunks flush only if an error occurs. Full replay from session start for error sessions without wasting bandwidth on error-free ones.
+**When to record.** Recording always starts immediately on `init()` because the fallback config has `replay.sample_rate: 1.0`. The sampling roll is derived from `session_id` (FNV-1a → `[0, 1)`), so the decision is deterministic per session and stable across page loads — multi-page apps don't re-roll on every navigation. When the server config arrives, the roll is compared against the real sample rate:
+- `seededRandom(session_id) < replay.sample_rate`: sampled. Recording continues; chunks flush normally.
+- Not sampled, `replay.error_replay = true`: recording continues but chunks ship only if an error occurs. After each error, a post-error window (`replay.error_replay_window_ms`, default 30 s) keeps shipping subsequent flushes; the window slides forward on each new error and closes again when no new errors land within it. Captures the lead-up and immediate aftermath of an error without uploading the rest of an otherwise-quiet session.
 - Not sampled, `replay.error_replay = false`: buffer discarded, recording stops.
 
 This ensures replay data is captured from the first DOM mutation regardless of config fetch time. The fallback sample rate of 1.0 drives this; no special "always record" logic needed.
@@ -354,7 +357,7 @@ Additional masking via two config fields passed to rrweb at init:
 
 **Maximum recording duration.** Stops after `replay.max_duration_ms` (default 4 hours). Configurable server-side. Combined with the 30-minute inactivity timeout, most recordings are much shorter.
 
-**Storage budget.** 50 MB in-memory cap for rrweb events. If a session exceeds it, older chunks are dropped and `replay_truncated: true` is set on the session.
+**Storage budget.** 50 MB in-memory cap for rrweb events. If a session exceeds it, older chunks are dropped and `replay_truncated: true` is set on the session. A separate 32 MB cap bounds the *transport* retry queue (failed-send chunks waiting for the network to recover); see *Retry* below for eviction semantics.
 
 ### Event batching and transport
 
@@ -369,7 +372,11 @@ All non-error, non-replay events (breadcrumbs, vitals, session metadata) are bat
 
 The ingestion key is always a query parameter: `POST /ingest/browser?key=<key>`. `Content-Type: text/plain` (body is JSON, but `text/plain` avoids CORS preflight, critical for cross-origin collection). The backend parses as JSON regardless of Content-Type.
 
-**Retry.** Failed batches retry up to 3 times with exponential backoff and jitter. 5xx uses 1-second base (1s, 2s, 4s). 429 uses 5-second base (5s, 10s, 20s) to respect server capacity. Client errors (4xx other than 429) are not retried. If the browser goes offline mid-request, or all in-line retries are exhausted while the server is still failing, the payload goes into an in-memory retry queue. The queue drains on the next `online` event and on a 30 s periodic timer, so transient outages that don't trigger a network-state change (e.g. a server restart with an otherwise-healthy network) still recover. Payloads above the client-side cap of 10 MB — matching the server's `DefaultBodyLimit` — are dropped before sending.
+**Retry.** Failed batches retry up to 3 times with exponential backoff and jitter. 5xx uses 1-second base (1s, 2s, 4s). 429 uses 5-second base (5s, 10s, 20s) to respect server capacity. Client errors (4xx other than 429) are not retried. If the browser goes offline mid-request, or all in-line retries are exhausted while the server is still failing, the payload goes into an in-memory retry queue bounded to 32 MB total. The queue drains on the next `online` event and on a 30 s periodic timer, so transient outages that don't trigger a network-state change (e.g. a server restart with an otherwise-healthy network) still recover. Eviction is FIFO: when a new payload would push the queue past 32 MB, the oldest entries drop until it fits. Single payloads above the 10 MB per-payload cap (matching the server's `DefaultBodyLimit`) are dropped before sending.
+
+**Retry queue and replay reconstructability.** Replay chunks anchor on the most recent `FullSnapshot` (one at recording start, one every `checkout_interval_ms`). Mutation-only chunks between two checkouts depend on the chunk that contained their anchor. If the offline buffer evicts that anchor chunk (because newer ones pushed total bytes past 32 MB), the dependent mutation chunks become unrenderable on the server until the next surviving `FullSnapshot`. In practice, periodic checkouts mean the loss is bounded to whatever sits between two anchors. Long offline windows on heavy DOMs (large `FullSnapshot` chunks, many mutations) hit this sooner; brief offline drops typically fit comfortably.
+
+**Network breadcrumb status semantics.** A network breadcrumb's message uses the form `<METHOD> <url> <status>` for any request that received a response, including non-2xx responses (e.g. `GET /api/missing 404` — the status code is preserved in the timeline). The `(error)` suffix is reserved for *transport failures* — a thrown `fetch` rejection or an XHR `error` event where no response was received. Consumers can distinguish via `data.status` (always present when the request completed) and `data.error: true` (set only for transport failures).
 
 **Breadcrumb flush semantics.** Each periodic flush and page-hide event drains the ring buffer — each breadcrumb is sent exactly once and removed. Error payloads snapshot the buffer (without draining) so they always include recent context. Avoids duplicate breadcrumbs across flushes while preserving error context.
 
@@ -381,12 +388,14 @@ Header format: `00-{traceId}-{spanId}-01` where `traceId` is a random 32-hex-cha
 
 Only requests matching `tracePropagationTargets` get the header. Prevents leaking trace context to third-party APIs. Glob syntax (same as `network_blocklist`).
 
+**Concurrent same-URL requests** (e.g. a polling component firing two `GET`s before the first returns) each get their own `traceId`. Trace IDs are queued FIFO per URL; the network breadcrumb pipeline shifts them in the order they were recorded, so each breadcrumb's `data.trace_id` matches the request that produced it. Without this, two requests to the same URL would clobber each other's ID and the second breadcrumb would either inherit the first's trace or have none.
+
 ### Bundle size
 
 Two formats:
 
-- **UMD** (`browser.umd.js`): single file, ~97 KB gzipped. Includes everything. Load via `<script>`.
-- **ESM** (`esm/index.js`): ~13 KB gzipped core. `@rrweb/record` loads as a separate chunk (~82 KB gzipped) only when replay starts, so most page loads only pay 13 KB.
+- **UMD** (`browser.umd.js`): single file, ~100 KB gzipped. Includes everything. Load via `<script>`.
+- **ESM** (`esm/index.js`): ~20 KB gzipped core. `@rrweb/record` loads as a separate chunk (~80 KB gzipped) only when replay starts, so most page loads only pay the core.
 
 The replay recorder accounts for most of the bundle. It is the recorder-only subset of rrweb; no replay player included.
 
