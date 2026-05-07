@@ -213,6 +213,36 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
+  it("respects a server-configured error_replay_window_ms", async () => {
+    // The post-error ship window should be tunable via server config, not
+    // baked in. With a 10 s window, a flush 15 s after the error (with no
+    // new error) must not ship — a hardcoded 30 s default would still ship.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+
+    applyReplaySampling({
+      ...defaultReplayConfig(),
+      sample_rate: 0,
+      error_replay: true,
+      error_replay_window_ms: 10_000,
+    });
+
+    rrwebEmit!({ type: 3, data: "before error" });
+    onError();
+
+    vi.advanceTimersByTime(5000);
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    sendChunkMock.mockClear();
+
+    // Past the configured 10 s window (default would still be 30 s).
+    vi.advanceTimersByTime(11_000);
+
+    rrwebEmit!({ type: 3, data: "after window" });
+    vi.advanceTimersByTime(5000);
+
+    expect(sendChunkMock).not.toHaveBeenCalled();
+  });
+
   it("error_replay window expires so a single early error doesn't ship the whole session", async () => {
     // Without bounding, one onError() flips hadError true forever — every
     // subsequent flush ships, so a single error 30 s into a 4-hour session

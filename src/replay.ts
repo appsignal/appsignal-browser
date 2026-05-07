@@ -27,7 +27,6 @@ let lifecycleUnsubscribers: (() => void)[] = [];
 let listenersRegistered = false;
 
 const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
-const ERROR_REPLAY_WINDOW_MS = 30_000;
 
 const chunkIndexKey = (sessionId: string, tabId: string) =>
   `appsignal_replay_chunk_index_${sessionId}_${tabId}`;
@@ -123,13 +122,14 @@ export function applyReplaySampling(realConfig: ServerConfig["replay"]): void {
 export function onError(): void {
   // Sliding window: each error extends the post-error ship window. Without
   // resetting hadError, a single error early in the session would cause every
-  // subsequent flush to ship for hours.
+  // subsequent flush to ship for hours. Window length is server-tunable via
+  // replay.error_replay_window_ms.
   hadError = true;
   if (errorReplayTimer) clearTimeout(errorReplayTimer);
   errorReplayTimer = setTimeout(() => {
     hadError = false;
     errorReplayTimer = null;
-  }, ERROR_REPLAY_WINDOW_MS);
+  }, config.error_replay_window_ms);
 }
 
 async function startRecording(): Promise<void> {
