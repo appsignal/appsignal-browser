@@ -122,7 +122,7 @@ When the config arrives, it propagates to all modules:
 - If `enabled` is false, buffers are discarded and collection stops.
 - Breadcrumbs: real `network_blocklist`, `query_params_allowlist`, and `network_payloads` replace fallbacks. Blocked/stripped requests are handled correctly from this point.
 - Errors: real `sample_rate` takes effect for subsequent errors.
-- Replay sampling: a per-session sampling roll is derived from `session_id` (FNV-1a hash → `[0, 1)`) and compared against the real `sample_rate`. Because the roll is a function of the session ID, the decision is stable across page loads within one session — multi-page apps don't re-roll on every navigation, so "10 % of sessions" stays "10 % of sessions" rather than collapsing into "10 % of page loads". Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs, and only for the post-error window (`error_replay_window_ms`).
+- Replay sampling: a per-session sampling roll is derived from `session_id` (FNV-1a hash → `[0, 1)`) and compared against the real `sample_rate`. Because the roll is a function of the session ID, the decision is stable across page loads within one session — multi-page apps don't re-roll on every navigation, so "10 % of sessions" stays "10 % of sessions" rather than collapsing into "10 % of page loads". Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs (see *Session replay* below for the per-error window semantics).
 
 The fallback is safe and captures everything:
 - All collectors enabled so no data is missed.
@@ -167,12 +167,10 @@ The response is a JSON object matching the resolved `BrowserConfig` for the key'
     "enabled": true,
     "sample_rate": 0.1,
     "error_replay": true,
-    "error_replay_window_ms": 30000,
     "mask_all_inputs": true,
     "mask_selectors": [],
     "block_selectors": [],
-    "max_duration_ms": 14400000,
-    "checkout_interval_ms": 60000
+    "max_duration_ms": 14400000
   },
   "session": { "inactivity_timeout_ms": 1800000 }
 }
@@ -340,7 +338,7 @@ Uses [@rrweb/record](https://github.com/rrweb-io/rrweb) (recorder-only, not the 
 
 **When to record.** Recording always starts immediately on `init()` because the fallback config has `replay.sample_rate: 1.0`. The sampling roll is derived from `session_id` (FNV-1a → `[0, 1)`), so the decision is deterministic per session and stable across page loads — multi-page apps don't re-roll on every navigation. When the server config arrives, the roll is compared against the real sample rate:
 - `seededRandom(session_id) < replay.sample_rate`: sampled. Recording continues; chunks flush normally.
-- Not sampled, `replay.error_replay = true`: recording continues but chunks ship only if an error occurs. After each error, a post-error window (`replay.error_replay_window_ms`, default 30 s) keeps shipping subsequent flushes; the window slides forward on each new error and closes again when no new errors land within it. Captures the lead-up and immediate aftermath of an error without uploading the rest of an otherwise-quiet session.
+- Not sampled, `replay.error_replay = true`: recording continues but chunks ship only when an error fires. On each error, the SDK ships the **pre-error buffer** (events since the most recent rrweb `FullSnapshot` — up to ~1 minute of context) plus a **5 s post-error tail** of subsequent activity. Errors that land inside an active tail are absorbed: they don't trigger a fresh flush or extend the window, so per-session upload stays bounded even on cascading errors. The pre-error window length is bounded by the full-snapshot interval (60 s, hardcoded) — both are implementation details, not server-tunable.
 - Not sampled, `replay.error_replay = false`: buffer discarded, recording stops.
 
 This ensures replay data is captured from the first DOM mutation regardless of config fetch time. The fallback sample rate of 1.0 drives this; no special "always record" logic needed.
@@ -357,7 +355,7 @@ Additional masking via two config fields passed to rrweb at init:
 
 **Maximum recording duration.** Stops after `replay.max_duration_ms` (default 4 hours). Configurable server-side. Combined with the 30-minute inactivity timeout, most recordings are much shorter.
 
-**Storage budget.** 50 MB in-memory cap for rrweb events. If a session exceeds it, older chunks are dropped and `replay_truncated: true` is set on the session. A separate 32 MB cap bounds the *transport* retry queue (failed-send chunks waiting for the network to recover); see *Retry* below for eviction semantics.
+**Storage budget.** The in-memory rrweb buffer is naturally bounded by the full-snapshot interval (60 s of mutations between two `FullSnapshot`s). On every full-snapshot boundary the previous buffer is either shipped (sampled sessions) or dropped (unsampled `error_replay` sessions, since the old `FullSnapshot` it anchored on is gone). No size cap is needed — the buffer never grows beyond one snapshot interval. A separate 32 MB cap bounds the *transport* retry queue (failed-send chunks waiting for the network to recover); see *Retry* below for eviction semantics.
 
 ### Event batching and transport
 
@@ -374,7 +372,7 @@ The ingestion key is always a query parameter: `POST /ingest/browser?key=<key>`.
 
 **Retry.** Failed batches retry up to 3 times with exponential backoff and jitter. 5xx uses 1-second base (1s, 2s, 4s). 429 uses 5-second base (5s, 10s, 20s) to respect server capacity. Client errors (4xx other than 429) are not retried. If the browser goes offline mid-request, or all in-line retries are exhausted while the server is still failing, the payload goes into an in-memory retry queue bounded to 32 MB total. The queue drains on the next `online` event and on a 30 s periodic timer, so transient outages that don't trigger a network-state change (e.g. a server restart with an otherwise-healthy network) still recover. Eviction is FIFO: when a new payload would push the queue past 32 MB, the oldest entries drop until it fits. Single payloads above the 10 MB per-payload cap (matching the server's `DefaultBodyLimit`) are dropped before sending.
 
-**Retry queue and replay reconstructability.** Replay chunks anchor on the most recent `FullSnapshot` (one at recording start, one every `checkout_interval_ms`). Mutation-only chunks between two checkouts depend on the chunk that contained their anchor. If the offline buffer evicts that anchor chunk (because newer ones pushed total bytes past 32 MB), the dependent mutation chunks become unrenderable on the server until the next surviving `FullSnapshot`. In practice, periodic checkouts mean the loss is bounded to whatever sits between two anchors. Long offline windows on heavy DOMs (large `FullSnapshot` chunks, many mutations) hit this sooner; brief offline drops typically fit comfortably.
+**Retry queue and replay reconstructability.** Replay chunks anchor on the most recent `FullSnapshot` (one at recording start, one every 60 s). Mutation-only chunks between two anchors depend on the chunk that contained their anchor. If the offline buffer evicts that anchor chunk (because newer ones pushed total bytes past 32 MB), the dependent mutation chunks become unrenderable on the server until the next surviving `FullSnapshot`. In practice, periodic snapshots mean the loss is bounded to whatever sits between two anchors. Long offline windows on heavy DOMs (large `FullSnapshot` chunks, many mutations) hit this sooner; brief offline drops typically fit comfortably.
 
 **Network breadcrumb status semantics.** A network breadcrumb's message uses the form `<METHOD> <url> <status>` for any request that received a response, including non-2xx responses (e.g. `GET /api/missing 404` — the status code is preserved in the timeline). The `(error)` suffix is reserved for *transport failures* — a thrown `fetch` rejection or an XHR `error` event where no response was received. Consumers can distinguish via `data.status` (always present when the request completed) and `data.error: true` (set only for transport failures).
 

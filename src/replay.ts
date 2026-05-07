@@ -16,9 +16,13 @@ let sessionRandom = 0;
 let sampled = true;
 let errorReplayEnabled = false;
 let hadError = false;
+// Holds rrweb events since the most recent FullSnapshot. Capped naturally by
+// FULL_SNAPSHOT_INTERVAL_MS — on every full-snapshot boundary the buffer is
+// reset (and either shipped, for sampled sessions, or dropped, for unsampled
+// ones). Anything older than the last full snapshot is unrenderable on the
+// server because the FullSnapshot it depended on is gone, so there's no value
+// in keeping it.
 let eventBuffer: unknown[] = [];
-let eventSizes: number[] = [];
-let totalMemoryBytes = 0;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let maxRecordingTimer: ReturnType<typeof setTimeout> | null = null;
 let errorReplayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -26,7 +30,14 @@ let recordFn: ((opts: Record<string, unknown>) => (() => void) | undefined) | nu
 let lifecycleUnsubscribers: (() => void)[] = [];
 let listenersRegistered = false;
 
-const MAX_MEMORY_BYTES = 50 * 1024 * 1024; // 50 MB
+// Implementation details, not server-tunable. The pre-error window the
+// unsampled+error_replay path captures is implicitly equal to
+// FULL_SNAPSHOT_INTERVAL_MS (the buffer holds events since the latest FullSnapshot).
+// POST_ERROR_TAIL_MS is how long we keep shipping after an error so the
+// immediate user reaction lands in the replay too.
+const FULL_SNAPSHOT_INTERVAL_MS = 60_000;
+const POST_ERROR_TAIL_MS = 5_000;
+const FLUSH_INTERVAL_MS = 5_000;
 
 const chunkIndexKey = (sessionId: string, tabId: string) =>
   `appsignal_replay_chunk_index_${sessionId}_${tabId}`;
@@ -120,16 +131,19 @@ export function applyReplaySampling(realConfig: ServerConfig["replay"]): void {
 }
 
 export function onError(): void {
-  // Sliding window: each error extends the post-error ship window. Without
-  // resetting hadError, a single error early in the session would cause every
-  // subsequent flush to ship for hours. Window length is server-tunable via
-  // replay.error_replay_window_ms.
+  // Each error opens a single fixed window: ship the current pre-error
+  // buffer immediately, plus POST_ERROR_TAIL_MS of subsequent activity.
+  // Errors that fire while a tail is still active are absorbed — they
+  // don't extend or re-trigger the window. This keeps the per-session
+  // upload bounded even for cascading errors; the in-flight tail already
+  // captures the immediate aftermath.
+  if (errorReplayTimer !== null) return;
   hadError = true;
-  if (errorReplayTimer) clearTimeout(errorReplayTimer);
   errorReplayTimer = setTimeout(() => {
     hadError = false;
     errorReplayTimer = null;
-  }, config.error_replay_window_ms);
+  }, POST_ERROR_TAIL_MS);
+  flushChunk();
 }
 
 async function startRecording(): Promise<void> {
@@ -143,26 +157,25 @@ async function startRecording(): Promise<void> {
 
     const stopFn = recordFn!({
       emit: (event: unknown, isCheckout?: boolean) => {
-        // Flush before a new full snapshot so each chunk starts clean
-        if (isCheckout && eventBuffer.length > 0) {
-          flushChunk();
+        if (isCheckout) {
+          // rrweb is about to push a fresh FullSnapshot. The previous
+          // chunk's events are still anchored on the *old* FullSnapshot;
+          // for sampled sessions we ship them now (one chunk per
+          // full-snapshot interval). For unsampled sessions the previous
+          // events are unrenderable without the old snapshot we're about
+          // to lose, so we drop them — replay starts fresh from this
+          // boundary.
+          if (sampled && eventBuffer.length > 0) {
+            flushChunk();
+          } else {
+            eventBuffer = [];
+          }
         }
-
-        let size: number;
-        try { size = JSON.stringify(event).length; }
-        catch { size = 1024; }
-        totalMemoryBytes += size;
-
-        while (eventBuffer.length > 0 && totalMemoryBytes > MAX_MEMORY_BYTES) {
-          eventBuffer.shift();
-          const removed = eventSizes.shift();
-          if (removed !== undefined) totalMemoryBytes -= removed;
-        }
-
         eventBuffer.push(event);
-        eventSizes.push(size);
       },
-      checkoutEveryNms: config.checkout_interval_ms || undefined,
+      // rrweb's API uses "checkout" terminology for what we call a
+      // full-snapshot interval — same concept, different word.
+      checkoutEveryNms: FULL_SNAPSHOT_INTERVAL_MS,
       maskAllInputs: config.mask_all_inputs,
       maskTextSelector: config.mask_selectors.length
         ? config.mask_selectors.join(", ")
@@ -178,7 +191,7 @@ async function startRecording(): Promise<void> {
     isRecording = true;
     isPaused = false;
 
-    flushTimer = setInterval(flushChunk, 5000);
+    flushTimer = setInterval(flushChunk, FLUSH_INTERVAL_MS);
 
     // Clear any existing timeout from a previous start (pause→resume)
     if (maxRecordingTimer) clearTimeout(maxRecordingTimer);
@@ -217,8 +230,6 @@ function flushChunk(useBeacon = false): void {
 
   const events = eventBuffer;
   eventBuffer = [];
-  eventSizes = [];
-  totalMemoryBytes = 0;
 
   const sessionId = getSessionId();
   const tabId = getTabId();
@@ -281,8 +292,6 @@ export function destroyReplay(): void {
 export function discardReplay(): void {
   clearTimers();
   eventBuffer = [];
-  eventSizes = [];
-  totalMemoryBytes = 0;
   if (recorder) {
     recorder.stop();
     recorder = null;
