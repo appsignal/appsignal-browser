@@ -679,20 +679,19 @@ async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
     }
   }
 
-  // Resource timing — observer may not have flushed yet. Stay non-blocking
-  // here; the breadcrumb is anchored on startTime and the buffer holds a
-  // reference to the data object, so a late-arriving timing still lands on
-  // the in-flight breadcrumb. Race window is the same as before this commit
-  // and pre-existing for resource timing.
-  const rt = getResourceTiming(result.url);
-  if (rt) {
-    data.resource_timing = rt;
-  } else {
-    setTimeout(() => {
-      const timing = getResourceTiming(result.url);
-      if (timing) data.resource_timing = timing;
-    }, 150);
+  // Resource timing — the PerformanceObserver may not have flushed yet, so
+  // a sync read often returns nothing right after fetch resolution. Wait
+  // briefly and re-read before pushing, so the breadcrumb is complete on
+  // push (same pattern as body capture above). Without this, a flush
+  // between fetch resolution and the timing entry's arrival serialises
+  // without resource_timing — the case that matters most is a fetch right
+  // before a pagehide, which is exactly when timing detail is wanted.
+  let rt = getResourceTiming(result.url);
+  if (!rt) {
+    await new Promise((r) => setTimeout(r, 150));
+    rt = getResourceTiming(result.url);
   }
+  if (rt) data.resource_timing = rt;
 
   addBreadcrumb({
     timestamp: result.startTime,
