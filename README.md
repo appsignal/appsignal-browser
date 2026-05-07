@@ -122,7 +122,7 @@ When the config arrives, it propagates to all modules:
 - If `enabled` is false, buffers are discarded and collection stops.
 - Breadcrumbs: real `network_blocklist`, `query_params_allowlist`, and `network_payloads` replace fallbacks. Blocked/stripped requests are handled correctly from this point.
 - Errors: real `sample_rate` takes effect for subsequent errors.
-- Replay sampling: a per-session sampling roll is derived from `session_id` (FNV-1a hash → `[0, 1)`) and compared against the real `sample_rate`. Because the roll is a function of the session ID, the decision is stable across page loads within one session — multi-page apps don't re-roll on every navigation, so "10 % of sessions" stays "10 % of sessions" rather than collapsing into "10 % of page loads". Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs, and only for the post-error window (`error_replay_window_ms`).
+- Replay sampling: a per-session sampling roll is derived from `session_id` (FNV-1a hash → `[0, 1)`) and compared against the real `sample_rate`. Because the roll is a function of the session ID, the decision is stable across page loads within one session — multi-page apps don't re-roll on every navigation, so "10 % of sessions" stays "10 % of sessions" rather than collapsing into "10 % of page loads". Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs, and only for the post-error window (`after_error_replay_window_ms`).
 
 The fallback is safe and captures everything:
 - All collectors enabled so no data is missed.
@@ -167,7 +167,7 @@ The response is a JSON object matching the resolved `BrowserConfig` for the key'
     "enabled": true,
     "sample_rate": 0.1,
     "error_replay": true,
-    "error_replay_window_ms": 30000,
+    "after_error_replay_window_ms": 30000,
     "mask_all_inputs": true,
     "mask_selectors": [],
     "block_selectors": [],
@@ -340,7 +340,7 @@ Uses [@rrweb/record](https://github.com/rrweb-io/rrweb) (recorder-only, not the 
 
 **When to record.** Recording always starts immediately on `init()` because the fallback config has `replay.sample_rate: 1.0`. The sampling roll is derived from `session_id` (FNV-1a → `[0, 1)`), so the decision is deterministic per session and stable across page loads — multi-page apps don't re-roll on every navigation. When the server config arrives, the roll is compared against the real sample rate:
 - `seededRandom(session_id) < replay.sample_rate`: sampled. Recording continues; chunks flush normally.
-- Not sampled, `replay.error_replay = true`: recording continues but chunks ship only if an error occurs. After each error, a post-error window (`replay.error_replay_window_ms`, default 30 s) keeps shipping subsequent flushes; the window slides forward on each new error and closes again when no new errors land within it. Captures the lead-up and immediate aftermath of an error without uploading the rest of an otherwise-quiet session.
+- Not sampled, `replay.error_replay = true`: recording continues but chunks ship only if an error occurs. After each error, a post-error window (`replay.after_error_replay_window_ms`, default 30 s) keeps shipping subsequent flushes; the window slides forward on each new error and closes again when no new errors land within it. Captures the lead-up and immediate aftermath of an error without uploading the rest of an otherwise-quiet session.
 - Not sampled, `replay.error_replay = false`: buffer discarded, recording stops.
 
 This ensures replay data is captured from the first DOM mutation regardless of config fetch time. The fallback sample rate of 1.0 drives this; no special "always record" logic needed.

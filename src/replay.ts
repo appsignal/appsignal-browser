@@ -123,13 +123,13 @@ export function onError(): void {
   // Sliding window: each error extends the post-error ship window. Without
   // resetting hadError, a single error early in the session would cause every
   // subsequent flush to ship for hours. Window length is server-tunable via
-  // replay.error_replay_window_ms.
+  // replay.after_error_replay_window_ms.
   hadError = true;
   if (errorReplayTimer) clearTimeout(errorReplayTimer);
   errorReplayTimer = setTimeout(() => {
     hadError = false;
     errorReplayTimer = null;
-  }, config.error_replay_window_ms);
+  }, config.after_error_replay_window_ms);
 }
 
 async function startRecording(): Promise<void> {

@@ -213,7 +213,7 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[2][0].chunk_index).toBe(0);
   });
 
-  it("respects a server-configured error_replay_window_ms", async () => {
+  it("respects a server-configured after_error_replay_window_ms", async () => {
     // The post-error ship window should be tunable via server config, not
     // baked in. With a 10 s window, a flush 15 s after the error (with no
     // new error) must not ship — a hardcoded 30 s default would still ship.
@@ -224,7 +224,7 @@ describe("replay", () => {
       ...defaultReplayConfig(),
       sample_rate: 0,
       error_replay: true,
-      error_replay_window_ms: 10_000,
+      after_error_replay_window_ms: 10_000,
     });
 
     rrwebEmit!({ type: 3, data: "before error" });

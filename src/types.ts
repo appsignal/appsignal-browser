@@ -53,7 +53,7 @@ export interface ServerConfig {
     error_replay: boolean;
     /** How long the post-error ship window stays open after each error.
      * Each new error within the window slides it forward. */
-    error_replay_window_ms: number;
+    after_error_replay_window_ms: number;
     mask_all_inputs: boolean;
     mask_selectors: string[];
     block_selectors: string[];
@@ -170,7 +170,7 @@ export const DEFAULT_SERVER_CONFIG: ServerConfig = {
     enabled: true,
     sample_rate: 1.0,
     error_replay: true,
-    error_replay_window_ms: 30_000,
+    after_error_replay_window_ms: 30_000,
     mask_all_inputs: true,
     mask_selectors: [],
     block_selectors: [],
