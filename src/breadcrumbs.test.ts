@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   initBreadcrumbs,
   addBreadcrumb,
@@ -8,6 +8,7 @@ import {
   updateBreadcrumbConfig,
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
+import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import type { ServerConfig } from "./types.js";
 
 vi.mock("./errors.js", () => ({
@@ -138,6 +139,65 @@ describe("breadcrumbs", () => {
     // The config reference is updated — new network breadcrumbs would
     // use the updated blocklist/allowlist. We can't easily test fetch
     // patching here, but we verify the function doesn't throw.
+  });
+
+  describe("network breadcrumbs", () => {
+    let originalFetch: typeof fetch;
+
+    beforeEach(() => {
+      originalFetch = window.fetch;
+    });
+
+    afterEach(() => {
+      destroyNetworkHook();
+      window.fetch = originalFetch;
+    });
+
+    it("includes the HTTP status code for non-2xx responses, not '(error)'", async () => {
+      // (error) belongs to true transport failures (thrown fetch / xhr error
+      // event). A 404 is a perfectly received response and should land as
+      // `GET <url> 404`, like a 200 lands as `GET <url> 200` — the breadcrumb
+      // timeline is more useful when status codes are visible.
+      window.fetch = async () =>
+        new Response("not found", { status: 404, headers: { "content-type": "text/plain" } });
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        "http://localhost/ingest/browser",
+      );
+
+      await window.fetch("http://example.com/api/missing");
+      // Allow any deferred body capture / resource timing to settle.
+      await new Promise((r) => setTimeout(r, 200));
+
+      const networkCrumb = getSnapshot().find((b) => b.category === "network");
+      expect(networkCrumb).toBeDefined();
+      expect(networkCrumb!.message).toBe("GET http://example.com/api/missing 404");
+      expect(networkCrumb!.message).not.toContain("(error)");
+      expect(networkCrumb!.data?.status).toBe(404);
+      expect(networkCrumb!.data?.error).toBeUndefined();
+    });
+
+    it("emits '(error)' only for true transport failures", async () => {
+      window.fetch = async () => {
+        throw new TypeError("Network error");
+      };
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        "http://localhost/ingest/browser",
+      );
+
+      await window.fetch("http://example.com/api/down").catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+
+      const networkCrumb = getSnapshot().find((b) => b.category === "network");
+      expect(networkCrumb).toBeDefined();
+      expect(networkCrumb!.message).toBe("GET http://example.com/api/down (error)");
+      expect(networkCrumb!.data?.error).toBe(true);
+    });
   });
 
   it("updateBreadcrumbConfig disabling clicks stops new click breadcrumbs", () => {

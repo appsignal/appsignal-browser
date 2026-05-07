@@ -82,7 +82,17 @@ export function initBreadcrumbs(
     window.addEventListener("load", () => recordDocumentLoad(), { once: true });
   }
   initResourceTimingObserver();
-  initNetwork();
+  cleanups.push(
+    onAfterRequest((result) => {
+      if (!config.network) return;
+      if (isCollectEndpoint(result.url) || isBlocklisted(result.url)) return;
+      // Fire-and-forget — recordNetworkBreadcrumb awaits any deferred work
+      // (body capture) before pushing, so the breadcrumb is complete on
+      // push. The user's fetch promise has already resolved by the time
+      // the after-request listener fires.
+      void recordNetworkBreadcrumb(result);
+    }),
+  );
   initConsole();
   initLongTasks();
   initScrollDepth();
@@ -599,21 +609,12 @@ function truncateBody(
   return { body, truncated: false };
 }
 
-function initNetwork(): void {
-  const offAfter = onAfterRequest((result) => {
-    if (!config.network) return;
-    if (isCollectEndpoint(result.url) || isBlocklisted(result.url)) return;
-    recordNetworkBreadcrumb(result);
-  });
-  cleanups.push(offAfter);
-}
-
-function recordNetworkBreadcrumb(result: RequestResult): void {
+async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
   const initiator = result.xhr ? "xhr" : "fetch";
   const filteredUrl = filterQueryParams(result.url, config.query_params_allowlist);
 
-  if (result.error && result.status === undefined) {
-    // Network error — no response received
+  if (result.error) {
+    // Transport failure — no response received.
     addBreadcrumb({
       timestamp: result.startTime,
       category: "network",
@@ -644,22 +645,11 @@ function recordNetworkBreadcrumb(result: RequestResult): void {
     if (truncated.truncated) data.request_truncated = true;
   }
 
-  // Resource timing — sync first, fall back to a short async retry since the
-  // PerformanceObserver may not have flushed the entry yet.
-  const rt = getResourceTiming(result.url);
-  if (rt) {
-    data.resource_timing = rt;
-  } else {
-    setTimeout(() => {
-      const timing = getResourceTiming(result.url);
-      if (timing) data.resource_timing = timing;
-    }, 150);
-  }
-
-  // Response body — XHR is sync, fetch needs an async clone+read. Add the
-  // breadcrumb synchronously without the body, then patch the body in once
-  // it's read; ordering on the consumer doesn't change because the breadcrumb
-  // is anchored on startTime.
+  // Response body — XHR is sync, fetch needs clone+text(). Await before the
+  // addBreadcrumb so the buffered breadcrumb is complete on push. The user's
+  // fetch promise has already resolved by now (the hook returns the response
+  // before invoking after-listeners), so we're not adding latency to the
+  // caller.
   if (
     result.xhr &&
     config.network_payloads.enabled &&
@@ -679,31 +669,39 @@ function recordNetworkBreadcrumb(result: RequestResult): void {
     config.network_payloads.response_body &&
     shouldCapturePayload(result.response.headers.get("content-type"))
   ) {
-    result.response
-      .clone()
-      .text()
-      .then((text) => {
-        const truncated = truncateBody(text);
-        data.response_body = truncated.body;
-        if (truncated.truncated) data.truncated = true;
-      })
-      .catch(() => {
-        // ignore body read failures
-      });
+    try {
+      const text = await result.response.clone().text();
+      const truncated = truncateBody(text);
+      data.response_body = truncated.body;
+      if (truncated.truncated) data.truncated = true;
+    } catch {
+      // ignore body read failures
+    }
   }
 
-  const message = result.error
-    ? `${result.method} ${filteredUrl} (error)`
-    : `${result.method} ${filteredUrl} ${result.status}`;
+  // Resource timing — observer may not have flushed yet. Stay non-blocking
+  // here; the breadcrumb is anchored on startTime and the buffer holds a
+  // reference to the data object, so a late-arriving timing still lands on
+  // the in-flight breadcrumb. Race window is the same as before this commit
+  // and pre-existing for resource timing.
+  const rt = getResourceTiming(result.url);
+  if (rt) {
+    data.resource_timing = rt;
+  } else {
+    setTimeout(() => {
+      const timing = getResourceTiming(result.url);
+      if (timing) data.resource_timing = timing;
+    }, 150);
+  }
 
   addBreadcrumb({
     timestamp: result.startTime,
     category: "network",
-    message,
+    message: `${result.method} ${filteredUrl} ${result.status}`,
     data,
   });
 
-  if (!result.error) touchActivity();
+  touchActivity();
 }
 
 // --- Console tracking ---

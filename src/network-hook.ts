@@ -23,7 +23,11 @@ export interface RequestResult {
   requestBody?: string;
   /** Status code when a response was received. Missing on network error. */
   status?: number;
-  /** True for network errors or non-2xx responses. */
+  /** True only for transport failures where no response was received
+   * (thrown fetch, XHR error event). A non-2xx response is *not* an error
+   * here — the request completed; the application code may treat the
+   * status code however it wants. Listeners that want to flag 4xx/5xx
+   * should inspect `status` themselves. */
   error: boolean;
   /** Set for fetch responses. Listeners must `.clone()` before reading. */
   response?: Response;
@@ -107,7 +111,7 @@ function patchFetch(): void {
         startTime,
         endTime: Date.now(),
         status: response.status,
-        error: !response.ok,
+        error: false,
         response,
       };
       for (const l of afterListeners) {
@@ -185,7 +189,7 @@ function patchXhr(): void {
         startTime,
         endTime: Date.now(),
         status: xhr.status,
-        error: xhr.status >= 400,
+        error: false,
         xhr,
       };
       for (const l of afterListeners) {
