@@ -145,6 +145,50 @@ describe("replay", () => {
     expect(sendChunkMock.mock.calls[1][0].events).toContainEqual({ type: 3, data: "after error" });
   });
 
+  it("on checkout, sampled session ships the previous buffer and starts fresh", async () => {
+    // Sampled sessions ship one chunk per full-snapshot interval. When rrweb
+    // emits a checkout, the previous buffer's events were anchored on the
+    // *previous* FullSnapshot — they must ship before the new snapshot
+    // starts a fresh chunk. Without this, the snapshot rotation would mix
+    // events that depend on different anchors into one chunk.
+    initReplay(defaultReplayConfig()); // sample_rate 1.0 → sampled
+    await vi.advanceTimersByTimeAsync(10);
+
+    rrwebEmit!({ type: 3, data: "before checkout" });
+    // rrweb signals "fresh FullSnapshot incoming" by passing isCheckout=true
+    // on the next emit.
+    rrwebEmit!({ type: 2, data: "checkout snapshot" }, true);
+
+    // The pre-checkout buffer is shipped synchronously inside the emit
+    // handler; the new snapshot starts a fresh buffer.
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    expect(sendChunkMock.mock.calls[0][0].events).toEqual([
+      { type: 3, data: "before checkout" },
+    ]);
+  });
+
+  it("on checkout, unsampled error_replay session drops the previous buffer", async () => {
+    // The old FullSnapshot is about to be replaced. Mutations buffered
+    // against it become unrenderable as soon as the new snapshot lands —
+    // shipping them on a future error would just produce broken replay.
+    // Drop them and let the new snapshot anchor a fresh window.
+    initReplay(defaultReplayConfig());
+    await vi.advanceTimersByTimeAsync(10);
+    applyReplaySampling({ ...defaultReplayConfig(), sample_rate: 0, error_replay: true });
+
+    rrwebEmit!({ type: 3, data: "old mutation" }); // anchored on the old snapshot
+    rrwebEmit!({ type: 2, data: "new snapshot" }, true);
+    rrwebEmit!({ type: 3, data: "new mutation" });
+
+    onError();
+
+    expect(sendChunkMock).toHaveBeenCalledTimes(1);
+    const shipped = sendChunkMock.mock.calls[0][0].events as Array<Record<string, unknown>>;
+    expect(shipped).toContainEqual({ type: 2, data: "new snapshot" });
+    expect(shipped).toContainEqual({ type: 3, data: "new mutation" });
+    expect(shipped).not.toContainEqual({ type: 3, data: "old mutation" });
+  });
+
   it("discards buffer without flushing", async () => {
     initReplay(defaultReplayConfig());
     await vi.advanceTimersByTimeAsync(10);
