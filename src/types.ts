@@ -6,10 +6,22 @@ export interface BrowserConfig {
   endpoint?: string;
   appVersion?: string;
   user?: UserContext;
-  /** Modify or drop error events before sending. Return null to drop. */
-  beforeSend?: (event: BrowserError) => BrowserError | null;
-  /** Error message patterns to ignore. Matching errors are silently dropped. */
-  ignoreErrors?: (string | RegExp)[];
+  /** Inspect or modify each error at the entry point, before the SDK adds an
+   * error breadcrumb, records `lastErrorTimestamp`, or runs deduplication.
+   * Return null to drop the error entirely — none of those side effects fire.
+   * Mutate fields to filter or redact (message, stack, etc.). Receives an
+   * `IncomingError`, *not* the full payload: breadcrumbs and session are
+   * attached later. Use `beforeBreadcrumb` to filter or redact those. Sync
+   * only — Promise returns are detected, logged, and the error dropped. */
+  beforeError?: (event: IncomingError) => IncomingError | null;
+  /** Inspect or modify each breadcrumb at the moment it's pushed into the
+   * ring buffer, before any flush. Fires for every breadcrumb the SDK
+   * collects (network, click, navigation, console, error, manual). Return
+   * null to drop it — the breadcrumb never enters the buffer and ships in
+   * neither error payloads nor periodic events payloads. Mutate to redact
+   * (PII in messages, sensitive data fields). Runs on the page's hot path;
+   * keep it cheap. */
+  beforeBreadcrumb?: (crumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to inject trace context headers into. Glob syntax. */
   tracePropagationTargets?: string[];
   /** Initial tracking consent state. Default: "granted" (backwards compatible). */
@@ -124,6 +136,20 @@ export interface SessionContext {
   user_id?: string;
   user_email?: string;
   user_name?: string;
+}
+
+/** The error as seen by `beforeError` — early-pipeline, before breadcrumbs
+ * and session are attached. Mutating any field on the returned object
+ * propagates into the eventual `BrowserError` payload. */
+export interface IncomingError {
+  message: string;
+  /** Error constructor name (e.g. "TypeError"). Set when known. */
+  error_class?: string;
+  filename?: string;
+  lineno?: number;
+  colno?: number;
+  stack?: string;
+  context?: Record<string, unknown>;
 }
 
 export interface BrowserError {

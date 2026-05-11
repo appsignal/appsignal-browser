@@ -118,6 +118,76 @@ describe("breadcrumbs", () => {
     expect(getSnapshot()[0].message).toBe("b");
   });
 
+  describe("beforeBreadcrumb", () => {
+    // initBreadcrumbs itself pushes 1-2 init crumbs (navigation, document
+    // load); reset the hook + buffer after init so each test reasons about
+    // its own additions.
+    function setup(hook: (c: Parameters<typeof addBreadcrumb>[0]) => ReturnType<typeof addBreadcrumb> | unknown): void {
+      initBreadcrumbs(
+        defaultBreadcrumbConfig,
+        "http://localhost/ingest/browser",
+        [],
+        { mask_text: [], block_element: [] },
+        hook as Parameters<typeof initBreadcrumbs>[4],
+      );
+      clearBreadcrumbs();
+      (hook as unknown as { mockClear?: () => void }).mockClear?.();
+    }
+
+    it("can drop a breadcrumb by returning null", () => {
+      const hook = vi.fn(() => null);
+      setup(hook);
+
+      addBreadcrumb({ timestamp: 1, category: "test", message: "drop me" });
+
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(getSnapshot()).toHaveLength(0);
+    });
+
+    it("can mutate a breadcrumb before it enters the buffer", () => {
+      const hook = vi.fn((c: Parameters<typeof addBreadcrumb>[0]) => ({
+        ...c,
+        message: c.message.replace(/secret/g, "[redacted]"),
+      }));
+      setup(hook);
+
+      addBreadcrumb({ timestamp: 1, category: "test", message: "the secret is X" });
+
+      const snap = getSnapshot();
+      expect(snap).toHaveLength(1);
+      expect(snap[0].message).toBe("the [redacted] is X");
+    });
+
+    it("fires on every breadcrumb regardless of category", () => {
+      // The whole point of beforeBreadcrumb being at the single addBreadcrumb
+      // entry point: redacting once covers errors, networks, clicks, manual
+      // crumbs alike. Three different categories should each hit the hook.
+      const hook = vi.fn((c: Parameters<typeof addBreadcrumb>[0]) => c);
+      setup(hook);
+
+      addBreadcrumb({ timestamp: 1, category: "error", message: "a" });
+      addBreadcrumb({ timestamp: 2, category: "navigation", message: "b" });
+      addManualBreadcrumb({ category: "ui", message: "c" });
+
+      expect(hook).toHaveBeenCalledTimes(3);
+    });
+
+    it("treats a throwing callback as passthrough", () => {
+      // A bug in user code shouldn't silently eat every breadcrumb. Passthrough
+      // is safer than drop: the SDK keeps recording even if the host's hook
+      // has a latent regression.
+      const hook = vi.fn(() => {
+        throw new Error("user bug");
+      });
+      setup(hook);
+
+      addBreadcrumb({ timestamp: 1, category: "test", message: "survives" });
+
+      expect(hook).toHaveBeenCalled();
+      expect(getSnapshot()).toHaveLength(1);
+    });
+  });
+
   it("updateBreadcrumbConfig replaces the active config", () => {
     // Start with network disabled
     initBreadcrumbs(

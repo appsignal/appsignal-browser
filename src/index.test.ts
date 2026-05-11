@@ -362,13 +362,13 @@ describe("SDK integration", () => {
     expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
   });
 
-  it("beforeSend dropping the error also suppresses the error_replay tail", async () => {
+  it("beforeError dropping the error also suppresses the error_replay tail", async () => {
     // The error_replay window should fire only for errors that actually
-    // shipped. If beforeSend returns null, the error never reached the
+    // shipped. If beforeError returns null, the error never reached the
     // server — so the replay tail it would have triggered should also be
     // suppressed. session_id "sample-low" hashes ≈0.7497, well above the
     // sample_rate of 0; the only path to a replay flush is via hadError,
-    // which beforeSend's null return must prevent.
+    // which beforeError's null return must prevent.
     localStorage.setItem("appsignal_session_id", "sample-low");
     localStorage.setItem("appsignal_last_activity", String(Date.now()));
     serverConfigResponse = {
@@ -378,7 +378,7 @@ describe("SDK integration", () => {
 
     init({
       key: "test-key",
-      beforeSend: () => null,
+      beforeError: () => null,
     });
 
     // Wait for server config to apply (sampled=false, errorReplay=true).
@@ -388,8 +388,8 @@ describe("SDK integration", () => {
     rrwebEmit?.({ type: 1, data: "snapshot" });
     rrwebEmit?.({ type: 3, data: "mutation" });
 
-    // Error fires; beforeSend drops it.
-    captureError(new Error("dropped by beforeSend"));
+    // Error fires; beforeError drops it.
+    captureError(new Error("dropped by beforeError"));
 
     // endSession force-flushes the replay buffer via beacon.
     endSession();

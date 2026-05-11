@@ -10,6 +10,7 @@ import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
+let beforeBreadcrumbHook: ((crumb: Breadcrumb) => Breadcrumb | null) | undefined;
 let queryParamsAllowlist: string[] = [];
 // Pre-joined selectors so the hot path (every click) doesn't reformat them.
 // `null` means the list is empty — skip the el.closest() check entirely.
@@ -76,10 +77,12 @@ export function initBreadcrumbs(
   endpoint: string,
   privacyQueryParamsAllowlist: string[] = [],
   privacyDom: ServerConfig["privacy"]["dom"] = { mask_text: [], block_element: [] },
+  beforeBreadcrumb?: (crumb: Breadcrumb) => Breadcrumb | null,
 ): void {
   destroyBreadcrumbs();
 
   config = serverConfig;
+  beforeBreadcrumbHook = beforeBreadcrumb;
   queryParamsAllowlist = privacyQueryParamsAllowlist;
   setPrivacyDom(privacyDom);
   collectEndpoint = endpoint;
@@ -120,6 +123,23 @@ export function initBreadcrumbs(
 
 export function addBreadcrumb(crumb: Breadcrumb): void {
   if (getConsent() === "not-granted") return;
+  // beforeBreadcrumb runs once per crumb at insertion. A null return drops
+  // the crumb so it ships in neither error payloads nor periodic event
+  // flushes. A thrown callback shouldn't break the SDK — catch and pretend
+  // the hook wasn't there. Skip the function call entirely when no hook is
+  // configured (hot path: every network request, click, console call).
+  if (beforeBreadcrumbHook) {
+    let result: Breadcrumb | null = null;
+    try {
+      result = beforeBreadcrumbHook(crumb);
+    } catch {
+      // Treat a throwing callback as "passthrough" rather than "drop", to
+      // avoid silently swallowing breadcrumbs on a bug in user code.
+      result = crumb;
+    }
+    if (!result) return;
+    crumb = result;
+  }
   buffer.push(crumb);
 }
 
@@ -999,4 +1019,5 @@ export function destroyBreadcrumbs(): void {
   resourceTimings.clear();
   recentClicks = [];
   buffer = new RingBuffer<Breadcrumb>(100);
+  beforeBreadcrumbHook = undefined;
 }

@@ -1,14 +1,14 @@
-import type { BrowserError, ServerConfig } from "./types.js";
+import type { BrowserError, IncomingError, ServerConfig } from "./types.js";
 import { getSessionContext } from "./session.js";
 import { addBreadcrumb, getSnapshot } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getConsent } from "./consent.js";
 
 // Subscribers fired after an error has cleared every gate (consent,
-// sample_rate, ignoreErrors, dedupe, beforeSend) and been handed to
-// transport. Other modules subscribe instead of being imperatively poked
-// from inside handleError — same pattern as onConsentDenied,
-// onBeforeNavigation, onAfterRequest, etc.
+// sample_rate, beforeError, dedupe) and been handed to transport. Other
+// modules subscribe instead of being imperatively poked from inside
+// handleError — same pattern as onConsentDenied, onBeforeNavigation,
+// onAfterRequest, etc.
 const errorListeners: ((event: BrowserError) => void)[] = [];
 
 export function onErrorReported(fn: (event: BrowserError) => void): () => void {
@@ -21,8 +21,7 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ServerConfig["errors"];
 let appVersion: string | undefined;
-let beforeSendHook: ((event: BrowserError) => BrowserError | null) | undefined;
-let ignorePatterns: (string | RegExp)[] = [];
+let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 
 // Error click tracking — exported so breadcrumbs can check for recent errors
 let lastErrorTimestamp = 0;
@@ -50,15 +49,13 @@ let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
 export function initErrors(
   serverConfig: ServerConfig["errors"],
   version?: string,
-  beforeSend?: (event: BrowserError) => BrowserError | null,
-  ignore?: (string | RegExp)[],
+  beforeError?: (event: IncomingError) => IncomingError | null,
 ): void {
   destroyErrors();
 
   config = serverConfig;
   appVersion = version;
-  beforeSendHook = beforeSend;
-  ignorePatterns = ignore ?? [];
+  beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
     handleError(
@@ -132,8 +129,38 @@ function handleError(
   // Sample rate check
   if (config.sample_rate < 1.0 && Math.random() >= config.sample_rate) return;
 
-  // ignoreErrors filter
-  if (shouldIgnore(message)) return;
+  // beforeError hook — early-pipeline. Runs before any side effect (error
+  // breadcrumb, lastErrorTimestamp, dedupe slot, payload construction,
+  // replay post-error tail). Returning null drops the error completely:
+  // no breadcrumb pollution, no dedupe budget consumed, no replay
+  // triggered. Mutating fields propagates into the eventual payload.
+  if (beforeErrorHook) {
+    const incoming: IncomingError = {
+      message,
+      error_class: errorClass,
+      filename,
+      lineno,
+      colno,
+      stack,
+      context,
+    };
+    const result = beforeErrorHook(incoming);
+    // beforeError is sync only. A Promise return would otherwise pass the
+    // truthy check and the SDK would proceed using a Promise as fields —
+    // silent breakage. Detect it, drop the error, and log loudly so a host
+    // developer can grep for the message.
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[appsignal] beforeError returned a Promise. Async beforeError is " +
+        "not supported; the error was dropped. Move async work outside the " +
+        "hook (e.g. perform it before calling captureError).",
+      );
+      return;
+    }
+    if (!result) return;
+    ({ message, error_class: errorClass, filename, lineno, colno, stack, context } = result);
+  }
 
   const now = Date.now();
   lastErrorTimestamp = now;
@@ -149,7 +176,7 @@ function handleError(
   const dedupeKey = dedupeKeyFor(message, stack);
   if (checkDedupe(dedupeKey, now)) return;
 
-  let payload: BrowserError | null = {
+  const payload: BrowserError = {
     type: "error",
     timestamp: now,
     message,
@@ -164,28 +191,6 @@ function handleError(
     context,
   };
 
-  // beforeSend hook — runs before subscribers so a dropped error doesn't
-  // trigger downstream side effects (e.g. replay shipping its post-error
-  // tail for an error the user explicitly suppressed).
-  if (beforeSendHook) {
-    const result = beforeSendHook(payload);
-    // beforeSend is sync only. A Promise return would otherwise sail through
-    // the truthy check and JSON.stringify into `{}` on the wire — silent
-    // empty payloads. Detect it, drop the error, and log loudly so a host
-    // developer can grep for the message.
-    if (result && typeof (result as { then?: unknown }).then === "function") {
-      // eslint-disable-next-line no-console
-      console.error(
-        "[appsignal] beforeSend returned a Promise. Async beforeSend is not " +
-        "supported; the error was dropped. Move async work outside the hook " +
-        "(e.g. perform it before calling captureError).",
-      );
-      return;
-    }
-    if (!result) return;
-    payload = result;
-  }
-
   sendError(payload);
 
   for (const l of errorListeners) {
@@ -198,15 +203,6 @@ const SDK_MARKERS = ["@appsignal/browser", "browser.umd.js", "browser.esm.js"];
 function isOwnError(filename?: string, stack?: string): boolean {
   const haystack = (filename || "") + (stack || "");
   return SDK_MARKERS.some((marker) => haystack.includes(marker));
-}
-
-function shouldIgnore(message: string): boolean {
-  return ignorePatterns.some((pattern) => {
-    if (typeof pattern === "string") {
-      return message.includes(pattern);
-    }
-    return pattern.test(message);
-  });
 }
 
 function dedupeKeyFor(message: string, stack?: string): string {
