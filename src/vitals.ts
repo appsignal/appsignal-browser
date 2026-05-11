@@ -1,5 +1,5 @@
 import type { VitalEntry } from "./types.js";
-import { filterQueryParams } from "./utils.js";
+import { scrubUrl } from "./utils.js";
 import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals/attribution";
 import type {
   LCPMetricWithAttribution,
@@ -62,7 +62,7 @@ function reporter<T extends MetricWithAttribution>(
       name: `web.vital.${metric.name.toLowerCase()}`,
       value: metric.value,
       rating: metric.rating,
-      page_url: filterQueryParams(location.href, allowlist),
+      page_url: scrubUrl(location.href, allowlist),
       timestamp: Date.now(),
       ...extract(metric),
     });

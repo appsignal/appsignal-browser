@@ -16,16 +16,26 @@
       <li><code>?key=...</code> — ingestion key (default <code>e2e</code>)</li>
       <li><code>?tracePropagationTargets=glob,glob</code> — comma-separated globs</li>
       <li><code>?beforeSendDrops=1</code> — install a <code>beforeSend</code> that returns null</li>
+      <li><code>?beforeSendDropMatching=SUBSTR</code> — install a <code>beforeSend</code> that drops errors whose message includes SUBSTR</li>
+      <li><code>?beforeSendRedactPattern=REGEX&amp;beforeSendRedactWith=TEXT</code> — install a <code>beforeSend</code> that replaces matches in <code>error.message</code></li>
       <li><code>?ignoreErrors=foo,bar</code> — comma-separated patterns</li>
     </ul>
 
     <button id="trigger-fetch">fetch /api/echo (200)</button>
     <button id="trigger-fetch-404">fetch /api/echo?status=404</button>
     <button id="trigger-fetch-error">fetch /api/does-not-exist (network error)</button>
+    <button id="trigger-fetch-sensitive-params">fetch /api/echo?password=...&amp;token=... (sensitive params)</button>
+    <button id="trigger-fetch-mixed-params">fetch /api/echo?page=2&amp;token=abc (mixed params)</button>
+    <button id="trigger-fetch-blocked">fetch /api/auth/login (blocklist target)</button>
     <button id="throw-error">throw an Error</button>
     <button id="capture-error">captureError(...)</button>
     <button id="add-breadcrumb">addBreadcrumb(...)</button>
     <button id="flush">flush()</button>
+
+    <p>
+      <label for="masked-input">masked input (default <code>mask_all_inputs: true</code>):</label>
+      <input id="masked-input" type="text" />
+    </p>
 
     <pre id="status">SDK loading…</pre>
 
@@ -42,6 +52,38 @@
         }
         if (params.get("beforeSendDrops") === "1") {
           config.beforeSend = function () { return null; };
+        } else if (params.has("beforeSendDropMatching")) {
+          // Real-world pattern: drop noisy errors whose message matches a known
+          // substring (e.g. browser-emitted "ResizeObserver loop limit exceeded").
+          var pattern = params.get("beforeSendDropMatching");
+          config.beforeSend = function (event) {
+            if (event.message && event.message.indexOf(pattern) !== -1) return null;
+            return event;
+          };
+        } else if (params.has("beforeSendRedactPattern")) {
+          // Real-world pattern: redact PII (e.g. email, token) from the error
+          // payload before transmission. The SDK passes a mutable BrowserError
+          // and uses whatever the hook returns, so the hook can rewrite any
+          // field. Three places must be cleaned for full redaction:
+          //   1. event.message — the literal Error message
+          //   2. event.stack — V8 prefixes the stack with "Error: <message>"
+          //   3. event.breadcrumbs[].message — the SDK auto-adds an error
+          //      breadcrumb containing the original message before this hook
+          //      runs (errors.ts handleError → addBreadcrumb), so the
+          //      pre-redaction message rides along inside the same payload.
+          var regex = new RegExp(params.get("beforeSendRedactPattern"), "g");
+          var replacement = params.get("beforeSendRedactWith") || "[redacted]";
+          var redact = function (s) { return s == null ? s : String(s).replace(regex, replacement); };
+          config.beforeSend = function (event) {
+            if (event.message) event.message = redact(event.message);
+            if (event.stack) event.stack = redact(event.stack);
+            if (event.breadcrumbs) {
+              event.breadcrumbs.forEach(function (b) {
+                if (b.message) b.message = redact(b.message);
+              });
+            }
+            return event;
+          };
         }
         if (params.has("ignoreErrors")) {
           config.ignoreErrors = params.get("ignoreErrors").split(",");
@@ -61,11 +103,26 @@
           // hit a non-existent host so the fetch rejects rather than 404s
           fetch("http://localhost:1/no-such-server").catch(function () {});
         });
+        document.getElementById("trigger-fetch-sensitive-params").addEventListener("click", function () {
+          fetch("/api/echo?password=hunter2&token=abc123def456");
+        });
+        document.getElementById("trigger-fetch-mixed-params").addEventListener("click", function () {
+          fetch("/api/echo?page=2&token=abc123def456");
+        });
+        document.getElementById("trigger-fetch-blocked").addEventListener("click", function () {
+          fetch("/api/auth/login");
+        });
         document.getElementById("throw-error").addEventListener("click", function () {
           // Async to escape the click handler — window.onerror needs an
           // uncaught throw on the event loop.
           setTimeout(function () { throw new Error("e2e thrown error"); }, 0);
         });
+        // Test helper: throw an Error with an arbitrary message on the event
+        // loop. Used by e2e tests that need to drive distinct error messages
+        // (e.g. beforeSend filter tests) without hardcoding them in buttons.
+        window.throwWithMessage = function (msg) {
+          setTimeout(function () { throw new Error(msg); }, 0);
+        };
         document.getElementById("capture-error").addEventListener("click", function () {
           AppsignalBrowser.captureError(new Error("e2e captured error"));
         });

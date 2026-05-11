@@ -7,6 +7,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { readFile } from "fs/promises";
 import { resolve, extname, dirname } from "path";
 import { fileURLToPath } from "url";
+import { defaultConfig } from "./default-config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -24,49 +25,7 @@ type Captured =
     };
 
 let captured: Captured[] = [];
-let configResponse: unknown = null;
-
-function defaultConfig(): unknown {
-  // Mirrors DEFAULT_SERVER_CONFIG; explicit so tests can see what they get.
-  return {
-    enabled: true,
-    errors: { enabled: true, sample_rate: 1.0 },
-    breadcrumbs: {
-      enabled: true,
-      network: true,
-      network_blocklist: [],
-      query_params_allowlist: [],
-      network_payloads: {
-        enabled: false,
-        request_body: true,
-        response_body: true,
-        max_size_bytes: 65536,
-        content_types: ["application/json", "text/plain", "text/html"],
-      },
-      console: true,
-      clicks: true,
-      long_tasks: true,
-      scroll_depth: true,
-      form_abandonment: true,
-      user_timing: false,
-      capacity: 100,
-    },
-    web_vitals: { enabled: true },
-    replay: {
-      enabled: true,
-      sample_rate: 1.0,
-      error_replay: true,
-      error_replay_window_ms: 30_000,
-      mask_all_inputs: true,
-      mask_selectors: [],
-      block_selectors: [],
-      max_duration_ms: 14_400_000,
-      checkout_interval_ms: 60_000,
-    },
-    session: { inactivity_timeout_ms: 1_800_000 },
-  };
-}
-configResponse = defaultConfig();
+let configResponse: unknown = defaultConfig();
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];

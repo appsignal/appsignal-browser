@@ -18,9 +18,6 @@ export interface RequestResult {
   method: string;
   startTime: number;
   endTime: number;
-  /** Request body, when it was a string. Form data and blobs are not
-   * captured — listeners that want them must inspect init themselves. */
-  requestBody?: string;
   /** Status code when a response was received. Missing on network error. */
   status?: number;
   /** True only for transport failures where no response was received
@@ -93,8 +90,6 @@ function patchFetch(): void {
     const method =
       (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
     const startTime = Date.now();
-    const requestBody =
-      init?.body && typeof init.body === "string" ? init.body : undefined;
     const headers = new Headers(init?.headers);
 
     const ctx: RequestContext = { url, method, headers };
@@ -107,7 +102,6 @@ function patchFetch(): void {
       const result: RequestResult = {
         url,
         method,
-        requestBody,
         startTime,
         endTime: Date.now(),
         status: response.status,
@@ -122,7 +116,6 @@ function patchFetch(): void {
       const result: RequestResult = {
         url,
         method,
-        requestBody,
         startTime,
         endTime: Date.now(),
         error: true,
@@ -167,7 +160,6 @@ function patchXhr(): void {
     const url = xhr._ahUrl || "";
     const method = (xhr._ahMethod || "GET").toUpperCase();
     const startTime = Date.now();
-    const requestBody = body && typeof body === "string" ? body : undefined;
     const headers = new Headers();
 
     const ctx: RequestContext = { url, method, headers };
@@ -185,7 +177,6 @@ function patchXhr(): void {
       const result: RequestResult = {
         url,
         method,
-        requestBody,
         startTime,
         endTime: Date.now(),
         status: xhr.status,
@@ -201,7 +192,6 @@ function patchXhr(): void {
       const result: RequestResult = {
         url,
         method,
-        requestBody,
         startTime,
         endTime: Date.now(),
         error: true,

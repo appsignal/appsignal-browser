@@ -169,6 +169,19 @@ function handleError(
   // tail for an error the user explicitly suppressed).
   if (beforeSendHook) {
     const result = beforeSendHook(payload);
+    // beforeSend is sync only. A Promise return would otherwise sail through
+    // the truthy check and JSON.stringify into `{}` on the wire — silent
+    // empty payloads. Detect it, drop the error, and log loudly so a host
+    // developer can grep for the message.
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[appsignal] beforeSend returned a Promise. Async beforeSend is not " +
+        "supported; the error was dropped. Move async work outside the hook " +
+        "(e.g. perform it before calling captureError).",
+      );
+      return;
+    }
     if (!result) return;
     payload = result;
   }

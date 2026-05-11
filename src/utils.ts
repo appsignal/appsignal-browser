@@ -33,21 +33,55 @@ export function safeUrl(url: string): URL | null {
   }
 }
 
-export function filterQueryParams(url: string, allowlist: Set<string> | string[]): string {
+/** Scrub a URL by applying an allowlist of query-param keys to both `?query`
+ * and the `#fragment` (when the fragment looks like `k=v&k=v` rather than a
+ * route or anchor).
+ *
+ * Allowlist entries are glob-matched (e.g. `utm_*` keeps every UTM param).
+ *
+ * Fragment heuristic:
+ *  - no `=` → opaque (anchor) → preserved verbatim
+ *  - starts with `/` → hash route, maybe with embedded query → preserved verbatim
+ *  - parses as URLSearchParams and round-trips identically → query-like
+ *    (e.g. OAuth implicit `#access_token=...`) → allowlist applied
+ *  - otherwise → preserved verbatim
+ *
+ * This defends against OAuth implicit flow leaks while keeping hash-routed
+ * apps (React Router HashRouter, etc.) usable without an extra knob. */
+export function scrubUrl(url: string, allowlist: Set<string> | string[]): string {
+  if (!url) return url;
   try {
     const parsed = new URL(url, location.origin);
-    const allowSet = allowlist instanceof Set ? allowlist : new Set(allowlist);
-    if (allowSet.size === 0) {
-      return parsed.origin + parsed.pathname;
-    }
-    const allowed = new URLSearchParams();
-    for (const [key, value] of parsed.searchParams) {
-      if (allowSet.has(key)) {
-        allowed.append(key, value);
+    const list = allowlist instanceof Set ? Array.from(allowlist) : allowlist;
+    const isAllowed = (key: string) => list.some((p) => globMatch(p, key));
+
+    const filterParams = (params: URLSearchParams): string => {
+      const kept = new URLSearchParams();
+      for (const [k, v] of params) {
+        if (isAllowed(k)) kept.append(k, v);
+      }
+      return kept.toString();
+    };
+
+    const qs = filterParams(parsed.searchParams);
+
+    const rawHash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : "";
+    let hashOut = "";
+    if (rawHash) {
+      if (!rawHash.includes("=") || rawHash.startsWith("/")) {
+        hashOut = `#${rawHash}`;
+      } else {
+        const hashParams = new URLSearchParams(rawHash);
+        if (hashParams.toString() === rawHash) {
+          const scrubbed = filterParams(hashParams);
+          hashOut = scrubbed ? `#${scrubbed}` : "";
+        } else {
+          hashOut = `#${rawHash}`;
+        }
       }
     }
-    const qs = allowed.toString();
-    return parsed.origin + parsed.pathname + (qs ? `?${qs}` : "");
+
+    return parsed.origin + parsed.pathname + (qs ? `?${qs}` : "") + hashOut;
   } catch {
     return url;
   }

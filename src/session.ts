@@ -1,5 +1,5 @@
 import type { SessionContext, UserContext } from "./types.js";
-import { storage } from "./utils.js";
+import { storage, scrubUrl } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
@@ -12,11 +12,13 @@ let currentUser: UserContext | null = null;
 let inactivityTimeoutMs = 1_800_000;
 let activityTimer: ReturnType<typeof setTimeout> | null = null;
 let lastActivityMs = 0;
+let queryParamsAllowlist: string[] = [];
 
 let activityTrackingStarted = false;
 
-export function initSession(timeoutMs: number): void {
+export function initSession(timeoutMs: number, allowlist: string[] = []): void {
   inactivityTimeoutMs = timeoutMs;
+  queryParamsAllowlist = allowlist;
   ensureAnonymousId();
   ensureTabId();
   restoreOrCreateSession();
@@ -233,14 +235,20 @@ function getStaticContextFields(): StaticContextFields {
   return fields;
 }
 
+/** Update the query-param allowlist after the server config arrives. The
+ * cached `staticContextFields.referrer` stays raw; scrubUrl runs on each read. */
+export function updateSessionConfig(allowlist: string[]): void {
+  queryParamsAllowlist = allowlist;
+}
+
 export function getSessionContext(): SessionContext {
   const stat = getStaticContextFields();
   const ctx: SessionContext = {
     session_id: getSessionId(),
     tab_id: getTabId(),
     anonymous_id: getAnonymousId(),
-    page_url: location.href,
-    referrer: stat.referrer,
+    page_url: scrubUrl(location.href, queryParamsAllowlist),
+    referrer: scrubUrl(stat.referrer, queryParamsAllowlist),
     user_agent: stat.user_agent,
     screen_width: stat.screen_width,
     screen_height: stat.screen_height,
