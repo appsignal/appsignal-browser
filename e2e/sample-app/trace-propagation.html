@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AppSignal Browser SDK — trace propagation</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
+      button { display: block; margin: 0.5rem 0; padding: 0.5rem 1rem; }
+      pre { background: #f3f3f3; padding: 0.75rem; font-size: 0.85rem; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Trace propagation</h1>
+    <p>The SDK injects a W3C <code>traceparent</code> header into every
+       outgoing <code>fetch</code> / <code>XMLHttpRequest</code> whose URL
+       matches any entry in <code>tracePropagationTargets</code>. The same
+       trace id lands on the network breadcrumb's <code>data.trace_id</code>,
+       so frontend and backend traces stitch together.</p>
+
+    <p>Glob syntax: <code>*</code> matches one path segment, <code>**</code>
+       matches across segments. Match anchors on the URL's
+       <code>host&nbsp;+&nbsp;pathname</code>.</p>
+
+    <button id="trigger-fetch">fetch /api/echo</button>
+    <pre id="status">SDK loading…</pre>
+
+    <script src="/dist/browser.umd.js"></script>
+    <script>
+      AppsignalBrowser.init({
+        key: "your-app-key",
+        endpoint: location.origin,
+        // Only requests matching these globs get the traceparent header.
+        // Prevents leaking trace context to third-party APIs (analytics,
+        // CDNs, etc.) while still connecting frontend to your own backend.
+        tracePropagationTargets: ["**/api/**"],
+      });
+      document.getElementById("status").textContent = "SDK initialised";
+
+      document.getElementById("trigger-fetch").addEventListener("click", function () {
+        fetch("/api/echo");
+      });
+    </script>
+  </body>
+</html>

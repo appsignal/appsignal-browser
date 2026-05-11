@@ -8,6 +8,10 @@ import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 import { onErrorReported } from "./errors.js";
 
 let config: ServerConfig["replay"];
+let privacyDom: ServerConfig["privacy"]["dom"] = {
+  mask_text: [],
+  block_element: [],
+};
 let appVersion: string | undefined;
 let recorder: { stop: () => void } | null = null;
 let isRecording = false;
@@ -57,8 +61,13 @@ export function clearChunkIndex(sessionId: string, tabId: string): void {
 export function initReplay(
   serverConfig: ServerConfig["replay"],
   version?: string,
+  dom: ServerConfig["privacy"]["dom"] = {
+    mask_text: [],
+    block_element: [],
+  },
 ): void {
   config = serverConfig;
+  privacyDom = dom;
   appVersion = version;
 
   if (!config.enabled) return;
@@ -177,11 +186,11 @@ async function startRecording(): Promise<void> {
       // full-snapshot interval — same concept, different word.
       checkoutEveryNms: FULL_SNAPSHOT_INTERVAL_MS,
       maskAllInputs: config.mask_all_inputs,
-      maskTextSelector: config.mask_selectors.length
-        ? config.mask_selectors.join(", ")
+      maskTextSelector: privacyDom.mask_text.length
+        ? privacyDom.mask_text.join(", ")
         : undefined,
-      blockSelector: config.block_selectors.length
-        ? config.block_selectors.join(", ")
+      blockSelector: privacyDom.block_element.length
+        ? privacyDom.block_element.join(", ")
         : undefined,
     });
 

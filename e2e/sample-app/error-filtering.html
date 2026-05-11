@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AppSignal Browser SDK — error filtering</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
+      pre { background: #f3f3f3; padding: 0.75rem; font-size: 0.85rem; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Error filtering with <code>ignoreErrors</code></h1>
+    <p>The <code>ignoreErrors</code> config lists message patterns (strings or
+       regexes) that should be silently dropped before the SDK ships them.
+       Useful for known-noisy browser errors that swamp dashboards without
+       indicating a real problem.</p>
+
+    <p>The classic example: <code>"ResizeObserver loop limit exceeded"</code> —
+       fires on most apps using a ResizeObserver, isn't actionable, and isn't
+       a bug in the app's code.</p>
+
+    <pre id="status">SDK loading…</pre>
+
+    <script src="/dist/browser.umd.js"></script>
+    <script>
+      AppsignalBrowser.init({
+        key: "your-app-key",
+        endpoint: location.origin,
+        // Drop any error whose message matches one of these patterns. Strings
+        // are substring matches; regular expressions are full-pattern matches.
+        ignoreErrors: ["ResizeObserver loop limit exceeded"],
+      });
+      document.getElementById("status").textContent = "SDK initialised";
+
+      // Test driver: throw an arbitrary error message asynchronously so the
+      // global onerror handler picks it up. Lets e2e tests exercise both the
+      // "matches → dropped" and "doesn't match → shipped" branches.
+      window.throwWithMessage = function (msg) {
+        setTimeout(function () { throw new Error(msg); }, 0);
+      };
+    </script>
+  </body>
+</html>

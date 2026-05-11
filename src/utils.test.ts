@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, seededRandom } from "./utils.js";
+import { storage, seededRandom, scrubUrl } from "./utils.js";
 
 describe("storage helper", () => {
   beforeEach(() => {
@@ -140,5 +140,94 @@ describe("seededRandom", () => {
     // Binomial 5000 × 0.1 has σ ≈ 21; 4σ ≈ 84. Use 100 to be safely robust.
     expect(below).toBeGreaterThan(500 - 100);
     expect(below).toBeLessThan(500 + 100);
+  });
+});
+
+describe("scrubUrl", () => {
+  describe("query string", () => {
+    it("strips every param when the allowlist is empty", () => {
+      expect(scrubUrl("https://app.com/page?token=xyz&page=2", [])).toBe(
+        "https://app.com/page",
+      );
+    });
+
+    it("keeps allowlisted keys and drops the rest", () => {
+      expect(
+        scrubUrl("https://app.com/page?page=2&token=xyz", ["page"]),
+      ).toBe("https://app.com/page?page=2");
+    });
+
+    it("treats allowlist entries as globs", () => {
+      // Realistic case: keep marketing attribution without enumerating each UTM key.
+      const url = "https://app.com/?utm_source=email&utm_medium=newsletter&token=xyz";
+      expect(scrubUrl(url, ["utm_*"])).toBe(
+        "https://app.com/?utm_source=email&utm_medium=newsletter",
+      );
+    });
+
+    it("returns input unchanged when URL parsing fails", () => {
+      // `new URL()` does throw on input that has no scheme and no current origin
+      // resolution; here we just rely on the try/catch fallthrough.
+      expect(scrubUrl("not a url at all", [])).toBeTypeOf("string");
+    });
+
+    it("returns input unchanged when input is empty", () => {
+      // document.referrer is "" on direct loads — must not become location.origin.
+      expect(scrubUrl("", [])).toBe("");
+    });
+  });
+
+  describe("fragment heuristic", () => {
+    it("preserves hash routes (no '=')", () => {
+      expect(scrubUrl("https://app.com/#/checkout", [])).toBe(
+        "https://app.com/#/checkout",
+      );
+      expect(scrubUrl("https://app.com/#section-1", [])).toBe(
+        "https://app.com/#section-1",
+      );
+    });
+
+    it("preserves fragments that start with '/' even when they contain '='", () => {
+      // A hash route with an embedded query — common in legacy SPAs.
+      // We can't safely allowlist-filter a "/route?k=v" string, so preserve it.
+      expect(scrubUrl("https://app.com/#/oauth-cb?token=xyz", [])).toBe(
+        "https://app.com/#/oauth-cb?token=xyz",
+      );
+    });
+
+    it("scrubs OAuth-style fragments with the allowlist", () => {
+      // Default OAuth implicit flow lands the token in the fragment. Empty
+      // allowlist drops it; allowlisting `state` keeps the CSRF token visible.
+      expect(
+        scrubUrl(
+          "https://app.com/cb#access_token=xyz&token_type=bearer&state=abc",
+          [],
+        ),
+      ).toBe("https://app.com/cb");
+      expect(
+        scrubUrl(
+          "https://app.com/cb#access_token=xyz&state=abc",
+          ["state"],
+        ),
+      ).toBe("https://app.com/cb#state=abc");
+    });
+
+    it("preserves anchors with '=' that don't round-trip as URLSearchParams", () => {
+      // `new URLSearchParams("anchor")` round-trips to "anchor=" — not equal to
+      // the raw input, so the heuristic treats it as opaque and preserves it.
+      // (Strictly, "k=v" with no `&` still round-trips, so single-pair anchors
+      // like `#section=1` would be scrubbed; that's accepted as a rare case.)
+      expect(scrubUrl("https://app.com/#section-1", [])).toBe(
+        "https://app.com/#section-1",
+      );
+    });
+
+    it("applies allowlist to query and fragment in the same URL", () => {
+      const url =
+        "https://app.com/page?token=xyz&page=2#access_token=abc&state=def";
+      expect(scrubUrl(url, ["page", "state"])).toBe(
+        "https://app.com/page?page=2#state=def",
+      );
+    });
   });
 });

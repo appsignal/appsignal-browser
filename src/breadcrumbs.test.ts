@@ -23,14 +23,6 @@ const defaultBreadcrumbConfig: ServerConfig["breadcrumbs"] = {
   enabled: true,
   network: false,
   network_blocklist: [],
-  query_params_allowlist: [],
-  network_payloads: {
-    enabled: false,
-    request_body: true,
-    response_body: true,
-    max_size_bytes: 65536,
-    content_types: ["application/json"],
-  },
   console: false,
   clicks: false,
   long_tasks: false,
@@ -326,6 +318,122 @@ describe("breadcrumbs", () => {
 
       const rage = getSnapshot().filter((b) => b.category === "rage_click");
       expect(rage.length).toBeGreaterThanOrEqual(1);
+      document.body.removeChild(button);
+    });
+
+    it("masks the click breadcrumb text when the target matches mask_text", () => {
+      // privacy.dom.mask_text replaces visible text in the click breadcrumb
+      // with "[masked]". The breadcrumb still fires (you can see *that* a
+      // click happened on a PII element); the text content does not ride along.
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, clicks: true },
+        "http://localhost/ingest/browser",
+        [],
+        { mask_text: [".pii"], block_element: [] },
+      );
+
+      const button = document.createElement("button");
+      button.className = "pii";
+      button.textContent = "Logout john@example.com";
+      document.body.appendChild(button);
+      button.click();
+      document.body.removeChild(button);
+
+      const clicks = getSnapshot().filter((b) => b.category === "click");
+      expect(clicks).toHaveLength(1);
+      expect(clicks[0].message).toContain("[masked]");
+      expect(clicks[0].message).not.toContain("john@example.com");
+    });
+
+    it("masks when an ancestor matches mask_text (closest semantics)", () => {
+      // The selector resolves via el.closest(), so a click on a descendant of
+      // a masked container still gets its text masked — matches the rrweb
+      // semantics where ancestor masking covers the whole subtree.
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, clicks: true },
+        "http://localhost/ingest/browser",
+        [],
+        { mask_text: ["[data-pii]"], block_element: [] },
+      );
+
+      const wrapper = document.createElement("div");
+      wrapper.setAttribute("data-pii", "");
+      const button = document.createElement("button");
+      button.textContent = "card 4242";
+      wrapper.appendChild(button);
+      document.body.appendChild(wrapper);
+      button.click();
+      document.body.removeChild(wrapper);
+
+      const clicks = getSnapshot().filter((b) => b.category === "click");
+      expect(clicks).toHaveLength(1);
+      expect(clicks[0].message).not.toContain("4242");
+    });
+
+    it("suppresses the entire click breadcrumb when target matches block_element", () => {
+      // block_element is stronger than mask: no breadcrumb at all. Rage / dead /
+      // error_click derivations are also skipped (they live behind the same
+      // early-return in the handler).
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, clicks: true },
+        "http://localhost/ingest/browser",
+        [],
+        { mask_text: [], block_element: [".payment-form"] },
+      );
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "payment-form";
+      const button = document.createElement("button");
+      button.textContent = "Submit payment";
+      wrapper.appendChild(button);
+      document.body.appendChild(wrapper);
+
+      // Three rapid clicks would normally trigger rage_click too — both must
+      // be absent under block_element.
+      button.click();
+      button.click();
+      button.click();
+      document.body.removeChild(wrapper);
+
+      const clicks = getSnapshot().filter(
+        (b) => b.category === "click" || b.category === "rage_click",
+      );
+      expect(clicks).toHaveLength(0);
+    });
+
+    it("updateBreadcrumbConfig propagates new dom selectors to the click handler", () => {
+      // Remote config changes (the server narrowing the mask list) must take
+      // effect without an SDK reinit. The handler reads from module-level
+      // state populated by setPrivacyDom on both init and update paths.
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, clicks: true },
+        "http://localhost/ingest/browser",
+        [],
+        { mask_text: [], block_element: [] },
+      );
+
+      const button = document.createElement("button");
+      button.className = "pii";
+      button.textContent = "leak me";
+      document.body.appendChild(button);
+      button.click();
+
+      const before = getSnapshot().filter((b) => b.category === "click");
+      expect(before[0].message).toContain("leak me");
+
+      updateBreadcrumbConfig(
+        { ...defaultBreadcrumbConfig, clicks: true },
+        [],
+        { mask_text: [".pii"], block_element: [] },
+      );
+
+      button.click();
+      const after = getSnapshot().filter((b) => b.category === "click");
+      // Both clicks landed; the second should be masked, the first not.
+      expect(after).toHaveLength(2);
+      expect(after[1].message).toContain("[masked]");
+      expect(after[1].message).not.toContain("leak me");
+
       document.body.removeChild(button);
     });
   });

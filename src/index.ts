@@ -1,6 +1,6 @@
 import type { BrowserConfig, ServerConfig, EventPayload } from "./types.js";
 import { DEFAULT_SERVER_CONFIG } from "./types.js";
-import { initSession, getSessionId, getTabId, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initSession, getSessionId, getTabId, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession, updateSessionConfig } from "./session.js";
 import { initBreadcrumbs, updateBreadcrumbConfig, addManualBreadcrumb, drainBreadcrumbs, clearBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, updateErrorConfig, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
@@ -146,12 +146,17 @@ async function fetchServerConfig(
 function startCollection(endpoint: string): void {
   const cfg = DEFAULT_SERVER_CONFIG;
 
-  initSession(cfg.session.inactivity_timeout_ms);
+  initSession(cfg.session.inactivity_timeout_ms, cfg.privacy.query_params_allowlist);
   // Patch fetch/XHR once. Breadcrumbs and tracing both subscribe to the
   // hook instead of patching independently — that's what made destroy order
   // load-bearing.
   initNetworkHook();
-  initBreadcrumbs(cfg.breadcrumbs, endpoint + COLLECT_PATH);
+  initBreadcrumbs(
+    cfg.breadcrumbs,
+    endpoint + COLLECT_PATH,
+    cfg.privacy.query_params_allowlist,
+    cfg.privacy.dom,
+  );
   initErrors(
     cfg.errors,
     clientConfig?.appVersion,
@@ -163,8 +168,8 @@ function startCollection(endpoint: string): void {
     initTracing(clientConfig.tracePropagationTargets);
   }
 
-  initVitals(cfg.breadcrumbs.query_params_allowlist);
-  initReplay(cfg.replay, clientConfig?.appVersion);
+  initVitals(cfg.privacy.query_params_allowlist);
+  initReplay(cfg.replay, clientConfig?.appVersion, cfg.privacy.dom);
 
   // When consent is denied, clear collected breadcrumbs
   onConsentDenied(() => {
@@ -210,8 +215,9 @@ function applyServerConfig(cfg: ServerConfig): void {
     return;
   }
   // Propagate real config to all modules
-  updateBreadcrumbConfig(cfg.breadcrumbs);
+  updateBreadcrumbConfig(cfg.breadcrumbs, cfg.privacy.query_params_allowlist, cfg.privacy.dom);
   updateErrorConfig(cfg.errors);
+  updateSessionConfig(cfg.privacy.query_params_allowlist);
   applyReplaySampling(cfg.replay);
 }
 

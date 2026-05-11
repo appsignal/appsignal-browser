@@ -153,6 +153,24 @@ describe("errors", () => {
       expect(hook).toHaveBeenCalled();
       expect(sendErrorMock).not.toHaveBeenCalled();
     });
+
+    it("drops the event and logs an error when beforeSend returns a Promise", () => {
+      // beforeSend is sync only. A Promise return would otherwise pass the
+      // truthy check and JSON.stringify into `{}` on the wire — silent empty
+      // payloads. The guard turns that into a loud, droppable failure.
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const hook = vi.fn((event: BrowserError) => Promise.resolve(event)) as unknown as
+        (event: BrowserError) => BrowserError | null;
+      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
+
+      fireError("async hook");
+
+      expect(sendErrorMock).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy.mock.calls[0][0]).toContain("beforeSend returned a Promise");
+
+      consoleErrorSpy.mockRestore();
+    });
   });
 
   describe("deduplication", () => {

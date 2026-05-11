@@ -26,18 +26,53 @@ export interface UserContext {
 export interface ServerConfig {
   enabled: boolean;
   errors: { enabled: boolean; sample_rate: number };
+  /** Cross-cutting privacy controls. Each knob lists the subsystems that
+   * consume it; if no subsystem applies (e.g. error messages, console args)
+   * the knob has no effect there. Channel-specific knobs (e.g.
+   * `breadcrumbs.network_blocklist`, `replay.mask_all_inputs`) stay in their
+   * feature namespace. */
+  privacy: {
+    /** Query-string keys to keep in captured URLs. Empty list strips all
+     * params. Glob-matched (e.g. `"utm_*"` keeps every UTM key).
+     *
+     * Fragments are scrubbed by the same allowlist *only when they look like
+     * a query string* (`#k=v&k=v`); hash routes (`#/route`) and opaque
+     * anchors (`#section-1`) are preserved.
+     *
+     * Applied to:
+     *  - network breadcrumb URLs (request/response capture)
+     *  - SPA navigation breadcrumbs (`data.from`, `data.to`)
+     *  - `session_context.page_url` and `session_context.referrer`
+     *  - `web_vitals.page_url` */
+    query_params_allowlist: string[];
+    /** DOM-derived captures only. Selectors are CSS selectors evaluated
+     * against live DOM nodes; they have no effect on data that isn't sourced
+     * from an element (error messages, console args, network bodies). */
+    dom: {
+      /** CSS selectors whose **text content** is masked. The element itself,
+       * its structure, and its non-text attributes are still recorded —
+       * only the visible text is replaced.
+       *
+       * Applied to:
+       *  - session replay (rrweb `maskTextSelector`: text → `*`)
+       *  - click breadcrumb text content (→ `"[masked]"`) when the click
+       *    target matches or descends from a listed selector */
+      mask_text: string[];
+      /** CSS selectors whose **elements are entirely excluded** from capture.
+       * The element and its subtree are never recorded.
+       *
+       * Applied to:
+       *  - session replay (rrweb `blockSelector`: subtree → placeholder)
+       *  - click breadcrumbs (the breadcrumb — and any rage/dead/error
+       *    click derived from it — is suppressed when the click target
+       *    matches or descends from a listed selector) */
+      block_element: string[];
+    };
+  };
   breadcrumbs: {
     enabled: boolean;
     network: boolean;
     network_blocklist: string[];
-    query_params_allowlist: string[];
-    network_payloads: {
-      enabled: boolean;
-      request_body: boolean;
-      response_body: boolean;
-      max_size_bytes: number;
-      content_types: string[];
-    };
     console: boolean;
     clicks: boolean;
     long_tasks: boolean;
@@ -51,9 +86,11 @@ export interface ServerConfig {
     enabled: boolean;
     sample_rate: number;
     error_replay: boolean;
+    /** Replay-specific: rrweb's `maskAllInputs` masks every form-field value
+     * as `***` regardless of selector. Not a cross-cutting concern (only
+     * rrweb knows what an "input" is in its serialised event stream), so
+     * stays here rather than under `privacy.dom`. */
     mask_all_inputs: boolean;
-    mask_selectors: string[];
-    block_selectors: string[];
     max_duration_ms: number;
   };
   session: { inactivity_timeout_ms: number };
@@ -139,18 +176,17 @@ export interface ReplayChunk {
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   enabled: true,
   errors: { enabled: true, sample_rate: 1.0 },
+  privacy: {
+    query_params_allowlist: [],
+    dom: {
+      mask_text: [],
+      block_element: [],
+    },
+  },
   breadcrumbs: {
     enabled: true,
     network: true,
     network_blocklist: [],
-    query_params_allowlist: [],
-    network_payloads: {
-      enabled: false,
-      request_body: true,
-      response_body: true,
-      max_size_bytes: 65536,
-      content_types: ["application/json", "text/plain", "text/html"],
-    },
     console: true,
     clicks: true,
     long_tasks: true,
@@ -167,8 +203,6 @@ export const DEFAULT_SERVER_CONFIG: ServerConfig = {
     sample_rate: 1.0,
     error_replay: true,
     mask_all_inputs: true,
-    mask_selectors: [],
-    block_selectors: [],
     max_duration_ms: 14_400_000, // 4 hours
   },
   session: { inactivity_timeout_ms: 1_800_000 },

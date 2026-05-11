@@ -3,14 +3,26 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, filterQueryParams } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl } from "./utils.js";
 import { getConsent } from "./consent.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
+let queryParamsAllowlist: string[] = [];
+// Pre-joined selectors so the hot path (every click) doesn't reformat them.
+// `null` means the list is empty — skip the el.closest() check entirely.
+let maskTextSelector: string | null = null;
+let blockElementSelector: string | null = null;
 let collectEndpoint = "";
+
+function setPrivacyDom(dom: ServerConfig["privacy"]["dom"]): void {
+  maskTextSelector = dom.mask_text.length ? dom.mask_text.join(", ") : null;
+  blockElementSelector = dom.block_element.length
+    ? dom.block_element.join(", ")
+    : null;
+}
 
 // Original references for patching
 let origConsoleWarn: typeof console.warn;
@@ -62,10 +74,14 @@ function ensureNavigationHook(): void {
 export function initBreadcrumbs(
   serverConfig: ServerConfig["breadcrumbs"],
   endpoint: string,
+  privacyQueryParamsAllowlist: string[] = [],
+  privacyDom: ServerConfig["privacy"]["dom"] = { mask_text: [], block_element: [] },
 ): void {
   destroyBreadcrumbs();
 
   config = serverConfig;
+  queryParamsAllowlist = privacyQueryParamsAllowlist;
+  setPrivacyDom(privacyDom);
   collectEndpoint = endpoint;
   buffer = new RingBuffer<Breadcrumb>(config.capacity);
 
@@ -128,8 +144,14 @@ export function drainBreadcrumbs(): Breadcrumb[] {
   return buffer.drain();
 }
 
-export function updateBreadcrumbConfig(serverConfig: ServerConfig["breadcrumbs"]): void {
+export function updateBreadcrumbConfig(
+  serverConfig: ServerConfig["breadcrumbs"],
+  privacyQueryParamsAllowlist: string[] = queryParamsAllowlist,
+  privacyDom?: ServerConfig["privacy"]["dom"],
+): void {
   config = serverConfig;
+  queryParamsAllowlist = privacyQueryParamsAllowlist;
+  if (privacyDom) setPrivacyDom(privacyDom);
 }
 
 export function clearBreadcrumbs(): void {
@@ -159,8 +181,13 @@ function clickDistance(a: ClickRecord, b: ClickRecord): number {
 function initClicks(): void {
   const handler = (e: MouseEvent) => {
       if (!config.clicks) return;
+      const target = e.target as Element;
+      // Suppress the entire click pipeline (click + rage/dead/error) when the
+      // target descends from a blocked element. This is the strongest privacy
+      // guarantee: no breadcrumb at all, not even a masked one.
+      if (blockElementSelector && target.closest(blockElementSelector)) return;
       const now = Date.now();
-      const selector = elementSelector(e.target as Element);
+      const selector = elementSelector(target);
 
       addBreadcrumb({
         timestamp: now,
@@ -320,6 +347,11 @@ function basicSelector(el: Element): string {
 }
 
 function findMeaningfulText(el: Element): string {
+  // Mask wins over text extraction: if the click target descends from a
+  // masked element, never read its (or its ancestors') text. The breadcrumb
+  // still fires, but no PII text rides along — only the structural selector.
+  if (maskTextSelector && el.closest(maskTextSelector)) return "[masked]";
+
   // Try the element itself first (direct text, not deep children)
   const directText = getDirectText(el);
   if (directText) return directText;
@@ -471,24 +503,29 @@ function recordDocumentLoad(): void {
 // --- Navigation tracking ---
 
 function initNavigation(): void {
+  // Compare against the raw href (we need to detect any URL change, including
+  // params that the allowlist would strip). The breadcrumb captures the
+  // scrubbed form so the dashboard never sees sensitive params.
   let lastUrl = location.href;
+  const scrubbedInitial = scrubUrl(lastUrl, queryParamsAllowlist);
 
-  // Record the current page as the first navigation breadcrumb
   addBreadcrumb({
     timestamp: Date.now(),
     category: "navigation",
-    message: lastUrl,
-    data: { to: lastUrl },
+    message: scrubbedInitial,
+    data: { to: scrubbedInitial },
   });
 
   const recordNav = () => {
     const newUrl = location.href;
     if (newUrl !== lastUrl) {
+      const from = scrubUrl(lastUrl, queryParamsAllowlist);
+      const to = scrubUrl(newUrl, queryParamsAllowlist);
       addBreadcrumb({
         timestamp: Date.now(),
         category: "navigation",
-        message: `${lastUrl} → ${newUrl}`,
-        data: { from: lastUrl, to: newUrl },
+        message: `${from} → ${to}`,
+        data: { from, to },
       });
       lastUrl = newUrl;
       touchActivity();
@@ -580,38 +617,9 @@ function isCollectEndpoint(url: string): boolean {
   return url.includes(collectEndpoint);
 }
 
-function shouldCapturePayload(contentType: string | null): boolean {
-  if (!contentType) return false;
-  const lower = contentType.toLowerCase();
-  // Always skip binary types
-  if (
-    lower.includes("image/") ||
-    lower.includes("video/") ||
-    lower.includes("audio/") ||
-    lower.includes("application/octet-stream")
-  ) {
-    return false;
-  }
-  return config.network_payloads.content_types.some((ct) =>
-    lower.startsWith(ct),
-  );
-}
-
-function truncateBody(
-  body: string,
-): { body: string; truncated: boolean } {
-  if (body.length > config.network_payloads.max_size_bytes) {
-    return {
-      body: body.slice(0, config.network_payloads.max_size_bytes),
-      truncated: true,
-    };
-  }
-  return { body, truncated: false };
-}
-
 async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
   const initiator = result.xhr ? "xhr" : "fetch";
-  const filteredUrl = filterQueryParams(result.url, config.query_params_allowlist);
+  const filteredUrl = scrubUrl(result.url, queryParamsAllowlist);
 
   if (result.error) {
     // Transport failure — no response received.
@@ -634,50 +642,6 @@ async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
 
   const traceId = consumeTraceId(result.url);
   if (traceId) data.trace_id = traceId;
-
-  if (
-    result.requestBody &&
-    config.network_payloads.enabled &&
-    config.network_payloads.request_body
-  ) {
-    const truncated = truncateBody(result.requestBody);
-    data.request_body = truncated.body;
-    if (truncated.truncated) data.request_truncated = true;
-  }
-
-  // Response body — XHR is sync, fetch needs clone+text(). Await before the
-  // addBreadcrumb so the buffered breadcrumb is complete on push. The user's
-  // fetch promise has already resolved by now (the hook returns the response
-  // before invoking after-listeners), so we're not adding latency to the
-  // caller.
-  if (
-    result.xhr &&
-    config.network_payloads.enabled &&
-    config.network_payloads.response_body &&
-    shouldCapturePayload(result.xhr.getResponseHeader("content-type"))
-  ) {
-    try {
-      const truncated = truncateBody(result.xhr.responseText);
-      data.response_body = truncated.body;
-      if (truncated.truncated) data.truncated = true;
-    } catch {
-      // ignore
-    }
-  } else if (
-    result.response &&
-    config.network_payloads.enabled &&
-    config.network_payloads.response_body &&
-    shouldCapturePayload(result.response.headers.get("content-type"))
-  ) {
-    try {
-      const text = await result.response.clone().text();
-      const truncated = truncateBody(text);
-      data.response_body = truncated.body;
-      if (truncated.truncated) data.truncated = true;
-    } catch {
-      // ignore body read failures
-    }
-  }
 
   // Resource timing — the PerformanceObserver may not have flushed yet, so
   // a sync read often returns nothing right after fetch resolution. Wait
