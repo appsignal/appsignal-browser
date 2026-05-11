@@ -38,3 +38,94 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  size-report:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          path: head
+
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+
+      - name: Build & measure head
+        working-directory: head
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          node scripts/measure-sizes.mjs > ../head-sizes.json
+
+      - name: Build & measure base
+        working-directory: base
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          # Use head's script so this works even if base predates it.
+          node ../head/scripts/measure-sizes.mjs > ../base-sizes.json || echo '{}' > ../base-sizes.json
+
+      - name: Post size comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const head = JSON.parse(fs.readFileSync('head-sizes.json', 'utf8'));
+            let base = {};
+            try { base = JSON.parse(fs.readFileSync('base-sizes.json', 'utf8')); } catch {}
+
+            const kb = (n) => `${(n / 1024).toFixed(2)} KB`;
+            const delta = (h, b) => {
+              if (b == null) return 'new';
+              const d = h - b;
+              if (d === 0) return 'no change';
+              const pct = ((d / b) * 100).toFixed(1);
+              const sign = d > 0 ? '+' : '';
+              const emoji = d > 0 ? '🔺' : '🔻';
+              return `${emoji} ${sign}${kb(d)} (${sign}${pct}%)`;
+            };
+
+            const rows = Object.entries(head).map(([key, h]) => {
+              const b = base[key];
+              return `| ${h.label} | ${kb(h.raw)} | ${kb(h.gz)} | ${delta(h.gz, b?.gz)} |`;
+            }).join('\n');
+
+            const marker = '<!-- bundle-size-report -->';
+            const body = [
+              marker,
+              '## Bundle size',
+              '',
+              `| Bundle | Raw | Gzip | Δ gzip vs \`${context.payload.pull_request.base.ref}\` |`,
+              '|---|---|---|---|',
+              rows,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
