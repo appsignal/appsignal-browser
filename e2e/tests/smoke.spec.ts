@@ -57,9 +57,10 @@ test("tracePropagationTargets injects traceparent and the breadcrumb attaches th
   // and the SDK's network breadcrumb carries data.trace_id matching the
   // header's middle segment. This is the correlation that makes
   // frontend↔backend trace stitching work.
-  // Glob matches `host + pathname`, where host includes the port. Use a
-  // suffix-style pattern that doesn't pin it.
-  await page.goto("/?tracePropagationTargets=" + encodeURIComponent("**/api/**"));
+  // The trace-propagation sample app inits the SDK with
+  // tracePropagationTargets: ["**/api/**"] — match on host+pathname, port
+  // included; the glob's suffix-style pattern doesn't pin the port.
+  await page.goto("/trace-propagation.html");
   await page.click("#trigger-fetch");
   await flush(page);
 

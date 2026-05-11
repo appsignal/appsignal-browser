@@ -2,25 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>AppSignal Browser SDK · e2e fixture</title>
+    <title>AppSignal Browser SDK — basic setup</title>
     <style>
       body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
       button { display: block; margin: 0.5rem 0; padding: 0.5rem 1rem; }
       pre { background: #f3f3f3; padding: 0.75rem; font-size: 0.85rem; overflow: auto; }
+      nav a { display: inline-block; margin-right: 1rem; }
     </style>
   </head>
   <body>
-    <h1>SDK e2e fixture</h1>
-    <p>This page is loaded by Playwright tests. The SDK init reads config from URL params:</p>
-    <ul>
-      <li><code>?key=...</code> — ingestion key (default <code>e2e</code>)</li>
-      <li><code>?tracePropagationTargets=glob,glob</code> — comma-separated globs</li>
-      <li><code>?beforeSendDrops=1</code> — install a <code>beforeSend</code> that returns null</li>
-      <li><code>?beforeSendDropMatching=SUBSTR</code> — install a <code>beforeSend</code> that drops errors whose message includes SUBSTR</li>
-      <li><code>?beforeSendRedactPattern=REGEX&amp;beforeSendRedactWith=TEXT</code> — install a <code>beforeSend</code> that replaces matches in <code>error.message</code></li>
-      <li><code>?ignoreErrors=foo,bar</code> — comma-separated patterns</li>
-    </ul>
+    <h1>AppSignal Browser — basic setup</h1>
+    <p>Minimal SDK initialisation. The interaction controls below drive the e2e
+       smoke and privacy tests. For setups that need a specific config
+       (<code>beforeSend</code>, <code>ignoreErrors</code>, trace propagation),
+       see the other scenario pages:</p>
+    <nav>
+      <a href="/pii-redaction.html">pii-redaction</a>
+      <a href="/error-filtering.html">error-filtering</a>
+      <a href="/trace-propagation.html">trace-propagation</a>
+    </nav>
 
+    <h2>Try it</h2>
     <button id="trigger-fetch">fetch /api/echo (200)</button>
     <button id="trigger-fetch-404">fetch /api/echo?status=404</button>
     <button id="trigger-fetch-error">fetch /api/does-not-exist (network error)</button>
@@ -41,102 +43,57 @@
 
     <script src="/dist/browser.umd.js"></script>
     <script>
-      (function () {
-        const params = new URLSearchParams(location.search);
-        const config = {
-          key: params.get("key") ?? "e2e",
-          endpoint: location.origin,
-        };
-        if (params.has("tracePropagationTargets")) {
-          config.tracePropagationTargets = params.get("tracePropagationTargets").split(",");
-        }
-        if (params.get("beforeSendDrops") === "1") {
-          config.beforeSend = function () { return null; };
-        } else if (params.has("beforeSendDropMatching")) {
-          // Real-world pattern: drop noisy errors whose message matches a known
-          // substring (e.g. browser-emitted "ResizeObserver loop limit exceeded").
-          var pattern = params.get("beforeSendDropMatching");
-          config.beforeSend = function (event) {
-            if (event.message && event.message.indexOf(pattern) !== -1) return null;
-            return event;
-          };
-        } else if (params.has("beforeSendRedactPattern")) {
-          // Real-world pattern: redact PII (e.g. email, token) from the error
-          // payload before transmission. The SDK passes a mutable BrowserError
-          // and uses whatever the hook returns, so the hook can rewrite any
-          // field. Three places must be cleaned for full redaction:
-          //   1. event.message — the literal Error message
-          //   2. event.stack — V8 prefixes the stack with "Error: <message>"
-          //   3. event.breadcrumbs[].message — the SDK auto-adds an error
-          //      breadcrumb containing the original message before this hook
-          //      runs (errors.ts handleError → addBreadcrumb), so the
-          //      pre-redaction message rides along inside the same payload.
-          var regex = new RegExp(params.get("beforeSendRedactPattern"), "g");
-          var replacement = params.get("beforeSendRedactWith") || "[redacted]";
-          var redact = function (s) { return s == null ? s : String(s).replace(regex, replacement); };
-          config.beforeSend = function (event) {
-            if (event.message) event.message = redact(event.message);
-            if (event.stack) event.stack = redact(event.stack);
-            if (event.breadcrumbs) {
-              event.breadcrumbs.forEach(function (b) {
-                if (b.message) b.message = redact(b.message);
-              });
-            }
-            return event;
-          };
-        }
-        if (params.has("ignoreErrors")) {
-          config.ignoreErrors = params.get("ignoreErrors").split(",");
-        }
+      AppsignalBrowser.init({
+        key: "your-app-key",
+        endpoint: location.origin,
+      });
+      document.getElementById("status").textContent = "SDK initialised";
 
-        AppsignalBrowser.init(config);
-        document.getElementById("status").textContent =
-          "SDK initialised with: " + JSON.stringify(config);
+      // Interaction wiring — drives the e2e tests.
+      document.getElementById("trigger-fetch").addEventListener("click", function () {
+        fetch("/api/echo");
+      });
+      document.getElementById("trigger-fetch-404").addEventListener("click", function () {
+        fetch("/api/echo?status=404");
+      });
+      document.getElementById("trigger-fetch-error").addEventListener("click", function () {
+        // hit a non-existent host so the fetch rejects rather than 404s
+        fetch("http://localhost:1/no-such-server").catch(function () {});
+      });
+      document.getElementById("trigger-fetch-sensitive-params").addEventListener("click", function () {
+        fetch("/api/echo?password=hunter2&token=abc123def456");
+      });
+      document.getElementById("trigger-fetch-mixed-params").addEventListener("click", function () {
+        fetch("/api/echo?page=2&token=abc123def456");
+      });
+      document.getElementById("trigger-fetch-blocked").addEventListener("click", function () {
+        fetch("/api/auth/login");
+      });
+      document.getElementById("throw-error").addEventListener("click", function () {
+        // Async to escape the click handler — window.onerror needs an
+        // uncaught throw on the event loop.
+        setTimeout(function () { throw new Error("e2e thrown error"); }, 0);
+      });
+      document.getElementById("capture-error").addEventListener("click", function () {
+        AppsignalBrowser.captureError(new Error("e2e captured error"));
+      });
+      document.getElementById("add-breadcrumb").addEventListener("click", function () {
+        AppsignalBrowser.addBreadcrumb({
+          category: "test",
+          message: "manual breadcrumb",
+          data: { from: "e2e" },
+        });
+      });
+      document.getElementById("flush").addEventListener("click", function () {
+        AppsignalBrowser.flush();
+      });
 
-        document.getElementById("trigger-fetch").addEventListener("click", function () {
-          fetch("/api/echo");
-        });
-        document.getElementById("trigger-fetch-404").addEventListener("click", function () {
-          fetch("/api/echo?status=404");
-        });
-        document.getElementById("trigger-fetch-error").addEventListener("click", function () {
-          // hit a non-existent host so the fetch rejects rather than 404s
-          fetch("http://localhost:1/no-such-server").catch(function () {});
-        });
-        document.getElementById("trigger-fetch-sensitive-params").addEventListener("click", function () {
-          fetch("/api/echo?password=hunter2&token=abc123def456");
-        });
-        document.getElementById("trigger-fetch-mixed-params").addEventListener("click", function () {
-          fetch("/api/echo?page=2&token=abc123def456");
-        });
-        document.getElementById("trigger-fetch-blocked").addEventListener("click", function () {
-          fetch("/api/auth/login");
-        });
-        document.getElementById("throw-error").addEventListener("click", function () {
-          // Async to escape the click handler — window.onerror needs an
-          // uncaught throw on the event loop.
-          setTimeout(function () { throw new Error("e2e thrown error"); }, 0);
-        });
-        // Test helper: throw an Error with an arbitrary message on the event
-        // loop. Used by e2e tests that need to drive distinct error messages
-        // (e.g. beforeSend filter tests) without hardcoding them in buttons.
-        window.throwWithMessage = function (msg) {
-          setTimeout(function () { throw new Error(msg); }, 0);
-        };
-        document.getElementById("capture-error").addEventListener("click", function () {
-          AppsignalBrowser.captureError(new Error("e2e captured error"));
-        });
-        document.getElementById("add-breadcrumb").addEventListener("click", function () {
-          AppsignalBrowser.addBreadcrumb({
-            category: "test",
-            message: "manual breadcrumb",
-            data: { from: "e2e" },
-          });
-        });
-        document.getElementById("flush").addEventListener("click", function () {
-          AppsignalBrowser.flush();
-        });
-      })();
+      // Test driver — not part of the SDK API. Lets Playwright tests throw
+      // arbitrary error messages asynchronously so window.onerror picks them
+      // up. Real apps don't need this.
+      window.throwWithMessage = function (msg) {
+        setTimeout(function () { throw new Error(msg); }, 0);
+      };
     </script>
   </body>
 </html>

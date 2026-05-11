@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AppSignal Browser SDK — PII redaction</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
+      pre { background: #f3f3f3; padding: 0.75rem; font-size: 0.85rem; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>PII redaction via <code>beforeSend</code></h1>
+    <p>The <code>beforeSend</code> hook receives the mutable error event and
+       can either return it (possibly modified) or return <code>null</code> to
+       drop it entirely. This sample shows a realistic hook that combines two
+       responsibilities most production apps need:</p>
+    <ol>
+      <li>Drop known-noisy browser errors (here, <code>ResizeObserver</code>).</li>
+      <li>Redact email addresses from every field where they leak.</li>
+    </ol>
+
+    <p>The redaction touches three fields because a single message can ride
+       through the SDK in three places:</p>
+    <ul>
+      <li><code>event.message</code> — the literal <code>Error</code> message.</li>
+      <li><code>event.stack</code> — V8 prefixes the stack with
+          <code>"Error: &lt;message&gt;"</code>, so the unredacted message
+          re-appears inside it.</li>
+      <li><code>event.breadcrumbs[].message</code> — the SDK auto-adds an
+          error breadcrumb with the raw message <em>before</em>
+          <code>beforeSend</code> runs, so the original message rides along
+          inside the same payload.</li>
+    </ul>
+
+    <pre id="status">SDK loading…</pre>
+
+    <script src="/dist/browser.umd.js"></script>
+    <script>
+      var emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+      AppsignalBrowser.init({
+        key: "your-app-key",
+        endpoint: location.origin,
+        beforeSend: function (event) {
+          // Drop known-noisy browser errors that swamp dashboards.
+          if (event.message && event.message.indexOf("ResizeObserver") !== -1) {
+            return null;
+          }
+          // Redact email addresses anywhere they might appear in the payload.
+          if (event.message) event.message = event.message.replace(emailRe, "[redacted-email]");
+          if (event.stack) event.stack = event.stack.replace(emailRe, "[redacted-email]");
+          if (event.breadcrumbs) {
+            event.breadcrumbs.forEach(function (b) {
+              if (b.message) b.message = b.message.replace(emailRe, "[redacted-email]");
+            });
+          }
+          return event;
+        },
+      });
+      document.getElementById("status").textContent = "SDK initialised";
+
+      // Test driver — see error-filtering.html for the same helper.
+      window.throwWithMessage = function (msg) {
+        setTimeout(function () { throw new Error(msg); }, 0);
+      };
+    </script>
+  </body>
+</html>

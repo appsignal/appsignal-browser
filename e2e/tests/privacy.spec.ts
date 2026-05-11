@@ -144,7 +144,8 @@ test.describe("error filtering", () => {
     // user supplies a list of substring/regex patterns at init, and the SDK
     // silently drops any matching error. Distinct surface from beforeSend
     // (declarative vs. callback) — both need to be tested.
-    await page.goto("/?ignoreErrors=" + encodeURIComponent("ResizeObserver"));
+    // /error-filtering.html inits with ignoreErrors: ["ResizeObserver loop limit exceeded"].
+    await page.goto("/error-filtering.html");
 
     await page.evaluate(() => {
       (window as unknown as { throwWithMessage(msg: string): void })
@@ -217,7 +218,9 @@ test.describe("beforeSend", () => {
     // limit exceeded") is suppressed without dropping anything else. The hook
     // returns null for the matching message and returns the event unchanged
     // otherwise — proves both branches: drop AND pass-through.
-    await page.goto("/?beforeSendDropMatching=" + encodeURIComponent("ResizeObserver"));
+    //
+    // /pii-redaction.html's beforeSend drops on "ResizeObserver" substring.
+    await page.goto("/pii-redaction.html");
 
     await page.evaluate(() => {
       (window as unknown as { throwWithMessage(msg: string): void })
@@ -253,13 +256,9 @@ test.describe("beforeSend", () => {
     //   - V8 puts the message inside error.stack ("Error: <message>\n  at ...")
     //   - The SDK auto-adds an error breadcrumb with the raw message *before*
     //     beforeSend runs, so it rides along in event.breadcrumbs[].
-    // The sample app's redactor cleans all three; this test asserts the email
-    // appears nowhere in the captured payload.
-    const emailPattern = "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}";
-    await page.goto(
-      "/?beforeSendRedactPattern=" + encodeURIComponent(emailPattern) +
-      "&beforeSendRedactWith=" + encodeURIComponent("[redacted-email]"),
-    );
+    // /pii-redaction.html's beforeSend cleans all three; this test asserts the
+    // email appears nowhere in the captured payload.
+    await page.goto("/pii-redaction.html");
 
     const leakyMessage = "failed to load profile for user alice@example.com";
     await page.evaluate((msg) => {
@@ -280,31 +279,5 @@ test.describe("beforeSend", () => {
     // breadcrumbs either. Catches the regression where a host's beforeSend
     // forgets to clean those secondary fields.
     expect(JSON.stringify(error)).not.toContain("alice@example.com");
-  });
-
-  test("returning null drops the error payload", async ({ page, request }) => {
-    // Sample app installs a beforeSend that returns null when ?beforeSendDrops=1.
-    // The error fires for real (window.onerror catches it), but the SDK must
-    // drop it before the network call.
-    await page.goto("/?beforeSendDrops=1");
-    await page.click("#throw-error");
-
-    // Give ample time for the error to have shipped if the hook were ignored.
-    // 1.5 s comfortably exceeds the inline send path; nothing batches errors.
-    await page.waitForTimeout(1_500);
-    await flush(page);
-
-    const errors = ingestErrors(await captured(request));
-    expect(errors).toHaveLength(0);
-
-    // Sanity: confirm the negative wasn't trivially true by re-running without
-    // the flag and ensuring an error DOES land. Done in-line to avoid coupling
-    // to a separate test that might be skipped.
-    await reset(request);
-    await page.goto("/");
-    await page.click("#throw-error");
-    await pollFor(request, (items) =>
-      ingestErrors(items).length > 0 ? true : null,
-    );
   });
 });

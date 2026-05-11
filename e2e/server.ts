@@ -133,8 +133,14 @@ const server = createServer(async (req, res) => {
   }
 
   // ── Static files ───────────────────────────────────────────────────────
-  if (pathname === "/" || pathname === "/index.html") {
+  if (pathname === "/") {
     await serveStatic(resolve(root, "e2e/sample-app/index.html"), res);
+    return;
+  }
+  // Serve any sample-app HTML page by basename, e.g. /pii-redaction.html.
+  // The path-traversal guard keeps callers inside e2e/sample-app/.
+  if (pathname.endsWith(".html") && !pathname.includes("..")) {
+    await serveStatic(resolve(root, "e2e/sample-app" + pathname), res);
     return;
   }
   if (pathname.startsWith("/dist/")) {
