@@ -89,7 +89,7 @@ jobs:
             const delta = (h, b) => {
               if (b == null) return 'new';
               const d = h - b;
-              if (d === 0) return '–';
+              if (d === 0) return 'no change';
               const pct = ((d / b) * 100).toFixed(1);
               const sign = d > 0 ? '+' : '';
               const emoji = d > 0 ? '🔺' : '🔻';
