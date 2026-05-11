@@ -48,12 +48,11 @@ export function safeUrl(url: string): URL | null {
  *
  * This defends against OAuth implicit flow leaks while keeping hash-routed
  * apps (React Router HashRouter, etc.) usable without an extra knob. */
-export function scrubUrl(url: string, allowlist: Set<string> | string[]): string {
+export function scrubUrl(url: string, allowlist: string[]): string {
   if (!url) return url;
   try {
     const parsed = new URL(url, location.origin);
-    const list = allowlist instanceof Set ? Array.from(allowlist) : allowlist;
-    const isAllowed = (key: string) => list.some((p) => globMatch(p, key));
+    const isAllowed = (key: string) => allowlist.some((p) => globMatch(p, key));
 
     const filterParams = (params: URLSearchParams): string => {
       const kept = new URLSearchParams();
@@ -65,7 +64,8 @@ export function scrubUrl(url: string, allowlist: Set<string> | string[]): string
 
     const qs = filterParams(parsed.searchParams);
 
-    const rawHash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : "";
+    // URL.hash is either "" or starts with "#"; slice(1) handles both.
+    const rawHash = parsed.hash.slice(1);
     let hashOut = "";
     if (rawHash) {
       if (!rawHash.includes("=") || rawHash.startsWith("/")) {

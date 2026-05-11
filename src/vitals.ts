@@ -9,12 +9,12 @@ import type {
 } from "web-vitals/attribution";
 
 let collectedVitals: VitalEntry[] = [];
-let allowlist: Set<string> = new Set();
+let allowlist: string[] = [];
 
 export function initVitals(queryParamsAllowlist: string[]): void {
   collectedVitals = [];
   destroyed = false;
-  allowlist = new Set(queryParamsAllowlist);
+  allowlist = queryParamsAllowlist;
 
   // LCP, INP, and CLS all finalise through web-vitals' `whenIdleOrHidden`
   // helper, which uses `requestIdleCallback` (or `setTimeout(0)` as a

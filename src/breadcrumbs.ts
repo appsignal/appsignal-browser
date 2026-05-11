@@ -507,19 +507,19 @@ function initNavigation(): void {
   // params that the allowlist would strip). The breadcrumb captures the
   // scrubbed form so the dashboard never sees sensitive params.
   let lastUrl = location.href;
-  const scrubLast = () => scrubUrl(lastUrl, queryParamsAllowlist);
+  const scrubbedInitial = scrubUrl(lastUrl, queryParamsAllowlist);
 
   addBreadcrumb({
     timestamp: Date.now(),
     category: "navigation",
-    message: scrubLast(),
-    data: { to: scrubLast() },
+    message: scrubbedInitial,
+    data: { to: scrubbedInitial },
   });
 
   const recordNav = () => {
     const newUrl = location.href;
     if (newUrl !== lastUrl) {
-      const from = scrubLast();
+      const from = scrubUrl(lastUrl, queryParamsAllowlist);
       const to = scrubUrl(newUrl, queryParamsAllowlist);
       addBreadcrumb({
         timestamp: Date.now(),

@@ -27,9 +27,10 @@ export interface ServerConfig {
   enabled: boolean;
   errors: { enabled: boolean; sample_rate: number };
   /** Cross-cutting privacy controls. Each knob lists the subsystems that
-   * consume it; if no subsystem applies (e.g. error messages, console args,
-   * network bodies) the knob has no effect there. Channel-specific knobs
-   * (e.g. `breadcrumbs.network_payloads`) stay in their feature namespace. */
+   * consume it; if no subsystem applies (e.g. error messages, console args)
+   * the knob has no effect there. Channel-specific knobs (e.g.
+   * `breadcrumbs.network_blocklist`, `replay.mask_all_inputs`) stay in their
+   * feature namespace. */
   privacy: {
     /** Query-string keys to keep in captured URLs. Empty list strips all
      * params. Glob-matched (e.g. `"utm_*"` keeps every UTM key).

@@ -1,7 +1,8 @@
-// HTTP test fixture for E2E. Serves the sample page, the built SDK, mocks
-// the ingest endpoints, and exposes /__captured + /__reset so tests can
-// inspect what the SDK actually sent. One process; tests poll the capture
-// endpoint to wait for events to arrive.
+// HTTP test fixture for E2E. Serves the sample-app pages, the built SDK,
+// mocks the ingest endpoints, and exposes /__captured + /__reset so tests
+// can inspect what the SDK actually sent. One instance per Playwright
+// worker (see e2e/fixtures.ts); tests poll the capture endpoint to wait
+// for events to arrive.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { readFile } from "fs/promises";
