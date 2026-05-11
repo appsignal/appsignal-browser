@@ -1,0 +1,51 @@
+// Error-driven replay shipping. With sample_rate: 0 + error_replay: true,
+// rrweb keeps recording but flushChunk drops every buffer (replay.ts:238)
+// until an error opens the window. handleError → onErrorReported →
+// replay.ts:onError immediately flushes the pre-error buffer and opens a
+// 5 s tail (replay.ts:142-156). Without this spec, a regression in the
+// errors→replay wire would silently lose the most diagnostically useful
+// chunks: the ones explaining what the user just did before the crash.
+
+import { test, expect } from "../fixtures.js";
+import { reset, setConfig, captured, ingestReplays, pollFor } from "../helpers.js";
+import { defaultConfig } from "../default-config.js";
+
+test.beforeEach(async ({ request }) => {
+  await reset(request);
+});
+
+test("error on an unsampled session ships a replay chunk via the error window", async ({ page, request }) => {
+  const config = defaultConfig();
+  (config.replay as Record<string, unknown>).sample_rate = 0;
+  (config.replay as Record<string, unknown>).error_replay = true;
+  await setConfig(request, config);
+
+  await page.goto("/");
+
+  // Give rrweb time to load and emit the initial FullSnapshot. The 5 s
+  // flush timer fires during this wait but bails because !sampled and no
+  // error has occurred yet.
+  await page.waitForTimeout(1500);
+
+  const replaysBeforeError = ingestReplays(await captured(request));
+  expect(replaysBeforeError).toHaveLength(0);
+
+  await page.click("#throw-error");
+
+  // The chunk arrives via the error window: errors.ts publishes to
+  // onErrorReported subscribers; replay.ts:onError calls flushChunk which
+  // sees errorReplayEnabled && hadError and ships the buffered events,
+  // including the initial FullSnapshot.
+  const chunk = await pollFor(request, (items) =>
+    ingestReplays(items).find((r) => {
+      const events = r.events as Array<{ type: number }> | undefined;
+      return events?.some((e) => e.type === 2);
+    }),
+  );
+
+  expect(chunk).toMatchObject({
+    type: "replay",
+    session_id: expect.any(String),
+    tab_id: expect.any(String),
+  });
+});
