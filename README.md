@@ -339,6 +339,13 @@ Uses [@rrweb/record](https://github.com/rrweb-io/rrweb) (recorder-only, not the 
 
 This ensures replay data is captured from the first DOM mutation regardless of config fetch time. The fallback sample rate of 1.0 drives this; no special "always record" logic needed.
 
+**What server config *can't* save you from.** Server-side `replay.enabled: false` (or `sample_rate: 0` with `error_replay: false`) gates *upload* — no chunks ever leave the browser — but doesn't gate *download* of rrweb itself. The rrweb code is fetched eagerly regardless of what the server eventually says, because the SDK doesn't yet know the answer:
+
+- **UMD** (`browser.umd.js`) inlines rrweb (~84 KB gz of the 103 KB total). The cost lands at script-tag eval, long before the config GET resolves.
+- **ESM** splits rrweb into a separate chunk, but `initReplay` calls `await import("@rrweb/record")` synchronously from `init()` (driven by the fallback `sample_rate: 1.0`), so the chunk fetch fires in parallel with the config GET — not after it.
+
+Once the config arrives, recording may stop and buffered chunks may be discarded, but the rrweb bytes are already on the user's machine. For projects that genuinely never want to pay the rrweb download, the only escape is at code level: don't load the SDK at all on pages where replay isn't wanted, since there's no client-side `replay.enabled` flag in `init()`.
+
 **Privacy.** All text content masked by default. Input values, text nodes, and placeholder text replaced with `*`. Images replaced with a solid placeholder. `replay.mask_all_inputs` defaults to `true`. Relaxable per-element with `data-rrweb-unmasked`.
 
 Additional masking via the cross-cutting `privacy.dom.*` selectors (also consumed by click breadcrumbs — see *Privacy and PII*):
