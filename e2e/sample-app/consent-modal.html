@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AppSignal Browser SDK — consent modal</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
+      button { display: block; margin: 0.5rem 0; padding: 0.5rem 1rem; }
+      #consent-modal {
+        position: fixed; bottom: 1rem; left: 1rem; right: 1rem;
+        background: #fff; padding: 1rem; border: 1px solid #999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      }
+      #consent-modal.hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>AppSignal Browser — consent modal</h1>
+    <p>SDK inits with <code>trackingConsent: "pending"</code>. Every send is
+       enqueued in transport.ts until the user makes a decision. Accept fires
+       <code>setConsent("granted")</code> which drains the queue; Decline
+       fires <code>setConsent("not-granted")</code> which empties it.</p>
+
+    <button id="add-breadcrumb">addBreadcrumb(...)</button>
+    <button id="flush">flush()</button>
+
+    <div id="consent-modal">
+      <p>We use cookies. Choose your option:</p>
+      <button id="accept">Accept</button>
+      <button id="decline">Decline</button>
+    </div>
+
+    <script src="/dist/browser.umd.js"></script>
+    <script>
+      AppsignalBrowser.init({
+        key: "your-app-key",
+        endpoint: location.origin,
+        trackingConsent: "pending",
+      });
+
+      document.getElementById("add-breadcrumb").addEventListener("click", function () {
+        AppsignalBrowser.addBreadcrumb({
+          category: "test",
+          message: "manual breadcrumb",
+          data: { from: "e2e" },
+        });
+      });
+      document.getElementById("flush").addEventListener("click", function () {
+        AppsignalBrowser.flush();
+      });
+      document.getElementById("accept").addEventListener("click", function () {
+        AppsignalBrowser.setConsent("granted");
+        document.getElementById("consent-modal").classList.add("hidden");
+      });
+      document.getElementById("decline").addEventListener("click", function () {
+        AppsignalBrowser.setConsent("not-granted");
+        document.getElementById("consent-modal").classList.add("hidden");
+      });
+    </script>
+  </body>
+</html>
