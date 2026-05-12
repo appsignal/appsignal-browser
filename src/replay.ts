@@ -116,7 +116,7 @@ export function initReplay(
     });
 
     // Trigger the post-error tail only for errors that actually shipped —
-    // errors.ts publishes after beforeSend approval, so dropped errors don't
+    // errors.ts publishes after beforeError approval, so dropped errors don't
     // open the window.
     lifecycleUnsubscribers.push(onErrorReported(() => onError()));
   }

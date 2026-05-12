@@ -47,12 +47,21 @@ interface BrowserConfig {
     name?: string;
   };
 
-  // Modify or drop error events before sending. Return null to drop the event.
-  beforeSend?: (event: BrowserError) => BrowserError | null;
+  // Inspect or modify each error at the entry point — before the SDK adds
+  // an error breadcrumb, records lastErrorTimestamp, or runs deduplication.
+  // Return null to drop the error: none of those side effects fire. Mutate
+  // fields to filter or redact (message, stack, etc.). Receives an
+  // IncomingError, not the full payload; breadcrumbs and session are
+  // attached later. Sync only.
+  beforeError?: (event: IncomingError) => IncomingError | null;
 
-  // Error message patterns to ignore. Matching errors are silently dropped.
-  // Accepts strings (substring match) or RegExp patterns.
-  ignoreErrors?: (string | RegExp)[];
+  // Inspect or modify each breadcrumb at the moment it's pushed into the
+  // ring buffer, before any flush. Fires for every breadcrumb the SDK
+  // collects (network, click, navigation, console, error, manual). Return
+  // null to drop — the breadcrumb never enters the buffer and ships in
+  // neither error payloads nor periodic events payloads. Runs on the hot
+  // path; keep it cheap.
+  beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
 
   // URL patterns to inject W3C traceparent headers into (for distributed tracing).
   // Glob syntax. Only requests matching these patterns get trace headers.
@@ -65,7 +74,9 @@ interface BrowserConfig {
 }
 ```
 
-All collection toggles, sample rates, replay settings, and breadcrumb options are configured server-side and fetched on init. The full field reference lives with the backend config. Client-side options (`beforeSend`, `ignoreErrors`, `tracePropagationTargets`, `trackingConsent`) are set in `init()` since they contain code or are page-load settings.
+Both filtering hooks run **before any buffering** — `beforeError` at the SDK's entry point for errors, `beforeBreadcrumb` at the breadcrumb ring buffer's push site. Returning `null` from either drops the event completely; mutating fields propagates into the eventual payload. This split avoids the common asymmetry in other SDKs (a "drop early" list plus a "modify late" hook) by giving every event type the same early-pipeline shape.
+
+All collection toggles, sample rates, replay settings, and breadcrumb options are configured server-side and fetched on init. The full field reference lives with the backend config. Client-side options (`beforeError`, `beforeBreadcrumb`, `tracePropagationTargets`, `trackingConsent`) are set in `init()` since they contain code or are page-load settings.
 
 ### API
 
@@ -87,7 +98,7 @@ function clearUser(): void;
 function endSession(): void;
 
 // Add a manual breadcrumb
-function addBreadcrumb(crumb: {
+function addBreadcrumb(breadcrumb: {
   category: string;
   message: string;
   data?: Record<string, unknown>;
@@ -322,9 +333,18 @@ Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`.
 
 Stack traces are sent as raw strings. Source map processing is server-side (future phase); the plugin does not do client-side source map application.
 
-**Error filtering.** Errors matching any pattern in `ignoreErrors` are silently dropped before processing. Patterns are strings (substring match) or regular expressions. Common use: suppressing noise like `"ResizeObserver loop limit exceeded"` or `"Script error"`.
+**beforeError hook.** If provided, called once per error at the entry point — *before* the error breadcrumb is added, *before* `lastErrorTimestamp` is updated, *before* deduplication. Returning `null` drops the error completely; none of those side effects fire. Mutating fields on the returned `IncomingError` propagates into the eventual payload. This is the single hook for both noise suppression and field redaction:
 
-**beforeSend hook.** If provided, called with the error payload before sending. Can modify the payload (strip PII) or return `null` to drop. Runs after deduplication and filtering.
+```ts
+beforeError: (e) => {
+  if (/ResizeObserver/.test(e.message)) return null;        // drop noise
+  e.message = e.message.replace(emailRe, "[redacted]");     // redact error fields
+  e.stack   = e.stack?.replace(emailRe, "[redacted]");
+  return e;
+}
+```
+
+`beforeError` does *not* see `breadcrumbs` or `session` — those are attached after the hook approves. Redact breadcrumb-level data in `beforeBreadcrumb` instead (see *Breadcrumbs*), which has the side benefit of also redacting breadcrumbs that ride in periodic events flushes.
 
 **Error deduplication.** Within one session, if the same error (same message + same stack top frame) fires more than 5 times in 10 seconds, the 6th+ are silently dropped. First 5 are sent normally. Prevents error storms from overwhelming ingestion.
 
@@ -455,7 +475,10 @@ Other defaults that round out the privacy posture:
 - User fields (id, email, name) never collected unless `setUser()` is called; cleared via `clearUser()`.
 - No cookies read or written beyond `anonymous_id` in `localStorage`.
 
-**`beforeSend` hook.** Errors pass through `beforeSend(event) → BrowserError | null` if configured, after dedup and `ignoreErrors` filtering. Mutate the event to redact (e.g. strip emails from `message` / `stack` / `breadcrumbs`), or return `null` to drop. Sync only — a `Promise` return is detected, logged as a `console.error`, and the event is dropped.
+**Filtering hooks.** Two early-pipeline callbacks, both run before any buffering:
+
+- `beforeError(event) → IncomingError | null` — fires once per error at the SDK's entry point, before the error breadcrumb is added, before `lastErrorTimestamp`, before dedupe. Mutate to redact `message`/`stack`/etc.; return `null` to drop (no breadcrumb pollution, no dedupe slot consumed). Sync only — a `Promise` return is detected, logged as a `console.error`, and the event is dropped.
+- `beforeBreadcrumb(breadcrumb) → Breadcrumb | null` — fires once per breadcrumb at insertion (network, click, navigation, console, error, manual). Mutate to redact `message`/`data`; return `null` to drop. One hook covers both channels: breadcrumbs riding in error payloads *and* breadcrumbs riding in the periodic events flush.
 
 ## Framework plugins
 

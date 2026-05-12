@@ -10,6 +10,7 @@ import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
+let beforeBreadcrumbHook: ((breadcrumb: Breadcrumb) => Breadcrumb | null) | undefined;
 let queryParamsAllowlist: string[] = [];
 // Pre-joined selectors so the hot path (every click) doesn't reformat them.
 // `null` means the list is empty — skip the el.closest() check entirely.
@@ -76,10 +77,12 @@ export function initBreadcrumbs(
   endpoint: string,
   privacyQueryParamsAllowlist: string[] = [],
   privacyDom: ServerConfig["privacy"]["dom"] = { mask_text: [], block_element: [] },
+  beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null,
 ): void {
   destroyBreadcrumbs();
 
   config = serverConfig;
+  beforeBreadcrumbHook = beforeBreadcrumb;
   queryParamsAllowlist = privacyQueryParamsAllowlist;
   setPrivacyDom(privacyDom);
   collectEndpoint = endpoint;
@@ -118,9 +121,28 @@ export function initBreadcrumbs(
   initTabLifecycle();
 }
 
-export function addBreadcrumb(crumb: Breadcrumb): void {
+export function addBreadcrumb(breadcrumb: Breadcrumb): void {
   if (getConsent() === "not-granted") return;
-  buffer.push(crumb);
+  // Hot path: every network request, click, console call. Skip the hook
+  // entirely when none is configured, rather than running it as identity.
+  if (!beforeBreadcrumbHook) {
+    buffer.push(breadcrumb);
+    return;
+  }
+
+  // beforeBreadcrumb decides whether the breadcrumb enters the buffer.
+  // A null return drops it from every downstream payload (error and
+  // periodic events flush alike). A thrown callback shouldn't break the
+  // SDK — treat it as passthrough rather than drop, so a bug in user code
+  // doesn't silently swallow breadcrumbs.
+  let result: Breadcrumb | null;
+  try {
+    result = beforeBreadcrumbHook(breadcrumb);
+  } catch {
+    result = breadcrumb;
+  }
+  if (!result) return;
+  buffer.push(result);
 }
 
 export function addManualBreadcrumb(input: {
@@ -999,4 +1021,5 @@ export function destroyBreadcrumbs(): void {
   resourceTimings.clear();
   recentClicks = [];
   buffer = new RingBuffer<Breadcrumb>(100);
+  beforeBreadcrumbHook = undefined;
 }

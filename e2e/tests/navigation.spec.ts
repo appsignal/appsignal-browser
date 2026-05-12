@@ -22,23 +22,23 @@ test("pushState records a nav breadcrumb and flushes it in the same payload", as
 
   // Find a single ingest payload that carries both the manual breadcrumb
   // and the nav breadcrumb. If recordNav fired after flushEvents, the nav
-  // crumb would sit in the buffer until the next flush (30 s later or on
-  // unload) — that's the regression this test guards against.
-  const navCrumb = await pollFor(request, (items) =>
+  // breadcrumb would sit in the buffer until the next flush (30 s later or
+  // on unload) — that's the regression this test guards against.
+  const navBreadcrumb = await pollFor(request, (items) =>
     ingestEvents(items).flatMap((e) => {
-      const crumbs = (e.breadcrumbs as Array<Record<string, unknown>>) ?? [];
-      const hasManual = crumbs.some(
-        (c) => c.category === "test" && c.message === "manual breadcrumb",
+      const breadcrumbs = (e.breadcrumbs as Array<Record<string, unknown>>) ?? [];
+      const hasManual = breadcrumbs.some(
+        (b) => b.category === "test" && b.message === "manual breadcrumb",
       );
       if (!hasManual) return [];
-      return crumbs.filter((c) => {
-        const data = c.data as { to?: string } | undefined;
-        return c.category === "navigation" && data?.to?.endsWith("/spa-route-1");
+      return breadcrumbs.filter((b) => {
+        const data = b.data as { to?: string } | undefined;
+        return b.category === "navigation" && data?.to?.endsWith("/spa-route-1");
       });
     })[0],
   );
 
-  expect(navCrumb).toMatchObject({
+  expect(navBreadcrumb).toMatchObject({
     category: "navigation",
     message: expect.stringMatching(/ → .*\/spa-route-1$/),
     data: {

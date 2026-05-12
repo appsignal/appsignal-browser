@@ -7,8 +7,7 @@ import {
 } from "./errors.js";
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
-import * as session from "./session.js";
-import type { BrowserError } from "./types.js";
+import type { BrowserError, IncomingError } from "./types.js";
 
 vi.mock("./transport.js", () => ({
   sendError: vi.fn(),
@@ -103,38 +102,9 @@ describe("errors", () => {
     expect(sendErrorMock).toHaveBeenCalledTimes(1);
   });
 
-  describe("ignoreErrors", () => {
-    it("filters by string substring match", () => {
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, undefined, [
-        "ResizeObserver loop",
-      ]);
-      fireError("ResizeObserver loop limit exceeded");
-
-      expect(sendErrorMock).not.toHaveBeenCalled();
-    });
-
-    it("filters by regex match", () => {
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, undefined, [
-        /Script error\.?/,
-      ]);
-      fireError("Script error.");
-
-      expect(sendErrorMock).not.toHaveBeenCalled();
-    });
-
-    it("sends non-matching errors", () => {
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, undefined, [
-        "ResizeObserver",
-      ]);
-      fireError("TypeError: Cannot read property 'foo'");
-
-      expect(sendErrorMock).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  describe("beforeSend", () => {
-    it("can modify the payload", () => {
-      const hook = vi.fn((event: BrowserError) => {
+  describe("beforeError", () => {
+    it("can modify the payload by mutating the incoming event", () => {
+      const hook = vi.fn((event: IncomingError) => {
         event.message = "redacted";
         return event;
       });
@@ -154,20 +124,53 @@ describe("errors", () => {
       expect(sendErrorMock).not.toHaveBeenCalled();
     });
 
-    it("drops the event and logs an error when beforeSend returns a Promise", () => {
-      // beforeSend is sync only. A Promise return would otherwise pass the
-      // truthy check and JSON.stringify into `{}` on the wire — silent empty
-      // payloads. The guard turns that into a loud, droppable failure.
+    it("dropping skips the error breadcrumb (early-pipeline)", () => {
+      // The defining property of beforeError vs the old late-pipeline
+      // beforeSend: a dropped error must not pollute the breadcrumb buffer
+      // with its own error breadcrumb.
+      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, () => null);
+      fireError("never seen");
+
+      const errorCrumbs = addBreadcrumbMock.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { category: string }).category === "error",
+      );
+      expect(errorCrumbs).toHaveLength(0);
+    });
+
+    it("dropping skips the lastErrorTimestamp update (early-pipeline)", () => {
+      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, () => null);
+      const before = getLastErrorTimestamp();
+      fireError("never seen");
+      expect(getLastErrorTimestamp()).toBe(before);
+    });
+
+    it("supports common one-liner drop patterns (former ignoreErrors)", () => {
+      const hook = (e: IncomingError): IncomingError | null =>
+        /ResizeObserver/.test(e.message) ? null : e;
+      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
+
+      fireError("ResizeObserver loop limit exceeded");
+      expect(sendErrorMock).not.toHaveBeenCalled();
+
+      fireError("TypeError: Cannot read property 'foo'");
+      expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops the event and logs when beforeError returns a Promise", () => {
+      // beforeError is sync only. A Promise return would otherwise pass the
+      // truthy check and the SDK would proceed treating the Promise as the
+      // incoming event — silent breakage. The guard turns that into a loud,
+      // droppable failure.
       const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      const hook = vi.fn((event: BrowserError) => Promise.resolve(event)) as unknown as
-        (event: BrowserError) => BrowserError | null;
+      const hook = vi.fn((event: IncomingError) => Promise.resolve(event)) as unknown as
+        (event: IncomingError) => IncomingError | null;
       initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
 
       fireError("async hook");
 
       expect(sendErrorMock).not.toHaveBeenCalled();
       expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
-      expect(consoleErrorSpy.mock.calls[0][0]).toContain("beforeSend returned a Promise");
+      expect(consoleErrorSpy.mock.calls[0][0]).toContain("beforeError returned a Promise");
 
       consoleErrorSpy.mockRestore();
     });
@@ -217,7 +220,7 @@ describe("errors", () => {
     expect(subscriber.mock.calls[0][0].message).toBe("subscriber test");
   });
 
-  it("does not notify subscribers when beforeSend drops the error", () => {
+  it("does not notify subscribers when beforeError drops the error", () => {
     initErrors(
       { enabled: true, sample_rate: 1.0 },
       undefined,
@@ -226,7 +229,7 @@ describe("errors", () => {
     const subscriber = vi.fn();
     onErrorReported(subscriber);
 
-    fireError("dropped by beforeSend");
+    fireError("dropped by beforeError");
 
     expect(sendErrorMock).not.toHaveBeenCalled();
     expect(subscriber).not.toHaveBeenCalled();

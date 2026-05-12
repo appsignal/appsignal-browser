@@ -9,15 +9,16 @@
     </style>
   </head>
   <body>
-    <h1>Error filtering with <code>ignoreErrors</code></h1>
-    <p>The <code>ignoreErrors</code> config lists message patterns (strings or
-       regexes) that should be silently dropped before the SDK ships them.
-       Useful for known-noisy browser errors that swamp dashboards without
-       indicating a real problem.</p>
+    <h1>Error filtering with <code>beforeError</code></h1>
+    <p>The <code>beforeError</code> hook runs at the SDK's entry point for
+       every error — before the error breadcrumb is added, before the
+       <code>lastErrorTimestamp</code> is updated, before deduplication.
+       Returning <code>null</code> drops the error completely; mutating fields
+       on the returned event propagates into the eventual payload.</p>
 
-    <p>The classic example: <code>"ResizeObserver loop limit exceeded"</code> —
-       fires on most apps using a ResizeObserver, isn't actionable, and isn't
-       a bug in the app's code.</p>
+    <p>The classic noise-pattern case: <code>"ResizeObserver loop limit
+       exceeded"</code> — fires on most apps using a ResizeObserver, isn't
+       actionable, and isn't a bug in the app's code.</p>
 
     <pre id="status">SDK loading…</pre>
 
@@ -26,9 +27,13 @@
       AppsignalBrowser.init({
         key: "your-app-key",
         endpoint: location.origin,
-        // Drop any error whose message matches one of these patterns. Strings
-        // are substring matches; regular expressions are full-pattern matches.
-        ignoreErrors: ["ResizeObserver loop limit exceeded"],
+        // Drop known-noisy browser errors. Because beforeError runs early,
+        // these errors never enter the breadcrumb timeline or consume a
+        // dedupe slot — they're as if they never happened.
+        beforeError: function (event) {
+          if (/ResizeObserver loop limit exceeded/.test(event.message)) return null;
+          return event;
+        },
       });
       document.getElementById("status").textContent = "SDK initialised";
 

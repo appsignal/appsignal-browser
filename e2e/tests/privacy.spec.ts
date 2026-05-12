@@ -1,5 +1,5 @@
 // Privacy / PII tests. Each one exercises a real-browser path that the unit
-// tests can only mock (scrubUrl, isBlocklisted, rrweb masking, beforeSend), so
+// tests can only mock (scrubUrl, isBlocklisted, rrweb masking, beforeError), so
 // a regression that survives the unit suite still lands here.
 //
 // Pattern: when a test needs non-default config, POST to /__config before
@@ -139,12 +139,11 @@ test.describe("session replay masking", () => {
 });
 
 test.describe("error filtering", () => {
-  test("ignoreErrors patterns drop matching errors before send", async ({ page, request }) => {
-    // ignoreErrors is the config-driven counterpart to beforeSend's drop path:
-    // user supplies a list of substring/regex patterns at init, and the SDK
-    // silently drops any matching error. Distinct surface from beforeSend
-    // (declarative vs. callback) — both need to be tested.
-    // /error-filtering.html inits with ignoreErrors: ["ResizeObserver loop limit exceeded"].
+  test("beforeError drops matching errors at the entry point", async ({ page, request }) => {
+    // beforeError sits early in the pipeline (before the error breadcrumb,
+    // before lastErrorTimestamp, before dedupe). A null return drops the
+    // error completely. /error-filtering.html drops on the ResizeObserver
+    // pattern; a non-matching error must still ship.
     await page.goto("/error-filtering.html");
 
     await page.evaluate(() => {
@@ -212,14 +211,14 @@ test.describe("user context", () => {
   });
 });
 
-test.describe("beforeSend", () => {
-  test("drops only errors whose message matches a noise pattern", async ({ page, request }) => {
+test.describe("beforeError + beforeBreadcrumb", () => {
+  test("beforeError drops matching errors; non-matches pass through", async ({ page, request }) => {
     // Real-world use: a known-noisy browser error (e.g. "ResizeObserver loop
-    // limit exceeded") is suppressed without dropping anything else. The hook
-    // returns null for the matching message and returns the event unchanged
-    // otherwise — proves both branches: drop AND pass-through.
+    // limit exceeded") is suppressed without dropping anything else. The
+    // hook returns null for the matching message and returns the event
+    // unchanged otherwise — proves both branches: drop AND pass-through.
     //
-    // /pii-redaction.html's beforeSend drops on "ResizeObserver" substring.
+    // /pii-redaction.html's beforeError drops on "ResizeObserver" substring.
     await page.goto("/pii-redaction.html");
 
     await page.evaluate(() => {
@@ -248,16 +247,18 @@ test.describe("beforeSend", () => {
     expect(messages[0]).not.toContain("ResizeObserver");
   });
 
-  test("can redact PII from the whole error payload before send", async ({ page, request }) => {
-    // Real-world use: strip emails or tokens from error messages so they don't
-    // leak server-side. The hook receives a mutable BrowserError and the SDK
-    // sends whatever the hook returns. A naive "redact event.message only"
-    // implementation leaks the same string via two other channels:
-    //   - V8 puts the message inside error.stack ("Error: <message>\n  at ...")
-    //   - The SDK auto-adds an error breadcrumb with the raw message *before*
-    //     beforeSend runs, so it rides along in event.breadcrumbs[].
-    // /pii-redaction.html's beforeSend cleans all three; this test asserts the
-    // email appears nowhere in the captured payload.
+  test("beforeError redacts error-only fields; beforeBreadcrumb redacts breadcrumbs", async ({ page, request }) => {
+    // Real-world use: strip emails from error payloads so they don't leak
+    // server-side. PII can ride through the SDK in three places per error:
+    //   - event.message — error-only, redacted in beforeError
+    //   - event.stack   — V8 puts the message inside "Error: <message>\n  at …";
+    //                     also error-only, redacted in beforeError
+    //   - event.breadcrumbs[].message — the SDK auto-adds an error breadcrumb
+    //                     with the raw message; cleaned by beforeBreadcrumb at
+    //                     insertion. The same hook also keeps the email out
+    //                     of breadcrumbs heading to the 30 s events flush.
+    // /pii-redaction.html wires both hooks; this test asserts the email
+    // appears nowhere in the captured payload.
     await page.goto("/pii-redaction.html");
 
     const leakyMessage = "failed to load profile for user alice@example.com";
@@ -276,8 +277,8 @@ test.describe("beforeSend", () => {
     expect(message).toContain("[redacted-email]");
     expect(message).not.toContain("alice@example.com");
     // Whole-payload assertion: the email must not survive in stack or
-    // breadcrumbs either. Catches the regression where a host's beforeSend
-    // forgets to clean those secondary fields.
+    // breadcrumbs either. Catches the regression where one of the two hooks
+    // forgets to clean its respective channel.
     expect(JSON.stringify(error)).not.toContain("alice@example.com");
   });
 });

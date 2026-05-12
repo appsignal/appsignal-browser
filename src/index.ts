@@ -96,13 +96,13 @@ export function captureError(
   reportError(error, context);
 }
 
-export function addBreadcrumb(crumb: {
+export function addBreadcrumb(breadcrumb: {
   category: string;
   message: string;
   data?: Record<string, unknown>;
 }): void {
   if (!initialized) return;
-  addManualBreadcrumb(crumb);
+  addManualBreadcrumb(breadcrumb);
 }
 
 export function flush(): void {
@@ -156,12 +156,12 @@ function startCollection(endpoint: string): void {
     endpoint + COLLECT_PATH,
     cfg.privacy.query_params_allowlist,
     cfg.privacy.dom,
+    clientConfig?.beforeBreadcrumb,
   );
   initErrors(
     cfg.errors,
     clientConfig?.appVersion,
-    clientConfig?.beforeSend,
-    clientConfig?.ignoreErrors,
+    clientConfig?.beforeError,
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {

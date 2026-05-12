@@ -9,27 +9,28 @@
     </style>
   </head>
   <body>
-    <h1>PII redaction via <code>beforeSend</code></h1>
-    <p>The <code>beforeSend</code> hook receives the mutable error event and
-       can either return it (possibly modified) or return <code>null</code> to
-       drop it entirely. This sample shows a realistic hook that combines two
-       responsibilities most production apps need:</p>
-    <ol>
-      <li>Drop known-noisy browser errors (here, <code>ResizeObserver</code>).</li>
-      <li>Redact email addresses from every field where they leak.</li>
-    </ol>
-
-    <p>The redaction touches three fields because a single message can ride
-       through the SDK in three places:</p>
+    <h1>PII redaction via <code>beforeError</code> + <code>beforeBreadcrumb</code></h1>
+    <p>The SDK exposes two early-pipeline hooks. Each runs once per event at
+       the SDK's entry point, before any buffering. Returning <code>null</code>
+       drops the event; mutating fields propagates into the eventual payload.</p>
     <ul>
-      <li><code>event.message</code> — the literal <code>Error</code> message.</li>
-      <li><code>event.stack</code> — V8 prefixes the stack with
-          <code>"Error: &lt;message&gt;"</code>, so the unredacted message
-          re-appears inside it.</li>
-      <li><code>event.breadcrumbs[].message</code> — the SDK auto-adds an
-          error breadcrumb with the raw message <em>before</em>
-          <code>beforeSend</code> runs, so the original message rides along
-          inside the same payload.</li>
+      <li><code>beforeError(event)</code> — fires once per error. Redact
+          <code>message</code>, <code>stack</code>, <code>filename</code>;
+          drop known-noisy patterns by returning <code>null</code>.</li>
+      <li><code>beforeBreadcrumb(breadcrumb)</code> — fires once per
+          breadcrumb, including the SDK's automatic ones. Redact
+          <code>message</code> or <code>data</code>. Breadcrumbs filtered
+          here never enter the buffer, so they ship in neither error
+          payloads nor periodic events payloads.</li>
+    </ul>
+
+    <p>The split matches where each kind of data flows:</p>
+    <ul>
+      <li><code>event.message</code> and <code>event.stack</code> are
+          error-only fields — handled in <code>beforeError</code>.</li>
+      <li><code>breadcrumb.message</code> appears both inside error payloads
+          (<code>event.breadcrumbs[]</code>) and inside the 30-second events
+          flush — one <code>beforeBreadcrumb</code> covers both channels.</li>
     </ul>
 
     <pre id="status">SDK loading…</pre>
@@ -37,24 +38,30 @@
     <script src="/dist/browser.umd.js"></script>
     <script>
       var emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+      var redact = function (s) {
+        return typeof s === "string" ? s.replace(emailRe, "[redacted-email]") : s;
+      };
 
       AppsignalBrowser.init({
         key: "your-app-key",
         endpoint: location.origin,
-        beforeSend: function (event) {
-          // Drop known-noisy browser errors that swamp dashboards.
+        beforeError: function (event) {
+          // Drop known-noisy browser errors. Runs early — these never enter
+          // the breadcrumb timeline or consume a dedupe slot.
           if (event.message && event.message.indexOf("ResizeObserver") !== -1) {
             return null;
           }
-          // Redact email addresses anywhere they might appear in the payload.
-          if (event.message) event.message = event.message.replace(emailRe, "[redacted-email]");
-          if (event.stack) event.stack = event.stack.replace(emailRe, "[redacted-email]");
-          if (event.breadcrumbs) {
-            event.breadcrumbs.forEach(function (b) {
-              if (b.message) b.message = b.message.replace(emailRe, "[redacted-email]");
-            });
-          }
-          return event;
+          // Return a new object with PII redacted from error-only fields.
+          return {
+            ...event,
+            message: redact(event.message),
+            stack: redact(event.stack),
+          };
+        },
+        beforeBreadcrumb: function (breadcrumb) {
+          // One hook, both channels: errors and events flushes both ship
+          // breadcrumbs, and both get redacted here.
+          return { ...breadcrumb, message: redact(breadcrumb.message) };
         },
       });
       document.getElementById("status").textContent = "SDK initialised";
