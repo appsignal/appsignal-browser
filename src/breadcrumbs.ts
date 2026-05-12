@@ -123,25 +123,26 @@ export function initBreadcrumbs(
 
 export function addBreadcrumb(breadcrumb: Breadcrumb): void {
   if (getConsent() === "not-granted") return;
-  // beforeBreadcrumb runs once per breadcrumb at insertion. A null return
-  // drops the breadcrumb so it ships in neither error payloads nor periodic
-  // event flushes. A thrown callback shouldn't break the SDK — catch and
-  // pretend the hook wasn't there. Skip the function call entirely when no
-  // hook is configured (hot path: every network request, click, console
-  // call).
-  if (beforeBreadcrumbHook) {
-    let result: Breadcrumb | null = null;
-    try {
-      result = beforeBreadcrumbHook(breadcrumb);
-    } catch {
-      // Treat a throwing callback as "passthrough" rather than "drop", to
-      // avoid silently swallowing breadcrumbs on a bug in user code.
-      result = breadcrumb;
-    }
-    if (!result) return;
-    breadcrumb = result;
+  // Hot path: every network request, click, console call. Skip the hook
+  // entirely when none is configured, rather than running it as identity.
+  if (!beforeBreadcrumbHook) {
+    buffer.push(breadcrumb);
+    return;
   }
-  buffer.push(breadcrumb);
+
+  // beforeBreadcrumb decides whether the breadcrumb enters the buffer.
+  // A null return drops it from every downstream payload (error and
+  // periodic events flush alike). A thrown callback shouldn't break the
+  // SDK — treat it as passthrough rather than drop, so a bug in user code
+  // doesn't silently swallow breadcrumbs.
+  let result: Breadcrumb | null;
+  try {
+    result = beforeBreadcrumbHook(breadcrumb);
+  } catch {
+    result = breadcrumb;
+  }
+  if (!result) return;
+  buffer.push(result);
 }
 
 export function addManualBreadcrumb(input: {

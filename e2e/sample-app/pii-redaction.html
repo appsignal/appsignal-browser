@@ -51,16 +51,17 @@
           if (event.message && event.message.indexOf("ResizeObserver") !== -1) {
             return null;
           }
-          // Redact PII from error-only fields.
-          event.message = redact(event.message);
-          event.stack = redact(event.stack);
-          return event;
+          // Return a new object with PII redacted from error-only fields.
+          return {
+            ...event,
+            message: redact(event.message),
+            stack: redact(event.stack),
+          };
         },
         beforeBreadcrumb: function (breadcrumb) {
           // One hook, both channels: errors and events flushes both ship
           // breadcrumbs, and both get redacted here.
-          breadcrumb.message = redact(breadcrumb.message);
-          return breadcrumb;
+          return { ...breadcrumb, message: redact(breadcrumb.message) };
         },
       });
       document.getElementById("status").textContent = "SDK initialised";

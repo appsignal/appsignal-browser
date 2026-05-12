@@ -133,34 +133,34 @@ function handleError(
   // breadcrumb, lastErrorTimestamp, dedupe slot, payload construction,
   // replay post-error tail). Returning null drops the error completely:
   // no breadcrumb pollution, no dedupe budget consumed, no replay
-  // triggered. Mutating fields propagates into the eventual payload.
-  if (beforeErrorHook) {
-    const incoming: IncomingError = {
-      message,
-      error_class: errorClass,
-      filename,
-      lineno,
-      colno,
-      stack,
-      context,
-    };
-    const result = beforeErrorHook(incoming);
-    // beforeError is sync only. A Promise return would otherwise pass the
-    // truthy check and the SDK would proceed using a Promise as fields —
-    // silent breakage. Detect it, drop the error, and log loudly so a host
-    // developer can grep for the message.
-    if (result && typeof (result as { then?: unknown }).then === "function") {
-      // eslint-disable-next-line no-console
-      console.error(
-        "[appsignal] beforeError returned a Promise. Async beforeError is " +
-        "not supported; the error was dropped. Move async work outside the " +
-        "hook (e.g. perform it before calling captureError).",
-      );
-      return;
-    }
-    if (!result) return;
-    ({ message, error_class: errorClass, filename, lineno, colno, stack, context } = result);
+  // triggered. Mutating fields on the returned object propagates into the
+  // eventual payload.
+  const incoming: IncomingError = {
+    message,
+    error_class: errorClass,
+    filename,
+    lineno,
+    colno,
+    stack,
+    context,
+  };
+  const hookResult = beforeErrorHook ? beforeErrorHook(incoming) : incoming;
+
+  // beforeError is sync only. A Promise return would otherwise pass the
+  // truthy check and the SDK would proceed treating the Promise as fields —
+  // silent breakage. Detect it, drop the error, and log loudly so a host
+  // developer can grep for the message.
+  if (hookResult && typeof (hookResult as { then?: unknown }).then === "function") {
+    // eslint-disable-next-line no-console
+    console.error(
+      "[appsignal] beforeError returned a Promise. Async beforeError is " +
+      "not supported; the error was dropped. Move async work outside the " +
+      "hook (e.g. perform it before calling captureError).",
+    );
+    return;
   }
+  if (!hookResult) return;
+  const effective: IncomingError = hookResult;
 
   const now = Date.now();
   lastErrorTimestamp = now;
@@ -169,26 +169,20 @@ function handleError(
   addBreadcrumb({
     timestamp: now,
     category: "error",
-    message: message.slice(0, 200),
+    message: effective.message.slice(0, 200),
   });
 
   // Deduplication: first 5 occurrences sent, 6+ suppressed
-  const dedupeKey = dedupeKeyFor(message, stack);
+  const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
   if (checkDedupe(dedupeKey, now)) return;
 
   const payload: BrowserError = {
     type: "error",
     timestamp: now,
-    message,
-    error_class: errorClass,
-    filename,
-    lineno,
-    colno,
-    stack,
     breadcrumbs: getSnapshot(),
     session: getSessionContext(),
     app_version: appVersion,
-    context,
+    ...effective,
   };
 
   sendError(payload);
