@@ -168,47 +168,6 @@ test.describe("error filtering", () => {
     expect(messages[0]).toContain("real application error");
     expect(messages[0]).not.toContain("ResizeObserver");
   });
-
-  test("dropped noise errors don't pollute a real error's breadcrumb trail", async ({ page, request }) => {
-    // The user-visible payoff of early-pipeline filtering. A noisy
-    // ResizeObserver can fire dozens of times per minute; if those errors
-    // had snuck through to add their own breadcrumbs before being dropped
-    // (the old beforeSend-late behaviour), the ring buffer (default capacity
-    // 100) would be flooded with error breadcrumbs and a real diagnostic
-    // error landing afterwards would ship with no useful timeline.
-    //
-    // We fire 8 noise errors — more than the 5-per-10-second dedupe budget,
-    // so any path that admitted them past beforeError would also force
-    // dedupe to start suppressing — then a real error, and assert the real
-    // error's breadcrumbs[] carries no ResizeObserver entry at all.
-    await page.goto("/error-filtering.html");
-
-    for (let i = 0; i < 8; i++) {
-      await page.evaluate((n) => {
-        (window as unknown as { throwWithMessage(msg: string): void })
-          .throwWithMessage(`ResizeObserver loop limit exceeded #${n}`);
-      }, i);
-    }
-    await page.evaluate(() => {
-      (window as unknown as { throwWithMessage(msg: string): void })
-        .throwWithMessage("real diagnostic error after noise");
-    });
-
-    const realError = await pollFor(request, (items) =>
-      ingestErrors(items).find(
-        (e) => (e.message as string)?.includes("real diagnostic error after noise"),
-      ),
-    );
-
-    const crumbs = (realError.breadcrumbs as Array<Record<string, unknown>>) ?? [];
-    const noisyErrorCrumbs = crumbs.filter(
-      (c) =>
-        c.category === "error" &&
-        typeof c.message === "string" &&
-        c.message.includes("ResizeObserver"),
-    );
-    expect(noisyErrorCrumbs).toHaveLength(0);
-  });
 });
 
 test.describe("user context", () => {

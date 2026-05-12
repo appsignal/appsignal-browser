@@ -407,6 +407,37 @@ describe("SDK integration", () => {
     expect(errorPayloads).toHaveLength(0);
   });
 
+  it("dropped noise errors leave a later real error's breadcrumb trail clean", () => {
+    // The user-visible payoff of early-pipeline filtering. Fire 8 noisy
+    // ResizeObserver errors (beforeError drops them) then a real one. The
+    // real error's payload.breadcrumbs[] must carry zero ResizeObserver
+    // error breadcrumbs — the early-pipeline drop has to skip the
+    // breadcrumb add, not just the send. If beforeError ran late (like the
+    // old beforeSend), the ring buffer would be flooded with error
+    // breadcrumbs before the dropped error's payload was rejected.
+    init({
+      key: "test-key",
+      beforeError: (e) => /ResizeObserver/.test(e.message) ? null : e,
+    });
+
+    for (let i = 0; i < 8; i++) {
+      captureError(new Error(`ResizeObserver loop limit exceeded #${i}`));
+    }
+    captureError(new Error("real diagnostic error after noise"));
+
+    const errorPayloads = sentPayloads
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "error");
+
+    expect(errorPayloads).toHaveLength(1);
+    expect(errorPayloads[0].message).toBe("real diagnostic error after noise");
+
+    const noisyErrorCrumbs = (
+      errorPayloads[0].breadcrumbs as Array<{ category: string; message: string }>
+    ).filter((b) => b.category === "error" && b.message.includes("ResizeObserver"));
+    expect(noisyErrorCrumbs).toHaveLength(0);
+  });
+
   it("destroy fully unwinds the fetch patch chain when tracing is enabled", async () => {
     // Both breadcrumbs and tracing patch window.fetch. Tracing patches *after*
     // breadcrumbs, so it is the outer wrapper. If destroy unwinds in the wrong
