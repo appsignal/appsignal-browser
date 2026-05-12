@@ -1,5 +1,5 @@
 // Runtime consent transitions. The gates live at three layers:
-//  - addBreadcrumb (breadcrumbs.ts:122) drops new crumbs while denied,
+//  - addBreadcrumb (breadcrumbs.ts:122) drops new breadcrumbs while denied,
 //  - flushEvents (index.ts:245) bails before serialising, and
 //  - transport send/sendBeacon (transport.ts:101/118) bail before fetch.
 // Any one of these missing would leak data after the user has revoked

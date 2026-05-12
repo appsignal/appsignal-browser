@@ -21,7 +21,7 @@ export interface BrowserConfig {
    * neither error payloads nor periodic events payloads. Mutate to redact
    * (PII in messages, sensitive data fields). Runs on the page's hot path;
    * keep it cheap. */
-  beforeBreadcrumb?: (crumb: Breadcrumb) => Breadcrumb | null;
+  beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to inject trace context headers into. Glob syntax. */
   tracePropagationTargets?: string[];
   /** Initial tracking consent state. Default: "granted" (backwards compatible). */

@@ -61,7 +61,7 @@ interface BrowserConfig {
   // null to drop — the breadcrumb never enters the buffer and ships in
   // neither error payloads nor periodic events payloads. Runs on the hot
   // path; keep it cheap.
-  beforeBreadcrumb?: (crumb: Breadcrumb) => Breadcrumb | null;
+  beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
 
   // URL patterns to inject W3C traceparent headers into (for distributed tracing).
   // Glob syntax. Only requests matching these patterns get trace headers.
@@ -98,7 +98,7 @@ function clearUser(): void;
 function endSession(): void;
 
 // Add a manual breadcrumb
-function addBreadcrumb(crumb: {
+function addBreadcrumb(breadcrumb: {
   category: string;
   message: string;
   data?: Record<string, unknown>;
@@ -471,7 +471,7 @@ Other defaults that round out the privacy posture:
 **Filtering hooks.** Two early-pipeline callbacks, both run before any buffering:
 
 - `beforeError(event) → IncomingError | null` — fires once per error at the SDK's entry point, before the error breadcrumb is added, before `lastErrorTimestamp`, before dedupe. Mutate to redact `message`/`stack`/etc.; return `null` to drop (no breadcrumb pollution, no dedupe slot consumed). Sync only — a `Promise` return is detected, logged as a `console.error`, and the event is dropped.
-- `beforeBreadcrumb(crumb) → Breadcrumb | null` — fires once per breadcrumb at insertion (network, click, navigation, console, error, manual). Mutate to redact `message`/`data`; return `null` to drop. One hook covers both channels: breadcrumbs riding in error payloads *and* breadcrumbs riding in the periodic events flush.
+- `beforeBreadcrumb(breadcrumb) → Breadcrumb | null` — fires once per breadcrumb at insertion (network, click, navigation, console, error, manual). Mutate to redact `message`/`data`; return `null` to drop. One hook covers both channels: breadcrumbs riding in error payloads *and* breadcrumbs riding in the periodic events flush.
 
 ## Framework plugins
 

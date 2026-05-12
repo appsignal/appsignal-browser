@@ -96,13 +96,13 @@ export function captureError(
   reportError(error, context);
 }
 
-export function addBreadcrumb(crumb: {
+export function addBreadcrumb(breadcrumb: {
   category: string;
   message: string;
   data?: Record<string, unknown>;
 }): void {
   if (!initialized) return;
-  addManualBreadcrumb(crumb);
+  addManualBreadcrumb(breadcrumb);
 }
 
 export function flush(): void {

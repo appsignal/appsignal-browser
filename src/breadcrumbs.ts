@@ -10,7 +10,7 @@ import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
 let config: ServerConfig["breadcrumbs"];
-let beforeBreadcrumbHook: ((crumb: Breadcrumb) => Breadcrumb | null) | undefined;
+let beforeBreadcrumbHook: ((breadcrumb: Breadcrumb) => Breadcrumb | null) | undefined;
 let queryParamsAllowlist: string[] = [];
 // Pre-joined selectors so the hot path (every click) doesn't reformat them.
 // `null` means the list is empty — skip the el.closest() check entirely.
@@ -77,7 +77,7 @@ export function initBreadcrumbs(
   endpoint: string,
   privacyQueryParamsAllowlist: string[] = [],
   privacyDom: ServerConfig["privacy"]["dom"] = { mask_text: [], block_element: [] },
-  beforeBreadcrumb?: (crumb: Breadcrumb) => Breadcrumb | null,
+  beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null,
 ): void {
   destroyBreadcrumbs();
 
@@ -121,26 +121,27 @@ export function initBreadcrumbs(
   initTabLifecycle();
 }
 
-export function addBreadcrumb(crumb: Breadcrumb): void {
+export function addBreadcrumb(breadcrumb: Breadcrumb): void {
   if (getConsent() === "not-granted") return;
-  // beforeBreadcrumb runs once per crumb at insertion. A null return drops
-  // the crumb so it ships in neither error payloads nor periodic event
-  // flushes. A thrown callback shouldn't break the SDK — catch and pretend
-  // the hook wasn't there. Skip the function call entirely when no hook is
-  // configured (hot path: every network request, click, console call).
+  // beforeBreadcrumb runs once per breadcrumb at insertion. A null return
+  // drops the breadcrumb so it ships in neither error payloads nor periodic
+  // event flushes. A thrown callback shouldn't break the SDK — catch and
+  // pretend the hook wasn't there. Skip the function call entirely when no
+  // hook is configured (hot path: every network request, click, console
+  // call).
   if (beforeBreadcrumbHook) {
     let result: Breadcrumb | null = null;
     try {
-      result = beforeBreadcrumbHook(crumb);
+      result = beforeBreadcrumbHook(breadcrumb);
     } catch {
       // Treat a throwing callback as "passthrough" rather than "drop", to
       // avoid silently swallowing breadcrumbs on a bug in user code.
-      result = crumb;
+      result = breadcrumb;
     }
     if (!result) return;
-    crumb = result;
+    breadcrumb = result;
   }
-  buffer.push(crumb);
+  buffer.push(breadcrumb);
 }
 
 export function addManualBreadcrumb(input: {

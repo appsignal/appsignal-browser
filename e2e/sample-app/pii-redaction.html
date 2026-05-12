@@ -17,10 +17,11 @@
       <li><code>beforeError(event)</code> — fires once per error. Redact
           <code>message</code>, <code>stack</code>, <code>filename</code>;
           drop known-noisy patterns by returning <code>null</code>.</li>
-      <li><code>beforeBreadcrumb(crumb)</code> — fires once per breadcrumb,
-          including the SDK's automatic ones. Redact <code>message</code> or
-          <code>data</code>. Crumbs filtered here never enter the buffer, so
-          they ship in neither error payloads nor periodic events payloads.</li>
+      <li><code>beforeBreadcrumb(breadcrumb)</code> — fires once per
+          breadcrumb, including the SDK's automatic ones. Redact
+          <code>message</code> or <code>data</code>. Breadcrumbs filtered
+          here never enter the buffer, so they ship in neither error
+          payloads nor periodic events payloads.</li>
     </ul>
 
     <p>The split matches where each kind of data flows:</p>
@@ -55,11 +56,11 @@
           event.stack = redact(event.stack);
           return event;
         },
-        beforeBreadcrumb: function (crumb) {
+        beforeBreadcrumb: function (breadcrumb) {
           // One hook, both channels: errors and events flushes both ship
           // breadcrumbs, and both get redacted here.
-          crumb.message = redact(crumb.message);
-          return crumb;
+          breadcrumb.message = redact(breadcrumb.message);
+          return breadcrumb;
         },
       });
       document.getElementById("status").textContent = "SDK initialised";

@@ -119,10 +119,10 @@ describe("breadcrumbs", () => {
   });
 
   describe("beforeBreadcrumb", () => {
-    // initBreadcrumbs itself pushes 1-2 init crumbs (navigation, document
-    // load); reset the hook + buffer after init so each test reasons about
-    // its own additions.
-    function setup(hook: (c: Parameters<typeof addBreadcrumb>[0]) => ReturnType<typeof addBreadcrumb> | unknown): void {
+    // initBreadcrumbs itself pushes 1-2 init breadcrumbs (navigation,
+    // document load); reset the hook + buffer after init so each test
+    // reasons about its own additions.
+    function setup(hook: (breadcrumb: Parameters<typeof addBreadcrumb>[0]) => ReturnType<typeof addBreadcrumb> | unknown): void {
       initBreadcrumbs(
         defaultBreadcrumbConfig,
         "http://localhost/ingest/browser",
@@ -145,9 +145,9 @@ describe("breadcrumbs", () => {
     });
 
     it("can mutate a breadcrumb before it enters the buffer", () => {
-      const hook = vi.fn((c: Parameters<typeof addBreadcrumb>[0]) => ({
-        ...c,
-        message: c.message.replace(/secret/g, "[redacted]"),
+      const hook = vi.fn((breadcrumb: Parameters<typeof addBreadcrumb>[0]) => ({
+        ...breadcrumb,
+        message: breadcrumb.message.replace(/secret/g, "[redacted]"),
       }));
       setup(hook);
 
@@ -161,8 +161,9 @@ describe("breadcrumbs", () => {
     it("fires on every breadcrumb regardless of category", () => {
       // The whole point of beforeBreadcrumb being at the single addBreadcrumb
       // entry point: redacting once covers errors, networks, clicks, manual
-      // crumbs alike. Three different categories should each hit the hook.
-      const hook = vi.fn((c: Parameters<typeof addBreadcrumb>[0]) => c);
+      // breadcrumbs alike. Three different categories should each hit the
+      // hook.
+      const hook = vi.fn((breadcrumb: Parameters<typeof addBreadcrumb>[0]) => breadcrumb);
       setup(hook);
 
       addBreadcrumb({ timestamp: 1, category: "error", message: "a" });
@@ -248,7 +249,7 @@ describe("breadcrumbs", () => {
       // flush between fetch resolution and the timing entry's arrival
       // would serialise an incomplete breadcrumb. Catch that by asserting
       // that draining immediately after the user's fetch resolves returns
-      // no network crumb yet.
+      // no network breadcrumb yet.
       window.fetch = async () =>
         new Response("{}", {
           status: 200,

@@ -41,9 +41,9 @@ test("endSession flushes under the current session_id, then rotates", async ({ p
   // differ.
   const payloads = await pollFor(request, (items) => {
     const withManual = ingestEvents(items).filter((e) => {
-      const crumbs = (e.breadcrumbs as Array<Record<string, unknown>>) ?? [];
-      return crumbs.some(
-        (c) => c.category === "test" && c.message === "manual breadcrumb",
+      const breadcrumbs = (e.breadcrumbs as Array<Record<string, unknown>>) ?? [];
+      return breadcrumbs.some(
+        (b) => b.category === "test" && b.message === "manual breadcrumb",
       );
     });
     return withManual.length >= 2 ? withManual : null;
