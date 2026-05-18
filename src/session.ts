@@ -1,5 +1,5 @@
 import type { SessionContext, UserContext } from "./types.js";
-import { storage, scrubUrl } from "./utils.js";
+import { storage, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
@@ -31,7 +31,7 @@ export function initSession(timeoutMs: number, allowlist: string[] = []): void {
 
 function ensureTabId(): void {
   if (!storage.getString(sessionStorage, TAB_KEY)) {
-    storage.setString(sessionStorage, TAB_KEY, crypto.randomUUID());
+    storage.setString(sessionStorage, TAB_KEY, uuidv7());
   }
 }
 
@@ -41,7 +41,9 @@ export function getTabId(): string {
 
 function ensureAnonymousId(): void {
   if (!storage.getString(localStorage, ANON_KEY)) {
-    storage.setString(localStorage, ANON_KEY, crypto.randomUUID());
+    // v4 (not v7) — anonymous_id persists in localStorage and a v7's
+    // 48-bit timestamp prefix would leak first-visit time across sessions.
+    storage.setString(localStorage, ANON_KEY, uuidv4());
   }
 }
 
@@ -59,7 +61,7 @@ function restoreOrCreateSession(): void {
 }
 
 function newSession(): void {
-  currentSessionId = crypto.randomUUID();
+  currentSessionId = uuidv7();
   storage.setString(localStorage, SESSION_KEY, currentSessionId);
   // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();

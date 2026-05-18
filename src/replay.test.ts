@@ -358,4 +358,69 @@ describe("replay", () => {
     vi.advanceTimersByTime(5000);
     expect(sendChunkMock).not.toHaveBeenCalled();
   });
+
+  describe("visibility pause/resume", () => {
+    function setVisibility(state: DocumentVisibilityState): void {
+      Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+
+    it("pauses rrweb and beacons the buffer when the tab is hidden", async () => {
+      initReplay(defaultReplayConfig());
+      await vi.advanceTimersByTimeAsync(10);
+      rrwebEmit!({ type: 1, data: "snapshot" });
+
+      setVisibility("hidden");
+
+      expect(rrwebStopFn).toHaveBeenCalledTimes(1);
+      expect(sendChunkMock).toHaveBeenCalledTimes(1);
+      expect(sendChunkMock.mock.calls[0][1]).toBe(true);
+    });
+
+    it("restarts rrweb on visible (fresh recording = fresh FullSnapshot)", async () => {
+      initReplay(defaultReplayConfig());
+      await vi.advanceTimersByTimeAsync(10);
+      const firstEmit = rrwebEmit;
+
+      setVisibility("hidden");
+      rrwebEmit = null;
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(rrwebEmit).not.toBeNull();
+      expect(rrwebEmit).not.toBe(firstEmit);
+    });
+
+    it("does not resume on visible while still offline", async () => {
+      initReplay(defaultReplayConfig());
+      await vi.advanceTimersByTimeAsync(10);
+
+      window.dispatchEvent(new Event("offline"));
+      setVisibility("hidden");
+      rrwebStopFn.mockClear();
+      rrwebEmit = null;
+
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(10);
+      expect(rrwebEmit).toBeNull();
+
+      window.dispatchEvent(new Event("online"));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(rrwebEmit).not.toBeNull();
+    });
+
+    it("does not resume on visible when consent has since been denied", async () => {
+      initReplay(defaultReplayConfig());
+      await vi.advanceTimersByTimeAsync(10);
+
+      setVisibility("hidden");
+      consentState = "not-granted";
+      for (const cb of consentDeniedCallbacks) cb();
+      rrwebEmit = null;
+
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(10);
+      expect(rrwebEmit).toBeNull();
+    });
+  });
 });

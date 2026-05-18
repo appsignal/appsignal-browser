@@ -114,3 +114,34 @@ export function seededRandom(seed: string): number {
   }
   return (h >>> 0) / 0x100000000;
 }
+
+/** RFC 9562 §5.4 v4: 122 random bits. Use for IDs whose lex order must
+ * NOT leak generation time — primarily `anonymous_id`, which persists in
+ * localStorage and would otherwise expose first-visit timestamp. */
+export function uuidv4(): string {
+  return crypto.randomUUID();
+}
+
+/** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
+ * variant bits, then 74 random bits. Lex-sort of v7 strings matches
+ * generation time, which lets the server order tabs / sessions
+ * chronologically without peeking into the data. */
+export function uuidv7(): string {
+  const ts = Date.now();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // Bits 0..47: timestamp, big-endian. Date.now() fits in 48 bits until year
+  // 10889, so the divide/and dance below loses no precision in practice.
+  bytes[0] = (ts / 0x10000000000) & 0xff;
+  bytes[1] = (ts / 0x100000000) & 0xff;
+  bytes[2] = (ts / 0x1000000) & 0xff;
+  bytes[3] = (ts / 0x10000) & 0xff;
+  bytes[4] = (ts / 0x100) & 0xff;
+  bytes[5] = ts & 0xff;
+  // Bits 48..51: version 7 (0b0111).
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  // Bits 64..65: variant 10 (RFC 4122).
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}

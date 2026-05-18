@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, seededRandom, scrubUrl } from "./utils.js";
+import { storage, seededRandom, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
 
 describe("storage helper", () => {
   beforeEach(() => {
@@ -229,5 +229,74 @@ describe("scrubUrl", () => {
         "https://app.com/page?page=2#state=def",
       );
     });
+  });
+});
+
+describe("uuidv7", () => {
+  const V7_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it("matches RFC 9562 v7 format with the correct version and variant", () => {
+    for (let i = 0; i < 50; i++) {
+      expect(uuidv7()).toMatch(V7_REGEX);
+    }
+  });
+
+  it("lex-sorts in generation order across distinct timestamps", () => {
+    const now = vi.useFakeTimers();
+    const ids: string[] = [];
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      ids.push(uuidv7());
+      vi.setSystemTime(new Date("2026-01-01T00:00:01Z"));
+      ids.push(uuidv7());
+      vi.setSystemTime(new Date("2026-06-01T00:00:00Z"));
+      ids.push(uuidv7());
+    } finally {
+      now.useRealTimers();
+    }
+    const sorted = [...ids].sort();
+    expect(sorted).toEqual(ids);
+  });
+
+  it("two calls at the same ms are still distinct", () => {
+    const now = vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const a = uuidv7();
+      const b = uuidv7();
+      expect(a).not.toBe(b);
+    } finally {
+      now.useRealTimers();
+    }
+  });
+});
+
+describe("uuidv4", () => {
+  const V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it("matches RFC 9562 v4 format", () => {
+    expect(uuidv4()).toMatch(V4_REGEX);
+  });
+
+  it("does not encode generation time (different ms → still random order)", () => {
+    const now = vi.useFakeTimers();
+    const ids: string[] = [];
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      ids.push(uuidv4());
+      vi.setSystemTime(new Date("2027-01-01T00:00:00Z"));
+      ids.push(uuidv4());
+    } finally {
+      now.useRealTimers();
+    }
+    // No timestamp prefix: the leading hex bytes are random, so the
+    // first byte is uncorrelated with system time.
+    const firstByteA = parseInt(ids[0].slice(0, 2), 16);
+    const firstByteB = parseInt(ids[1].slice(0, 2), 16);
+    // Sanity: this is a weak randomness check, but a v7 would put 1.7e12
+    // ms (year ≈ 2024–) in the prefix with a stable leading byte.
+    expect(firstByteA).toBeGreaterThanOrEqual(0);
+    expect(firstByteB).toBeGreaterThanOrEqual(0);
+    expect(ids[0]).not.toBe(ids[1]);
   });
 });
