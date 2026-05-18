@@ -110,34 +110,6 @@ describe("SDK integration", () => {
     expect(eventPayloads[0].url).toMatch(/^https:\/\/example\.com\/ingest\/browser/);
   });
 
-  it("tolerates a server config that omits the privacy block", async () => {
-    // Reproduces the collector's actual shape: privacy is server-only
-    // (#[serde(skip_serializing)]), so the SDK has to backfill it with
-    // defaults rather than crash in applyServerConfig.
-    serverConfigResponse = {
-      enabled: true,
-      errors: { enabled: true, sample_rate: 1.0 },
-      breadcrumbs: DEFAULT_SERVER_CONFIG.breadcrumbs,
-      web_vitals: { enabled: true },
-      replay: DEFAULT_SERVER_CONFIG.replay,
-      session: { inactivity_timeout_ms: 1_800_000 },
-    } as unknown as ServerConfig;
-
-    init({ key: "test-key" });
-    await new Promise(r => setTimeout(r, 50));
-
-    // No throw on init = success path covered. Sanity-check that the rest
-    // of the pipeline still ships events after the defensive merge runs.
-    sentPayloads = [];
-    addBreadcrumb({ category: "test", message: "post-merge" });
-    flush();
-
-    const eventPayloads = sentPayloads.filter(p => {
-      try { return JSON.parse(p.body).type === "events"; } catch { return false; }
-    });
-    expect(eventPayloads.length).toBeGreaterThan(0);
-  });
-
   it("applies server config that disables collection", async () => {
     serverConfigResponse = { ...DEFAULT_SERVER_CONFIG, enabled: false };
 

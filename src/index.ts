@@ -137,49 +137,10 @@ async function fetchServerConfig(
     const url = `${endpoint}${CONFIG_PATH}?key=${encodeURIComponent(key)}`;
     const response = await fetch(url);
     if (!response.ok) return DEFAULT_SERVER_CONFIG;
-    const incoming = await response.json();
-    // Servers can ship a config that's missing fields the SDK now expects
-    // (the collector currently omits the `privacy` block entirely, for one).
-    // Deep-merge over defaults so applyServerConfig sees a fully-populated
-    // ServerConfig regardless of what the server actually sent.
-    return mergeConfig(incoming);
+    return await response.json();
   } catch {
     return DEFAULT_SERVER_CONFIG;
   }
-}
-
-function mergeConfig(incoming: unknown): ServerConfig {
-  if (!incoming || typeof incoming !== "object") return DEFAULT_SERVER_CONFIG;
-  return deepMerge(
-    DEFAULT_SERVER_CONFIG as unknown as Record<string, unknown>,
-    incoming as Record<string, unknown>,
-  ) as unknown as ServerConfig;
-}
-
-/** Recursive object merge. Override values replace defaults unless both
- * sides are plain objects, in which case keys merge field-by-field.
- * Arrays and primitives in override replace wholesale. null/undefined in
- * override are skipped so the default survives. */
-function deepMerge(
-  base: Record<string, unknown>,
-  override: Record<string, unknown>,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = { ...base };
-  for (const key of Object.keys(override)) {
-    const baseVal = base[key];
-    const overVal = override[key];
-    if (overVal === undefined || overVal === null) continue;
-    const bothObjects =
-      typeof overVal === "object" &&
-      !Array.isArray(overVal) &&
-      typeof baseVal === "object" &&
-      baseVal !== null &&
-      !Array.isArray(baseVal);
-    result[key] = bothObjects
-      ? deepMerge(baseVal as Record<string, unknown>, overVal as Record<string, unknown>)
-      : overVal;
-  }
-  return result;
 }
 
 function startCollection(endpoint: string): void {
