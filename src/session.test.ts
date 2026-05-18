@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, getSessionContext, touchActivity, endSession } from "./session.js";
+import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, getSessionContext, touchActivity, endSession, destroySession } from "./session.js";
 
 describe("session", () => {
   beforeEach(() => {
@@ -172,6 +172,63 @@ describe("session", () => {
       expect(getTabId()).not.toBe(firstTab);
       // Same session_id (via localStorage) — different tab_id.
       expect(getSessionId()).toBe(sessionId);
+    });
+
+    it("regenerates tab_id when another tab announces the same id with a smaller tag", async () => {
+      // Chrome's Duplicate Tab copies sessionStorage, so two live tabs end
+      // up with the same persisted tab_id. The BroadcastChannel collision
+      // protocol resolves this: the tab with the lexicographically larger
+      // in-memory tag regenerates.
+      const listeners: Array<(ev: MessageEvent) => void> = [];
+      const posted: Array<{ tabId?: string; tag?: string }> = [];
+      const FakeBC = class {
+        addEventListener(_: string, fn: (ev: MessageEvent) => void) { listeners.push(fn); }
+        postMessage(data: unknown) { posted.push(data as { tabId?: string; tag?: string }); }
+        close() {}
+      };
+      vi.stubGlobal("BroadcastChannel", FakeBC);
+      destroySession(); // reset module-level tabChannel from any prior test
+
+      initSession(1800000);
+      const initialTabId = getTabId();
+      const myAnnounce = posted.find((m) => m.tabId === initialTabId);
+      expect(myAnnounce).toBeTruthy();
+      const myTag = myAnnounce!.tag!;
+
+      // Simulate another tab announcing the same id with a smaller tag —
+      // we should regenerate.
+      const smallerTag = "0".repeat(myTag.length);
+      expect(smallerTag < myTag).toBe(true);
+      for (const fn of listeners) {
+        fn({ data: { tabId: initialTabId, tag: smallerTag } } as MessageEvent);
+      }
+      expect(getTabId()).not.toBe(initialTabId);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("keeps tab_id when another tab announces with a larger tag", () => {
+      const listeners: Array<(ev: MessageEvent) => void> = [];
+      const posted: Array<{ tabId?: string; tag?: string }> = [];
+      const FakeBC = class {
+        addEventListener(_: string, fn: (ev: MessageEvent) => void) { listeners.push(fn); }
+        postMessage(data: unknown) { posted.push(data as { tabId?: string; tag?: string }); }
+        close() {}
+      };
+      vi.stubGlobal("BroadcastChannel", FakeBC);
+      destroySession(); // reset module-level tabChannel from any prior test
+
+      initSession(1800000);
+      const initialTabId = getTabId();
+
+      // Larger tag than any uuid — we keep our id.
+      const largerTag = "z".repeat(36);
+      for (const fn of listeners) {
+        fn({ data: { tabId: initialTabId, tag: largerTag } } as MessageEvent);
+      }
+      expect(getTabId()).toBe(initialTabId);
+
+      vi.unstubAllGlobals();
     });
   });
 

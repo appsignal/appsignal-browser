@@ -6,6 +6,14 @@ const SESSION_KEY = "appsignal_session_id";
 const ANON_KEY = "appsignal_anonymous_id";
 const LAST_ACTIVITY_KEY = "appsignal_last_activity";
 const TAB_KEY = "appsignal_tab_id";
+const TAB_CHANNEL = "appsignal_tab_collision";
+// Per-SDK-instance random tag. Survives page reloads only if the same JS
+// module evaluation persists (it doesn't — reloads start fresh), which is
+// exactly what we want for collision detection: a duplicated tab and the
+// original both have the same TAB_KEY in their copied sessionStorage but
+// distinct in-memory tabInstanceTags, breaking the tie deterministically.
+const tabInstanceTag = uuidv4();
+let tabChannel: BroadcastChannel | null = null;
 
 let currentSessionId: string | null = null;
 let currentUser: UserContext | null = null;
@@ -32,6 +40,37 @@ export function initSession(timeoutMs: number, allowlist: string[] = []): void {
 function ensureTabId(): void {
   if (!storage.getString(sessionStorage, TAB_KEY)) {
     storage.setString(sessionStorage, TAB_KEY, uuidv7());
+  }
+  startTabCollisionWatch();
+}
+
+/** Chrome's "Duplicate Tab" copies sessionStorage to the new tab, so two
+ * tabs end up with the same tab_id. Detect that via BroadcastChannel: each
+ * tab announces (tab_id, tabInstanceTag); on receiving an announce that
+ * matches our tab_id from a different tag, the tab with the lexically
+ * larger tag regenerates. Both tabs reach the same conclusion since the
+ * comparison is symmetric. */
+function startTabCollisionWatch(): void {
+  if (typeof BroadcastChannel === "undefined") return;
+  if (tabChannel) return;
+  try {
+    tabChannel = new BroadcastChannel(TAB_CHANNEL);
+    tabChannel.addEventListener("message", (e) => {
+      const msg = e.data as { tabId?: string; tag?: string } | undefined;
+      if (!msg?.tabId || !msg.tag) return;
+      const myId = getTabId();
+      if (msg.tabId !== myId || msg.tag === tabInstanceTag) return;
+      if (tabInstanceTag > msg.tag) {
+        // We lose the tiebreak — regenerate so the other tab keeps the id.
+        const fresh = uuidv7();
+        storage.setString(sessionStorage, TAB_KEY, fresh);
+        // Re-announce with the new id so any third duplicate also resolves.
+        tabChannel?.postMessage({ tabId: fresh, tag: tabInstanceTag });
+      }
+    });
+    tabChannel.postMessage({ tabId: getTabId(), tag: tabInstanceTag });
+  } catch {
+    /* BroadcastChannel unsupported or restricted — silently skip */
   }
 }
 
@@ -199,6 +238,10 @@ export function destroySession(): void {
   if (storageHandler) {
     window.removeEventListener("storage", storageHandler);
     storageHandler = null;
+  }
+  if (tabChannel) {
+    tabChannel.close();
+    tabChannel = null;
   }
   activityTrackingStarted = false;
   staticContextFields = null;
