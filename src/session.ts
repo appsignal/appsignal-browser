@@ -14,6 +14,7 @@ const TAB_CHANNEL = "appsignal_tab_collision";
 // distinct in-memory tabInstanceTags, breaking the tie deterministically.
 const tabInstanceTag = uuidv4();
 let tabChannel: BroadcastChannel | null = null;
+let tabChannelHandler: ((e: MessageEvent) => void) | null = null;
 
 let currentSessionId: string | null = null;
 let currentUser: UserContext | null = null;
@@ -55,7 +56,7 @@ function startTabCollisionWatch(): void {
   if (tabChannel) return;
   try {
     tabChannel = new BroadcastChannel(TAB_CHANNEL);
-    tabChannel.addEventListener("message", (e) => {
+    tabChannelHandler = (e: MessageEvent) => {
       const msg = e.data as { tabId?: string; tag?: string } | undefined;
       if (!msg?.tabId || !msg.tag) return;
       const myId = getTabId();
@@ -67,7 +68,8 @@ function startTabCollisionWatch(): void {
         // Re-announce with the new id so any third duplicate also resolves.
         tabChannel?.postMessage({ tabId: fresh, tag: tabInstanceTag });
       }
-    });
+    };
+    tabChannel.addEventListener("message", tabChannelHandler);
     tabChannel.postMessage({ tabId: getTabId(), tag: tabInstanceTag });
   } catch {
     /* BroadcastChannel unsupported or restricted — silently skip */
@@ -240,6 +242,10 @@ export function destroySession(): void {
     storageHandler = null;
   }
   if (tabChannel) {
+    if (tabChannelHandler) {
+      tabChannel.removeEventListener("message", tabChannelHandler);
+      tabChannelHandler = null;
+    }
     tabChannel.close();
     tabChannel = null;
   }

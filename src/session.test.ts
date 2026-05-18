@@ -183,6 +183,9 @@ describe("session", () => {
       const posted: Array<{ tabId?: string; tag?: string }> = [];
       const FakeBC = class {
         addEventListener(_: string, fn: (ev: MessageEvent) => void) { listeners.push(fn); }
+        removeEventListener(_: string, fn: (ev: MessageEvent) => void) {
+          const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1);
+        }
         postMessage(data: unknown) { posted.push(data as { tabId?: string; tag?: string }); }
         close() {}
       };
@@ -212,6 +215,9 @@ describe("session", () => {
       const posted: Array<{ tabId?: string; tag?: string }> = [];
       const FakeBC = class {
         addEventListener(_: string, fn: (ev: MessageEvent) => void) { listeners.push(fn); }
+        removeEventListener(_: string, fn: (ev: MessageEvent) => void) {
+          const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1);
+        }
         postMessage(data: unknown) { posted.push(data as { tabId?: string; tag?: string }); }
         close() {}
       };
