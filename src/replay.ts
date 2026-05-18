@@ -195,6 +195,12 @@ async function startRecording(): Promise<void> {
       blockSelector: privacyDom.block_element.length
         ? privacyDom.block_element.join(", ")
         : undefined,
+      // Conventional rrweb opt-out: any element with class `rr-block` is
+      // replaced with a placeholder. Lets host apps mark regions that
+      // shouldn't be captured (e.g. embedded replay players, which would
+      // otherwise turn into recursive nested DOM that doesn't replay
+      // cleanly).
+      blockClass: "rr-block",
     });
 
     if (stopFn) {
