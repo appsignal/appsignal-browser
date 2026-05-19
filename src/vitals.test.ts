@@ -50,29 +50,59 @@ describe("vitals", () => {
     destroyVitals();
   });
 
-  describe("reporting", () => {
-    it("registers all five metrics with default options", () => {
+  describe("reportAllChanges + dedupe", () => {
+    it("registers LCP, CLS, and INP with reportAllChanges", () => {
       initVitals([]);
-      expect(handlers.lcp.opts).toBeUndefined();
-      expect(handlers.cls.opts).toBeUndefined();
-      expect(handlers.inp.opts).toBeUndefined();
+      expect(handlers.lcp.opts).toEqual({ reportAllChanges: true });
+      expect(handlers.cls.opts).toEqual({ reportAllChanges: true });
+      expect(handlers.inp.opts).toEqual({ reportAllChanges: true });
+    });
+
+    it("does not set reportAllChanges for FCP and TTFB", () => {
+      // Both fire once, early — they don't need the dedupe flow.
+      initVitals([]);
       expect(handlers.fcp.opts).toBeUndefined();
       expect(handlers.ttfb.opts).toBeUndefined();
     });
 
-    it("pushes one entry per callback with the expected shape", () => {
+    it("keeps only the latest LCP value for the same page", () => {
       initVitals([]);
+      handlers.lcp.cb(fakeLCP(1200));
       handlers.lcp.cb(fakeLCP(2500));
-      handlers.cls.cb(fakeCLS(0.1));
-      handlers.inp.cb(fakeINP(200));
+      handlers.lcp.cb(fakeLCP(3000));
+      const lcps = drainVitals().filter(v => v.name === "web.vital.lcp");
+      expect(lcps).toHaveLength(1);
+      expect(lcps[0].value).toBe(3000);
+    });
+
+    it("keeps separate entries per page_url", () => {
+      initVitals([]);
+      setLocation("https://example.com/a");
+      handlers.lcp.cb(fakeLCP(1500));
+      setLocation("https://example.com/b");
+      handlers.lcp.cb(fakeLCP(2500));
+
+      const lcps = drainVitals().filter(v => v.name === "web.vital.lcp");
+      expect(lcps).toHaveLength(2);
+      const byUrl = new Map(lcps.map(v => [v.page_url, v.value]));
+      expect(byUrl.get("https://example.com/a")).toBe(1500);
+      expect(byUrl.get("https://example.com/b")).toBe(2500);
+    });
+
+    it("applies dedupe independently to CLS and INP", () => {
+      initVitals([]);
+      handlers.cls.cb(fakeCLS(0.05));
+      handlers.cls.cb(fakeCLS(0.35));
+      handlers.inp.cb(fakeINP(150));
+      handlers.inp.cb(fakeINP(820));
 
       const vitals = drainVitals();
-      expect(vitals).toHaveLength(3);
-      const lcp = vitals.find(v => v.name === "web.vital.lcp")!;
-      expect(lcp.value).toBe(2500);
-      expect(lcp.page_url).toBe("https://example.com/");
-      expect(lcp.element).toBe("h1");
-      expect(vitals.find(v => v.name === "web.vital.inp")!.interaction_type).toBe("pointer");
+      const cls = vitals.filter(v => v.name === "web.vital.cls");
+      const inp = vitals.filter(v => v.name === "web.vital.inp");
+      expect(cls).toHaveLength(1);
+      expect(cls[0].value).toBe(0.35);
+      expect(inp).toHaveLength(1);
+      expect(inp[0].value).toBe(820);
     });
   });
 
