@@ -211,10 +211,15 @@ function initClicks(): void {
       const now = Date.now();
       const selector = elementSelector(target);
 
+      // Round to integer CSS pixels — fractional values (Hi-DPI / touch) add
+      // bytes on the wire without changing where the dot lands in replay.
+      const x = Math.round(e.clientX);
+      const y = Math.round(e.clientY);
       addBreadcrumb({
         timestamp: now,
         category: "click",
         message: selector,
+        data: { x, y },
       });
 
       // Rage click detection: 3+ clicks within 1s, within 100px proximity,
@@ -224,7 +229,7 @@ function initClicks(): void {
       // breadcrumb immediately rather than deferring to scheduleClickDetection
       // (which is the right model for dead_click, where the "no DOM mutation"
       // condition is the whole definition).
-      const click: ClickRecord = { x: e.clientX, y: e.clientY, time: now };
+      const click: ClickRecord = { x, y, time: now };
       recentClicks.push(click);
       recentClicks = recentClicks.filter((c) => now - c.time < RAGE_CLICK_WINDOW_MS);
 
@@ -234,6 +239,7 @@ function initClicks(): void {
           timestamp: now,
           category: "rage_click",
           message: selector,
+          data: { x, y },
         });
         recentClicks = [];
       }
@@ -242,11 +248,18 @@ function initClicks(): void {
       // a non-interactive element is often intentional (selecting text, closing
       // a dropdown by clicking outside).
       if (isInteractable(e.target as Element)) {
-        scheduleClickDetection(selector, now, "dead_click", 300);
+        scheduleClickDetection({
+          selector,
+          clickTime: now,
+          category: "dead_click",
+          windowMs: 300,
+          x,
+          y,
+        });
       }
 
       // Error click detection: click followed by a JS error within 1 second
-      detectErrorClick(selector, now);
+      detectErrorClick(selector, now, x, y);
   };
   document.addEventListener("click", handler, { capture: true, passive: true });
   cleanups.push(() => document.removeEventListener("click", handler, { capture: true }));
@@ -303,12 +316,21 @@ onAfterNavigation(() => { lastEffectTime = Date.now(); });
 // Narrowed to "dead_click" only. Rage is emitted immediately in initClicks —
 // routing it through here would silence it whenever a click causes any DOM
 // mutation (including the breadcrumb insertion itself).
-function scheduleClickDetection(
-  selector: string,
-  clickTime: number,
-  category: "dead_click",
-  windowMs: number,
-): void {
+function scheduleClickDetection({
+  selector,
+  clickTime,
+  category,
+  windowMs,
+  x,
+  y,
+}: {
+  selector: string;
+  clickTime: number;
+  category: "dead_click";
+  windowMs: number;
+  x: number;
+  y: number;
+}): void {
   const detectionStartTime = Date.now();
   pendingDetections++;
   startEffectObservers();
@@ -324,12 +346,13 @@ function scheduleClickDetection(
         timestamp: clickTime,
         category,
         message: selector,
+        data: { x, y },
       });
     }
   }, windowMs);
 }
 
-function detectErrorClick(selector: string, clickTime: number): void {
+function detectErrorClick(selector: string, clickTime: number, x: number, y: number): void {
   const errorBefore = getLastErrorTimestamp();
   setTimeout(() => {
     const errorAfter = getLastErrorTimestamp();
@@ -338,6 +361,7 @@ function detectErrorClick(selector: string, clickTime: number): void {
         timestamp: clickTime,
         category: "error_click",
         message: selector,
+        data: { x, y },
       });
     }
   }, 1000);

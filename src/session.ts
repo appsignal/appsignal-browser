@@ -1,11 +1,20 @@
 import type { SessionContext, UserContext } from "./types.js";
-import { storage, scrubUrl } from "./utils.js";
+import { storage, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
 const ANON_KEY = "appsignal_anonymous_id";
 const LAST_ACTIVITY_KEY = "appsignal_last_activity";
 const TAB_KEY = "appsignal_tab_id";
+const TAB_CHANNEL = "appsignal_tab_collision";
+// Per-SDK-instance random tag. Survives page reloads only if the same JS
+// module evaluation persists (it doesn't — reloads start fresh), which is
+// exactly what we want for collision detection: a duplicated tab and the
+// original both have the same TAB_KEY in their copied sessionStorage but
+// distinct in-memory tabInstanceTags, breaking the tie deterministically.
+const tabInstanceTag = uuidv4();
+let tabChannel: BroadcastChannel | null = null;
+let tabChannelHandler: ((e: MessageEvent) => void) | null = null;
 
 let currentSessionId: string | null = null;
 let currentUser: UserContext | null = null;
@@ -31,7 +40,39 @@ export function initSession(timeoutMs: number, allowlist: string[] = []): void {
 
 function ensureTabId(): void {
   if (!storage.getString(sessionStorage, TAB_KEY)) {
-    storage.setString(sessionStorage, TAB_KEY, crypto.randomUUID());
+    storage.setString(sessionStorage, TAB_KEY, uuidv7());
+  }
+  startTabCollisionWatch();
+}
+
+/** Chrome's "Duplicate Tab" copies sessionStorage to the new tab, so two
+ * tabs end up with the same tab_id. Detect that via BroadcastChannel: each
+ * tab announces (tab_id, tabInstanceTag); on receiving an announce that
+ * matches our tab_id from a different tag, the tab with the lexically
+ * larger tag regenerates. Both tabs reach the same conclusion since the
+ * comparison is symmetric. */
+function startTabCollisionWatch(): void {
+  if (typeof BroadcastChannel === "undefined") return;
+  if (tabChannel) return;
+  try {
+    tabChannel = new BroadcastChannel(TAB_CHANNEL);
+    tabChannelHandler = (e: MessageEvent) => {
+      const msg = e.data as { tabId?: string; tag?: string } | undefined;
+      if (!msg?.tabId || !msg.tag) return;
+      const myId = getTabId();
+      if (msg.tabId !== myId || msg.tag === tabInstanceTag) return;
+      if (tabInstanceTag > msg.tag) {
+        // We lose the tiebreak — regenerate so the other tab keeps the id.
+        const fresh = uuidv7();
+        storage.setString(sessionStorage, TAB_KEY, fresh);
+        // Re-announce with the new id so any third duplicate also resolves.
+        tabChannel?.postMessage({ tabId: fresh, tag: tabInstanceTag });
+      }
+    };
+    tabChannel.addEventListener("message", tabChannelHandler);
+    tabChannel.postMessage({ tabId: getTabId(), tag: tabInstanceTag });
+  } catch {
+    /* BroadcastChannel unsupported or restricted — silently skip */
   }
 }
 
@@ -41,7 +82,9 @@ export function getTabId(): string {
 
 function ensureAnonymousId(): void {
   if (!storage.getString(localStorage, ANON_KEY)) {
-    storage.setString(localStorage, ANON_KEY, crypto.randomUUID());
+    // v4 (not v7) — anonymous_id persists in localStorage and a v7's
+    // 48-bit timestamp prefix would leak first-visit time across sessions.
+    storage.setString(localStorage, ANON_KEY, uuidv4());
   }
 }
 
@@ -59,7 +102,7 @@ function restoreOrCreateSession(): void {
 }
 
 function newSession(): void {
-  currentSessionId = crypto.randomUUID();
+  currentSessionId = uuidv7();
   storage.setString(localStorage, SESSION_KEY, currentSessionId);
   // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();
@@ -197,6 +240,14 @@ export function destroySession(): void {
   if (storageHandler) {
     window.removeEventListener("storage", storageHandler);
     storageHandler = null;
+  }
+  if (tabChannel) {
+    if (tabChannelHandler) {
+      tabChannel.removeEventListener("message", tabChannelHandler);
+      tabChannelHandler = null;
+    }
+    tabChannel.close();
+    tabChannel = null;
   }
   activityTrackingStarted = false;
   staticContextFields = null;

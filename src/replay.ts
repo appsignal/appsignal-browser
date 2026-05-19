@@ -15,7 +15,8 @@ let privacyDom: ServerConfig["privacy"]["dom"] = {
 let appVersion: string | undefined;
 let recorder: { stop: () => void } | null = null;
 let isRecording = false;
-let isPaused = false;
+type PauseReason = "offline" | "hidden";
+const pauseReasons = new Set<PauseReason>();
 let sessionRandom = 0;
 let sampled = true;
 let errorReplayEnabled = false;
@@ -89,15 +90,17 @@ export function initReplay(
       if (isRecording) flushChunk();
     });
 
-    window.addEventListener("offline", pauseRecording);
-    window.addEventListener("online", resumeRecording);
+    window.addEventListener("offline", pauseForOffline);
+    window.addEventListener("online", resumeForOffline);
 
-    // Flush on page hide — use beacon so the request survives unload.
-    // Plain fetch is cancelled mid-flight on unload, which drops the
-    // first chunk (the one with rrweb's initial FullSnapshot).
+    // Pause rrweb on tab hide so background tabs don't emit incrementals
+    // against a DOM the user isn't looking at — on resume rrweb naturally
+    // emits a fresh FullSnapshot, which lets the server interleave chunks
+    // from multiple tabs into one timeline cleanly.
     lifecycleUnsubscribers.push(
       onVisibilityChange((state) => {
-        if (state === "hidden" && isRecording) flushChunk(true);
+        if (state === "hidden") pauseRecording("hidden");
+        else if (state === "visible") resumeRecording("hidden");
       }),
     );
     lifecycleUnsubscribers.push(
@@ -110,7 +113,7 @@ export function initReplay(
       if (isRecording) stopReplay();
     });
     onConsentGranted(() => {
-      if (sampled && !isRecording && !isPaused) {
+      if (sampled && !isRecording && pauseReasons.size === 0) {
         startRecording();
       }
     });
@@ -192,13 +195,18 @@ async function startRecording(): Promise<void> {
       blockSelector: privacyDom.block_element.length
         ? privacyDom.block_element.join(", ")
         : undefined,
+      // Conventional rrweb opt-out: any element with class `rr-block` is
+      // replaced with a placeholder. Lets host apps mark regions that
+      // shouldn't be captured (e.g. embedded replay players, which would
+      // otherwise turn into recursive nested DOM that doesn't replay
+      // cleanly).
+      blockClass: "rr-block",
     });
 
     if (stopFn) {
       recorder = { stop: stopFn as () => void };
     }
     isRecording = true;
-    isPaused = false;
 
     flushTimer = setInterval(flushChunk, FLUSH_INTERVAL_MS);
 
@@ -210,26 +218,35 @@ async function startRecording(): Promise<void> {
   }
 }
 
-function pauseRecording(): void {
-  if (!isRecording) return;
+function pauseRecording(reason: PauseReason): void {
+  const wasEmpty = pauseReasons.size === 0;
+  pauseReasons.add(reason);
+  if (!wasEmpty || !isRecording) return;
 
   clearTimers();
-  flushChunk();
+  // Visibility-hidden may precede an OS-driven unload (mobile background),
+  // so beacon the last chunk; offline can use plain fetch since the network
+  // is dead either way.
+  flushChunk(reason === "hidden");
   if (recorder) {
     recorder.stop();
     recorder = null;
   }
   isRecording = false;
-  isPaused = true;
 }
 
-function resumeRecording(): void {
-  if (!isPaused) return;
-  isPaused = false;
+function resumeRecording(reason: PauseReason): void {
+  pauseReasons.delete(reason);
+  if (pauseReasons.size > 0 || isRecording) return;
+  if (!sampled || getConsent() !== "granted") return;
 
-  // Restart recording — rrweb takes a fresh full snapshot
+  // rrweb takes a fresh FullSnapshot on start — that's the boundary the
+  // server uses to interleave this tab's chunks with other tabs'.
   startRecording();
 }
+
+const pauseForOffline = (): void => pauseRecording("offline");
+const resumeForOffline = (): void => resumeRecording("offline");
 
 function flushChunk(useBeacon = false): void {
   if (eventBuffer.length === 0) return;
@@ -278,7 +295,7 @@ export function stopReplay(): void {
     recorder = null;
   }
   isRecording = false;
-  isPaused = false;
+  pauseReasons.clear();
 }
 
 /** Flush buffered replay under the current session without stopping the recorder.
@@ -289,8 +306,8 @@ export function flushReplay(useBeacon = false): void {
 
 export function destroyReplay(): void {
   stopReplay();
-  window.removeEventListener("offline", pauseRecording);
-  window.removeEventListener("online", resumeRecording);
+  window.removeEventListener("offline", pauseForOffline);
+  window.removeEventListener("online", resumeForOffline);
   for (const unsub of lifecycleUnsubscribers) unsub();
   lifecycleUnsubscribers = [];
   hadError = false;
@@ -306,5 +323,5 @@ export function discardReplay(): void {
     recorder = null;
   }
   isRecording = false;
-  isPaused = false;
+  pauseReasons.clear();
 }

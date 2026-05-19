@@ -179,13 +179,9 @@ function startCollection(endpoint: string): void {
   // Periodic flush
   flushTimer = setInterval(() => flushEvents(false), FLUSH_INTERVAL_MS);
 
-  // Flush on visibility hidden (tab switch, app backgrounded).
-  // web-vitals listeners are registered first (in initVitals), so they
-  // fire before this handler and populate collectedVitals before we flush.
-  // LCP, CLS, and INP all use `reportAllChanges: true` so each value is
-  // pushed as it updates rather than deferred to pagehide — web-vitals'
-  // default finalisers run via `requestIdleCallback` which doesn't complete
-  // before page unload and would otherwise lose the final value.
+  // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
+  // listeners are registered first (in initVitals) so they fire before this
+  // handler and populate collectedVitals before we flush.
   lifecycleUnsubscribers.push(
     onVisibilityChange((state) => {
       if (state === "hidden") flushEvents(true);
