@@ -1,5 +1,3 @@
-import type { ConsentState } from "./consent.js";
-
 /** Client-side configuration — only the ingestion key is required. */
 export interface BrowserConfig {
   key: string;
@@ -24,8 +22,6 @@ export interface BrowserConfig {
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to inject trace context headers into. Glob syntax. */
   tracePropagationTargets?: string[];
-  /** Initial tracking consent state. Default: "granted" (backwards compatible). */
-  trackingConsent?: ConsentState;
 }
 
 export interface UserContext {

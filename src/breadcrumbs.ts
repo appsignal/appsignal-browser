@@ -4,7 +4,6 @@ import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, scrubUrl } from "./utils.js";
-import { getConsent } from "./consent.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -122,7 +121,6 @@ export function initBreadcrumbs(
 }
 
 export function addBreadcrumb(breadcrumb: Breadcrumb): void {
-  if (getConsent() === "not-granted") return;
   // Hot path: every network request, click, console call. Skip the hook
   // entirely when none is configured, rather than running it as identity.
   if (!beforeBreadcrumbHook) {

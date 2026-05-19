@@ -67,16 +67,12 @@ interface BrowserConfig {
   // Glob syntax. Only requests matching these patterns get trace headers.
   // Example: ["api.example.com/**", "localhost:3000/**"]
   tracePropagationTargets?: string[];
-
-  // Initial tracking consent state. Default: "granted" (backwards compatible).
-  // Set to "pending" to buffer data until the user makes a consent choice.
-  trackingConsent?: "granted" | "not-granted" | "pending";
 }
 ```
 
 Both filtering hooks run **before any buffering** — `beforeError` at the SDK's entry point for errors, `beforeBreadcrumb` at the breadcrumb ring buffer's push site. Returning `null` from either drops the event completely; mutating fields propagates into the eventual payload. This split avoids the common asymmetry in other SDKs (a "drop early" list plus a "modify late" hook) by giving every event type the same early-pipeline shape.
 
-All collection toggles, sample rates, replay settings, and breadcrumb options are configured server-side and fetched on init. The full field reference lives with the backend config. Client-side options (`beforeError`, `beforeBreadcrumb`, `tracePropagationTargets`, `trackingConsent`) are set in `init()` since they contain code or are page-load settings.
+All collection toggles, sample rates, replay settings, and breadcrumb options are configured server-side and fetched on init. The full field reference lives with the backend config. Client-side options (`beforeError`, `beforeBreadcrumb`, `tracePropagationTargets`) are set in `init()` since they contain code or are page-load settings.
 
 ### API
 
@@ -106,9 +102,6 @@ function addBreadcrumb(breadcrumb: {
 
 // Force-flush buffered events (useful in SPA route changes or beforeunload)
 function flush(): void;
-
-// Update tracking consent state. Call when the user makes a consent choice.
-function setConsent(consent: "granted" | "not-granted" | "pending"): void;
 
 // Report a caught error manually. Used by framework plugins and try/catch blocks.
 function captureError(error: Error, context?: { componentName?: string; [key: string]: unknown }): void;
@@ -275,7 +268,7 @@ Example network breadcrumb with resource timing:
 }
 ```
 
-**Network payload capture.** Not supported. HTTP request and response bodies are never captured — only URL, method, status, timings, and trace ID land in the breadcrumb. This matches Datadog Browser RUM and Sentry JS, both of which decline to capture bodies in the browser. Users who need body context for specific errors can attach it manually via `addBreadcrumb` from their own code, scoped to whatever redaction policy makes sense for their API.
+**Network payload capture.** Not supported. HTTP request and response bodies are never captured — only URL, method, status, timings, and trace ID land in the breadcrumb. Body capture in the browser is a PII liability that's hard to scope safely. Users who need body context for specific errors can attach it manually via `addBreadcrumb` from their own code, scoped to whatever redaction policy makes sense for their API.
 
 **Console breadcrumbs.** Patch `console.warn` and `console.error`. Record first 200 chars. `console.log` is not patched (too noisy).
 
@@ -422,27 +415,7 @@ The replay recorder accounts for most of the bundle. It is the recorder-only sub
 
 ### Tracking consent
 
-Three consent states for GDPR compliance. The customer's app is responsible for consent UI and calling `setConsent()`. The SDK never shows its own consent UI.
-
-**States:**
-- **`granted`** (default) — collect and send all data normally. Default for backwards compatibility: existing users without consent flows keep working.
-- **`not-granted`** — stop all collection immediately. Buffered breadcrumbs cleared, queued payloads dropped, replay stops, no data sent, errors not captured.
-- **`pending`** — collect normally (errors, breadcrumbs, vitals) but do not send. Transport payloads buffer in memory. On `granted`, the buffer flushes. On `not-granted`, the buffer drops and collection stops.
-
-**Not persisted.** Consent state is not saved to localStorage or cookies. Must be set on each page load. The customer's consent management tool (CookieBot, OneTrust, custom) handles persistence and calls `setConsent()` with the stored choice on init.
-
-**Initial consent.** Set via `trackingConsent` in `init()`, or call `setConsent()` any time after.
-
-```js
-// Option 1: set in init
-AppsignalBrowser.init({
-  key: "...",
-  trackingConsent: "pending",
-});
-
-// Option 2: update later when user makes a choice
-AppsignalBrowser.setConsent("granted");
-```
+The SDK has no built-in consent state. If your app needs a GDPR-style consent gate, defer `init()` until the user has granted consent — collection only starts when the SDK is initialised. To stop collection mid-session (e.g. user revokes), call `destroy()`. User identity attached via `setUser()` is wiped by `destroy()` and by `endSession()`.
 
 ### Privacy and PII
 

@@ -10,8 +10,6 @@ import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from ".
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
-import { setConsent as setConsentState, getConsent, onConsentDenied, destroyConsent } from "./consent.js";
-import type { ConsentState } from "./consent.js";
 
 export type { BrowserConfig } from "./types.js";
 
@@ -31,9 +29,6 @@ export function init(config: BrowserConfig): void {
   if (initialized) return;
   initialized = true;
   clientConfig = config;
-
-  // Set initial consent state (default: granted for backwards compatibility)
-  setConsentState(config.trackingConsent ?? "granted");
 
   const endpoint = resolveEndpoint(config);
   initTransport(endpoint + COLLECT_PATH, config.key);
@@ -83,10 +78,6 @@ export function endSession(): void {
   sessionEndSession();
 }
 
-export function setConsent(consent: ConsentState): void {
-  setConsentState(consent);
-}
-
 /** Report a caught error manually. Used by framework plugins and try/catch blocks. */
 export function captureError(
   error: Error,
@@ -115,7 +106,6 @@ export function destroy(): void {
   flushEvents(true);
   stopCollection();
   destroySession();
-  destroyConsent();
   destroyTransport();
   initialized = false;
   clientConfig = null;
@@ -170,11 +160,6 @@ function startCollection(endpoint: string): void {
 
   initVitals(cfg.privacy.query_params_allowlist);
   initReplay(cfg.replay, clientConfig?.appVersion, cfg.privacy.dom);
-
-  // When consent is denied, clear collected breadcrumbs
-  onConsentDenied(() => {
-    clearBreadcrumbs();
-  });
 
   // Periodic flush
   flushTimer = setInterval(() => flushEvents(false), FLUSH_INTERVAL_MS);
@@ -238,7 +223,6 @@ function stopCollection(): void {
 
 function flushEvents(useBeacon: boolean): void {
   if (!initialized || !serverConfig.enabled) return;
-  if (getConsent() === "not-granted") return;
 
   const breadcrumbs = drainBreadcrumbs();
   const vitals = drainVitals();
