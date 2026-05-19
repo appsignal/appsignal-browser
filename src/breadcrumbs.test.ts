@@ -342,6 +342,10 @@ describe("breadcrumbs", () => {
       const clicks = getSnapshot().filter((b) => b.category === "click");
       expect(clicks.length).toBeGreaterThanOrEqual(1);
       expect(clicks[0].message).toContain("button");
+      expect(typeof clicks[0].data?.x).toBe("number");
+      expect(typeof clicks[0].data?.y).toBe("number");
+      expect(Number.isInteger(clicks[0].data?.x)).toBe(true);
+      expect(Number.isInteger(clicks[0].data?.y)).toBe(true);
     });
 
     it("detects rage clicks synchronously", () => {
