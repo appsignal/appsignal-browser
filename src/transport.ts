@@ -1,5 +1,4 @@
 import type { BrowserError, EventPayload, ReplayChunk } from "./types.js";
-import { getConsent, onConsentGranted, onConsentDenied } from "./consent.js";
 
 let endpoint = "";
 let ingestionKey = "";
@@ -23,8 +22,8 @@ const BASE_RETRY_MS = 1000;
 // while bounding worst-case memory.
 const MAX_QUEUE_BYTES = 32 * 1024 * 1024;
 
-// Queued payloads — covers three cases: offline, pending consent, and
-// payloads whose in-line retries were exhausted on 429/5xx or network error.
+// Queued payloads — covers offline plus payloads whose in-line retries
+// were exhausted on 429/5xx or network error.
 let retryQueue: string[] = [];
 let retryQueueBytes = 0;
 let listeningForOnline = false;
@@ -35,17 +34,6 @@ const pendingRetries = new Set<ReturnType<typeof setTimeout>>();
 export function initTransport(ep: string, key: string): void {
   endpoint = ep;
   ingestionKey = key;
-
-  // When consent is granted, flush queued payloads
-  onConsentGranted(() => {
-    drainQueue();
-  });
-
-  // When consent is denied, drop all queued payloads
-  onConsentDenied(() => {
-    retryQueue = [];
-    retryQueueBytes = 0;
-  });
 }
 
 /** Stop the periodic retry drain, cancel in-flight retry timers, and detach
@@ -98,10 +86,7 @@ export function sendBeaconEvents(payload: EventPayload): void {
  * whatever accumulated since the last periodic flush — bounded by the
  * flush cadence (5 s replay / 30 s events). */
 function flushOnUnload(body: string): void {
-  const consent = getConsent();
-  if (consent === "not-granted") return;
-
-  if (consent === "pending" || !navigator.onLine) {
+  if (!navigator.onLine) {
     enqueue(body);
     return;
   }
@@ -115,13 +100,10 @@ function flushOnUnload(body: string): void {
 }
 
 function send(body: string): void {
-  const consent = getConsent();
-  if (consent === "not-granted") return;
-
   // Drop payloads that exceed the size limit
   if (body.length > MAX_PAYLOAD_BYTES) return;
 
-  if (consent === "pending" || !navigator.onLine) {
+  if (!navigator.onLine) {
     enqueue(body);
     return;
   }
@@ -175,7 +157,6 @@ function scheduleRetryDrain(): void {
 }
 
 function drainQueue(): void {
-  if (getConsent() !== "granted") return;
   const items = retryQueue.splice(0);
   retryQueueBytes = 0;
   for (const body of items) {

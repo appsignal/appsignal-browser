@@ -2,13 +2,11 @@ import type { BrowserError, IncomingError, ServerConfig } from "./types.js";
 import { getSessionContext } from "./session.js";
 import { addBreadcrumb, getSnapshot } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getConsent } from "./consent.js";
 
-// Subscribers fired after an error has cleared every gate (consent,
-// sample_rate, beforeError, dedupe) and been handed to transport. Other
-// modules subscribe instead of being imperatively poked from inside
-// handleError — same pattern as onConsentDenied, onBeforeNavigation,
-// onAfterRequest, etc.
+// Subscribers fired after an error has cleared every gate (sample_rate,
+// beforeError, dedupe) and been handed to transport. Other modules
+// subscribe instead of being imperatively poked from inside handleError —
+// same pattern as onBeforeNavigation, onAfterRequest, etc.
 const errorListeners: ((event: BrowserError) => void)[] = [];
 
 export function onErrorReported(fn: (event: BrowserError) => void): () => void {
@@ -121,7 +119,6 @@ function handleError(
   errorClass?: string,
 ): void {
   if (!config.enabled) return;
-  if (getConsent() === "not-granted") return;
 
   // Self-protection: ignore errors from our own SDK to prevent feedback loops
   if (isOwnError(filename, stack)) return;

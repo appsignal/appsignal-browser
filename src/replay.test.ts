@@ -1,24 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { initReplay, applyReplaySampling, onError, stopReplay, discardReplay } from "./replay.js";
 import * as transport from "./transport.js";
-import * as consent from "./consent.js";
 import type { ServerConfig } from "./types.js";
 import { DEFAULT_SERVER_CONFIG } from "./types.js";
 
 // Mock transport to capture sent chunks
 vi.mock("./transport.js", () => ({
   sendReplayChunk: vi.fn(),
-}));
-
-// Mock consent — start with granted
-let consentState: consent.ConsentState = "granted";
-const consentDeniedCallbacks: (() => void)[] = [];
-const consentGrantedCallbacks: (() => void)[] = [];
-
-vi.mock("./consent.js", () => ({
-  getConsent: () => consentState,
-  onConsentDenied: (cb: () => void) => consentDeniedCallbacks.push(cb),
-  onConsentGranted: (cb: () => void) => consentGrantedCallbacks.push(cb),
 }));
 
 // Mock session — reads at call time so tests can change identity mid-flight
@@ -62,9 +50,6 @@ describe("replay", () => {
     sendChunkMock.mockClear();
     rrwebStopFn.mockClear();
     rrwebEmit = null;
-    consentState = "granted";
-    consentDeniedCallbacks.length = 0;
-    consentGrantedCallbacks.length = 0;
     mockSessionId = "test-session-id";
     mockTabId = "test-tab-id";
     sessionStorage.clear();
@@ -75,7 +60,7 @@ describe("replay", () => {
     vi.useRealTimers();
   });
 
-  it("starts recording when sampled and consent granted", async () => {
+  it("starts recording when sampled", async () => {
     initReplay(defaultReplayConfig());
     // rrweb record is dynamically imported — resolve the promise
     await vi.advanceTimersByTimeAsync(10);
@@ -407,20 +392,6 @@ describe("replay", () => {
       window.dispatchEvent(new Event("online"));
       await vi.advanceTimersByTimeAsync(10);
       expect(rrwebEmit).not.toBeNull();
-    });
-
-    it("does not resume on visible when consent has since been denied", async () => {
-      initReplay(defaultReplayConfig());
-      await vi.advanceTimersByTimeAsync(10);
-
-      setVisibility("hidden");
-      consentState = "not-granted";
-      for (const cb of consentDeniedCallbacks) cb();
-      rrwebEmit = null;
-
-      setVisibility("visible");
-      await vi.advanceTimersByTimeAsync(10);
-      expect(rrwebEmit).toBeNull();
     });
   });
 });

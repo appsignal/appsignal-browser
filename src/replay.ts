@@ -1,7 +1,6 @@
 import type { ServerConfig } from "./types.js";
 import { getSessionId, getTabId } from "./session.js";
 import { sendReplayChunk } from "./transport.js";
-import { getConsent, onConsentDenied, onConsentGranted } from "./consent.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
 import { storage, seededRandom } from "./utils.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
@@ -77,7 +76,7 @@ export function initReplay(
   sessionRandom = seededRandom(getSessionId());
   sampled = sessionRandom < config.sample_rate;
 
-  if (sampled && getConsent() === "granted") {
+  if (sampled) {
     startRecording();
   }
 
@@ -108,15 +107,6 @@ export function initReplay(
         if (!persisted && isRecording) flushChunk(true);
       }),
     );
-
-    onConsentDenied(() => {
-      if (isRecording) stopReplay();
-    });
-    onConsentGranted(() => {
-      if (sampled && !isRecording && pauseReasons.size === 0) {
-        startRecording();
-      }
-    });
 
     // Trigger the post-error tail only for errors that actually shipped —
     // errors.ts publishes after beforeError approval, so dropped errors don't
@@ -238,7 +228,7 @@ function pauseRecording(reason: PauseReason): void {
 function resumeRecording(reason: PauseReason): void {
   pauseReasons.delete(reason);
   if (pauseReasons.size > 0 || isRecording) return;
-  if (!sampled || getConsent() !== "granted") return;
+  if (!sampled) return;
 
   // rrweb takes a fresh FullSnapshot on start — that's the boundary the
   // server uses to interleave this tab's chunks with other tabs'.
