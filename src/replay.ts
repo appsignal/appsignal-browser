@@ -1,4 +1,10 @@
-import type { ServerConfig } from "./types.js";
+// Session replay module — preserved in the repo for v2+ but NOT imported by
+// index.ts in v1, so esbuild tree-shakes it out of both bundles and rrweb
+// is never downloaded. The implementation stays here so the tests below
+// keep documenting the contract and the file is ready to re-wire when
+// replay's storage path is in place.
+
+import type { ReplayConfig, ReplayPrivacyDom } from "./types.js";
 import { getSessionId, getTabId } from "./session.js";
 import { sendReplayChunk } from "./transport.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
@@ -6,8 +12,8 @@ import { storage, seededRandom } from "./utils.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 import { onErrorReported } from "./errors.js";
 
-let config: ServerConfig["replay"];
-let privacyDom: ServerConfig["privacy"]["dom"] = {
+let config: ReplayConfig;
+let privacyDom: ReplayPrivacyDom = {
   mask_text: [],
   block_element: [],
 };
@@ -59,14 +65,14 @@ export function clearChunkIndex(sessionId: string, tabId: string): void {
 }
 
 export function initReplay(
-  serverConfig: ServerConfig["replay"],
+  replayConfig: ReplayConfig,
   version?: string,
-  dom: ServerConfig["privacy"]["dom"] = {
+  dom: ReplayPrivacyDom = {
     mask_text: [],
     block_element: [],
   },
 ): void {
-  config = serverConfig;
+  config = replayConfig;
   privacyDom = dom;
   appVersion = version;
 
@@ -115,8 +121,9 @@ export function initReplay(
   }
 }
 
-/** Apply the real sampling decision once server config is available. */
-export function applyReplaySampling(realConfig: ServerConfig["replay"]): void {
+/** Apply a narrowed sampling decision (kept here for the case where a
+ * future version reintroduces runtime config updates for replay). */
+export function applyReplaySampling(realConfig: ReplayConfig): void {
   config = realConfig;
 
   if (!realConfig.enabled) {

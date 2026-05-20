@@ -5,6 +5,11 @@
 // 5 s tail (replay.ts:142-156). Without this spec, a regression in the
 // errors→replay wire would silently lose the most diagnostically useful
 // chunks: the ones explaining what the user just did before the crash.
+//
+// v1 skip: session replay isn't wired into index.ts (rrweb is not bundled),
+// and the /__config + /ingest/browser/config routes the test drives are
+// gone. Spec stays as a future-state reference; re-enable when replay and
+// its config-delivery path return.
 
 import { test, expect } from "../fixtures.js";
 import { reset, setConfig, captured, ingestReplays, pollFor } from "../helpers.js";
@@ -14,7 +19,7 @@ test.beforeEach(async ({ request }) => {
   await reset(request);
 });
 
-test("error on an unsampled session ships a replay chunk via the error window", async ({ page, request }) => {
+test.skip("error on an unsampled session ships a replay chunk via the error window", async ({ page, request }) => {
   const config = defaultConfig();
   (config.replay as Record<string, unknown>).sample_rate = 0;
   (config.replay as Record<string, unknown>).error_replay = true;

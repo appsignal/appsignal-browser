@@ -1,23 +1,23 @@
 // Privacy / PII tests. Each one exercises a real-browser path that the unit
-// tests can only mock (scrubUrl, isBlocklisted, rrweb masking, beforeError), so
-// a regression that survives the unit suite still lands here.
+// tests can only mock (scrubUrl, isBlocklisted, beforeError), so a regression
+// that survives the unit suite still lands here.
 //
-// Pattern: when a test needs non-default config, POST to /__config before
-// page.goto so the SDK's first config fetch picks up the override.
+// Pattern: when a test needs non-default config, withSdkConfig(page, …) sets
+// window.__appsignalConfig before any script runs, and the sample app's
+// init() spreads it over its defaults.
 
 import { test, expect } from "../fixtures.js";
 import {
   reset,
   captured,
   flush,
-  setConfig,
-  ingestReplays,
+  withSdkConfig,
   ingestErrors,
+  ingestReplays,
   networkBreadcrumbs,
   pollFor,
   type CapturedApi,
 } from "../helpers.js";
-import { defaultConfig } from "../default-config.js";
 
 test.beforeEach(async ({ request }) => {
   await reset(request);
@@ -25,7 +25,7 @@ test.beforeEach(async ({ request }) => {
 
 test.describe("URL scrubbing", () => {
   test("query params are stripped from network breadcrumb URLs by default", async ({ page, request }) => {
-    // Default config has query_params_allowlist: [], which strips ALL params.
+    // Default config has queryParamsAllowlist: [], which strips ALL params.
     // A bug in scrubUrl (or a future config-merge regression) would surface
     // here as the password/token leaking into the URL field.
     await page.goto("/");
@@ -50,10 +50,8 @@ test.describe("URL scrubbing", () => {
     expect(message).not.toContain("token");
   });
 
-  test("query_params_allowlist keeps allowed keys and drops everything else", async ({ page, request }) => {
-    const config = defaultConfig();
-    (config.privacy as Record<string, unknown>).query_params_allowlist = ["page"];
-    await setConfig(request, config);
+  test("queryParamsAllowlist keeps allowed keys and drops everything else", async ({ page, request }) => {
+    await withSdkConfig(page, { privacy: { queryParamsAllowlist: ["page"] } });
 
     await page.goto("/");
     await page.click("#trigger-fetch-mixed-params");
@@ -73,15 +71,13 @@ test.describe("URL scrubbing", () => {
 });
 
 test.describe("network breadcrumb filtering", () => {
-  test("network_blocklist suppresses the network breadcrumb entirely", async ({ page, request }) => {
+  test("networkBlocklist suppresses the network breadcrumb entirely", async ({ page, request }) => {
     // Blocklist match (host + pathname) should mean no network breadcrumb is
     // ever recorded for that URL. The fetch itself still happens (the SDK
     // doesn't block requests, only their breadcrumb), so the API endpoint
     // captures the call — that confirms we tested the right thing rather than
     // a no-op.
-    const config = defaultConfig();
-    (config.breadcrumbs as Record<string, unknown>).network_blocklist = ["**/auth/**"];
-    await setConfig(request, config);
+    await withSdkConfig(page, { breadcrumbs: { networkBlocklist: ["**/auth/**"] } });
 
     await page.goto("/");
     await page.click("#trigger-fetch-blocked");
@@ -109,7 +105,10 @@ test.describe("network breadcrumb filtering", () => {
 });
 
 test.describe("session replay masking", () => {
-  test("replay does not record raw input values when mask_all_inputs is true", async ({ page, request }) => {
+  // v1 skip: session replay isn't wired into index.ts (rrweb is not bundled),
+  // so no replay chunks are emitted. The test stays here as the masking
+  // contract for when replay returns.
+  test.skip("replay does not record raw input values when mask_all_inputs is true", async ({ page, request }) => {
     // rrweb with maskAllInputs:true replaces input values with same-length
     // strings of '*'. The literal typed string must not appear anywhere in the
     // serialised replay events. Default config already sets mask_all_inputs.

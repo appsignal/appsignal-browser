@@ -1,6 +1,8 @@
-// Default server config payload. Mirrors src/types.ts DEFAULT_SERVER_CONFIG
-// so e2e/server.ts and the test specs stay in lockstep with the SDK shape.
-// Returns a fresh object each call so callers can mutate freely.
+// Reference server config payload, preserved alongside the (currently
+// skipped) replay/error-replay e2e specs. v1 does not ship server-side
+// config, so this object is not used by any active test. When replay
+// returns and the specs are re-enabled, this shape lines back up with
+// whatever future config-delivery path is in place.
 
 export function defaultConfig(): Record<string, unknown> {
   return {

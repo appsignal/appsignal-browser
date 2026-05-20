@@ -1,4 +1,4 @@
-import type { BrowserError, IncomingError, ServerConfig } from "./types.js";
+import type { BrowserError, IncomingError, ResolvedConfig } from "./types.js";
 import { getSessionContext } from "./session.js";
 import { addBreadcrumb, getSnapshot } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
@@ -17,7 +17,7 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
   };
 }
 
-let config: ServerConfig["errors"];
+let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 
@@ -37,21 +37,17 @@ let dedupeWindow: DedupeEntry[] = [];
 const DEDUPE_MAX_COUNT = 5;
 const DEDUPE_WINDOW_MS = 10_000;
 
-export function updateErrorConfig(serverConfig: ServerConfig["errors"]): void {
-  config = serverConfig;
-}
-
 let errorHandler: ((event: ErrorEvent) => void) | null = null;
 let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
 
 export function initErrors(
-  serverConfig: ServerConfig["errors"],
+  resolved: ResolvedConfig["errors"],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
 ): void {
   destroyErrors();
 
-  config = serverConfig;
+  config = resolved;
   appVersion = version;
   beforeErrorHook = beforeError;
 
@@ -124,7 +120,7 @@ function handleError(
   if (isOwnError(filename, stack)) return;
 
   // Sample rate check
-  if (config.sample_rate < 1.0 && Math.random() >= config.sample_rate) return;
+  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return;
 
   // beforeError hook — early-pipeline. Runs before any side effect (error
   // breadcrumb, lastErrorTimestamp, dedupe slot, payload construction,

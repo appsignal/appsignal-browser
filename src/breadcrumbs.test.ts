@@ -5,11 +5,10 @@ import {
   addManualBreadcrumb,
   getSnapshot,
   drainBreadcrumbs,
-  updateBreadcrumbConfig,
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
-import type { ServerConfig } from "./types.js";
+import type { ResolvedConfig } from "./types.js";
 
 vi.mock("./errors.js", () => ({
   getLastErrorTimestamp: vi.fn(() => 0),
@@ -19,16 +18,16 @@ vi.mock("./tracing.js", () => ({
   consumeTraceId: vi.fn(() => undefined),
 }));
 
-const defaultBreadcrumbConfig: ServerConfig["breadcrumbs"] = {
+const defaultBreadcrumbConfig: ResolvedConfig["breadcrumbs"] = {
   enabled: true,
   network: false,
-  network_blocklist: [],
+  networkBlocklist: [],
   console: false,
   clicks: false,
-  long_tasks: false,
-  scroll_depth: false,
-  form_abandonment: false,
-  user_timing: false,
+  longTasks: false,
+  scrollDepth: false,
+  formAbandonment: false,
+  userTiming: false,
   capacity: 100,
 };
 
@@ -127,7 +126,7 @@ describe("breadcrumbs", () => {
         defaultBreadcrumbConfig,
         "http://localhost/ingest/browser",
         [],
-        { mask_text: [], block_element: [] },
+        { maskText: [], blockElement: [] },
         hook as Parameters<typeof initBreadcrumbs>[4],
       );
       clearBreadcrumbs();
@@ -189,15 +188,19 @@ describe("breadcrumbs", () => {
     });
   });
 
-  it("updateBreadcrumbConfig replaces the active config", () => {
+  it("re-init replaces the active config", () => {
     // Start with network disabled
     initBreadcrumbs(
       { ...defaultBreadcrumbConfig, network: false },
       "http://localhost/ingest/browser",
     );
 
-    // Update to enable network (config propagation from server)
-    updateBreadcrumbConfig({ ...defaultBreadcrumbConfig, network: true });
+    // Re-init to enable network — config is locked at init time, so a
+    // category change happens via initBreadcrumbs, not a mid-life setter.
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, network: true },
+      "http://localhost/ingest/browser",
+    );
 
     // The config reference is updated — new network breadcrumbs would
     // use the updated blocklist/allowlist. We can't easily test fetch
@@ -300,10 +303,12 @@ describe("breadcrumbs", () => {
     });
   });
 
-  it("updateBreadcrumbConfig disabling clicks stops new click breadcrumbs", () => {
-    // Per-category toggles must respond to runtime updates from the server.
-    // Otherwise narrowing config (e.g. disabling clicks via remote config)
-    // is silently ignored because listeners were registered at init time.
+  it("re-init disabling clicks stops new click breadcrumbs", () => {
+    // Per-category toggles take effect on re-init. (Old behavior used a
+    // mid-life updateBreadcrumbConfig setter; without server config there's
+    // no remote-narrowing path, so a re-init is the only way to flip a
+    // category. The handler still re-reads `config` at fire time, so we
+    // verify the new config wins.)
     initBreadcrumbs(
       { ...defaultBreadcrumbConfig, clicks: true },
       "http://localhost/ingest/browser",
@@ -317,11 +322,17 @@ describe("breadcrumbs", () => {
     const before = getSnapshot().filter(b => b.category === "click").length;
     expect(before).toBeGreaterThanOrEqual(1);
 
-    updateBreadcrumbConfig({ ...defaultBreadcrumbConfig, clicks: false });
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, clicks: false },
+      "http://localhost/ingest/browser",
+    );
+    // initBreadcrumbs calls destroyBreadcrumbs which clears the buffer; start
+    // the post-reinit count from the cleared baseline.
+    expect(getSnapshot().filter(b => b.category === "click")).toHaveLength(0);
 
     button.click();
     const after = getSnapshot().filter(b => b.category === "click").length;
-    expect(after).toBe(before);
+    expect(after).toBe(0);
 
     document.body.removeChild(button);
   });
@@ -404,7 +415,7 @@ describe("breadcrumbs", () => {
         { ...defaultBreadcrumbConfig, clicks: true },
         "http://localhost/ingest/browser",
         [],
-        { mask_text: [".pii"], block_element: [] },
+        { maskText: [".pii"], blockElement: [] },
       );
 
       const button = document.createElement("button");
@@ -428,7 +439,7 @@ describe("breadcrumbs", () => {
         { ...defaultBreadcrumbConfig, clicks: true },
         "http://localhost/ingest/browser",
         [],
-        { mask_text: ["[data-pii]"], block_element: [] },
+        { maskText: ["[data-pii]"], blockElement: [] },
       );
 
       const wrapper = document.createElement("div");
@@ -453,7 +464,7 @@ describe("breadcrumbs", () => {
         { ...defaultBreadcrumbConfig, clicks: true },
         "http://localhost/ingest/browser",
         [],
-        { mask_text: [], block_element: [".payment-form"] },
+        { maskText: [], blockElement: [".payment-form"] },
       );
 
       const wrapper = document.createElement("div");
@@ -476,15 +487,14 @@ describe("breadcrumbs", () => {
       expect(clicks).toHaveLength(0);
     });
 
-    it("updateBreadcrumbConfig propagates new dom selectors to the click handler", () => {
-      // Remote config changes (the server narrowing the mask list) must take
-      // effect without an SDK reinit. The handler reads from module-level
-      // state populated by setPrivacyDom on both init and update paths.
+    it("re-init propagates new dom selectors to the click handler", () => {
+      // Config is locked at init: switching mask selectors happens by
+      // re-calling initBreadcrumbs. setPrivacyDom rebuilds the selector cache.
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
         "http://localhost/ingest/browser",
         [],
-        { mask_text: [], block_element: [] },
+        { maskText: [], blockElement: [] },
       );
 
       const button = document.createElement("button");
@@ -496,18 +506,19 @@ describe("breadcrumbs", () => {
       const before = getSnapshot().filter((b) => b.category === "click");
       expect(before[0].message).toContain("leak me");
 
-      updateBreadcrumbConfig(
+      initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
+        "http://localhost/ingest/browser",
         [],
-        { mask_text: [".pii"], block_element: [] },
+        { maskText: [".pii"], blockElement: [] },
       );
 
       button.click();
       const after = getSnapshot().filter((b) => b.category === "click");
-      // Both clicks landed; the second should be masked, the first not.
-      expect(after).toHaveLength(2);
-      expect(after[1].message).toContain("[masked]");
-      expect(after[1].message).not.toContain("leak me");
+      // After re-init the buffer was cleared; only the masked second click remains.
+      expect(after).toHaveLength(1);
+      expect(after[0].message).toContain("[masked]");
+      expect(after[0].message).not.toContain("leak me");
 
       document.body.removeChild(button);
     });
@@ -561,7 +572,7 @@ describe("breadcrumbs", () => {
     it("records scroll depth on visibility hidden", () => {
       vi.useFakeTimers();
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, scroll_depth: true },
+        { ...defaultBreadcrumbConfig, scrollDepth: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();
@@ -597,7 +608,7 @@ describe("breadcrumbs", () => {
   describe("form abandonment breadcrumbs", () => {
     it("records form abandonment on navigation away", () => {
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, form_abandonment: true },
+        { ...defaultBreadcrumbConfig, formAbandonment: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();
@@ -626,7 +637,7 @@ describe("breadcrumbs", () => {
 
     it("ignores GET forms (search / filter UIs)", () => {
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, form_abandonment: true },
+        { ...defaultBreadcrumbConfig, formAbandonment: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();
@@ -650,7 +661,7 @@ describe("breadcrumbs", () => {
 
     it("ignores focus without keystroke (no real interaction)", () => {
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, form_abandonment: true },
+        { ...defaultBreadcrumbConfig, formAbandonment: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();
@@ -673,7 +684,7 @@ describe("breadcrumbs", () => {
 
     it("does not record if form was submitted", () => {
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, form_abandonment: true },
+        { ...defaultBreadcrumbConfig, formAbandonment: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();
@@ -703,7 +714,7 @@ describe("breadcrumbs", () => {
   describe("user timing breadcrumbs", () => {
     it("records performance.mark entries", () => {
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, user_timing: true },
+        { ...defaultBreadcrumbConfig, userTiming: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();
@@ -724,7 +735,7 @@ describe("breadcrumbs", () => {
 
     it("records performance.measure entries with duration", () => {
       initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, user_timing: true },
+        { ...defaultBreadcrumbConfig, userTiming: true },
         "http://localhost/ingest/browser",
       );
       clearBreadcrumbs();

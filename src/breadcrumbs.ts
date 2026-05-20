@@ -1,4 +1,4 @@
-import type { Breadcrumb, ServerConfig } from "./types.js";
+import type { Breadcrumb, ResolvedConfig } from "./types.js";
 import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
@@ -8,7 +8,7 @@ import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
 let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
-let config: ServerConfig["breadcrumbs"];
+let config: ResolvedConfig["breadcrumbs"];
 let beforeBreadcrumbHook: ((breadcrumb: Breadcrumb) => Breadcrumb | null) | undefined;
 let queryParamsAllowlist: string[] = [];
 // Pre-joined selectors so the hot path (every click) doesn't reformat them.
@@ -17,10 +17,10 @@ let maskTextSelector: string | null = null;
 let blockElementSelector: string | null = null;
 let collectEndpoint = "";
 
-function setPrivacyDom(dom: ServerConfig["privacy"]["dom"]): void {
-  maskTextSelector = dom.mask_text.length ? dom.mask_text.join(", ") : null;
-  blockElementSelector = dom.block_element.length
-    ? dom.block_element.join(", ")
+function setPrivacyDom(dom: ResolvedConfig["privacy"]["dom"]): void {
+  maskTextSelector = dom.maskText.length ? dom.maskText.join(", ") : null;
+  blockElementSelector = dom.blockElement.length
+    ? dom.blockElement.join(", ")
     : null;
 }
 
@@ -72,15 +72,15 @@ function ensureNavigationHook(): void {
 }
 
 export function initBreadcrumbs(
-  serverConfig: ServerConfig["breadcrumbs"],
+  resolved: ResolvedConfig["breadcrumbs"],
   endpoint: string,
   privacyQueryParamsAllowlist: string[] = [],
-  privacyDom: ServerConfig["privacy"]["dom"] = { mask_text: [], block_element: [] },
+  privacyDom: ResolvedConfig["privacy"]["dom"] = { maskText: [], blockElement: [] },
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null,
 ): void {
   destroyBreadcrumbs();
 
-  config = serverConfig;
+  config = resolved;
   beforeBreadcrumbHook = beforeBreadcrumb;
   queryParamsAllowlist = privacyQueryParamsAllowlist;
   setPrivacyDom(privacyDom);
@@ -89,9 +89,6 @@ export function initBreadcrumbs(
 
   // Register all collectors unconditionally — each handler reads the
   // module-level `config` and short-circuits when its category is off.
-  // Gating at registration time would freeze the toggles at init, so a
-  // remote config narrowing (e.g. disable clicks) couldn't take effect
-  // without an SDK reinit.
   initClicks();
   initNavigation();
   if (document.readyState === "complete") {
@@ -162,16 +159,6 @@ export function getSnapshot(): Breadcrumb[] {
 
 export function drainBreadcrumbs(): Breadcrumb[] {
   return buffer.drain();
-}
-
-export function updateBreadcrumbConfig(
-  serverConfig: ServerConfig["breadcrumbs"],
-  privacyQueryParamsAllowlist: string[] = queryParamsAllowlist,
-  privacyDom?: ServerConfig["privacy"]["dom"],
-): void {
-  config = serverConfig;
-  queryParamsAllowlist = privacyQueryParamsAllowlist;
-  if (privacyDom) setPrivacyDom(privacyDom);
 }
 
 export function clearBreadcrumbs(): void {
@@ -652,7 +639,7 @@ function isBlocklisted(url: string): boolean {
   const parsed = safeUrl(url);
   if (!parsed) return false;
   const hostPath = parsed.host + parsed.pathname;
-  return config.network_blocklist.some((pattern) =>
+  return config.networkBlocklist.some((pattern: string) =>
     globMatch(pattern, hostPath),
   );
 }
@@ -759,7 +746,7 @@ function initLongTasks(): void {
   // Try Long Animation Frame API first (Chrome 123+) — has script attribution
   try {
     const observer = new PerformanceObserver((list) => {
-      if (!config.long_tasks) return;
+      if (!config.longTasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
           // LoAF entries have a .scripts array (not in TS lib types yet)
@@ -803,7 +790,7 @@ function initLongTasks(): void {
   // Fallback: basic longtask observer (no attribution)
   try {
     const observer = new PerformanceObserver((list) => {
-      if (!config.long_tasks) return;
+      if (!config.longTasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
           addBreadcrumb({
@@ -848,7 +835,7 @@ function getScrollPercent(target?: EventTarget | null): number {
 }
 
 function flushScrollDepth(): void {
-  if (config.scroll_depth && maxScrollPercent > 0 && lastScrollUrl) {
+  if (config.scrollDepth && maxScrollPercent > 0 && lastScrollUrl) {
     addBreadcrumb({
       timestamp: Date.now(),
       category: "scroll_depth",
@@ -870,7 +857,7 @@ function initScrollDepth(): void {
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
   let lastScrollTarget: EventTarget | null = null;
   const scrollHandler = (e: Event) => {
-    if (!config.scroll_depth) return;
+    if (!config.scrollDepth) return;
     lastScrollTarget = e.target;
     if (throttleTimer) return;
     throttleTimer = setTimeout(() => {
@@ -907,7 +894,7 @@ function initFormAbandonment(): void {
   const submittedForms = new WeakSet<HTMLFormElement>();
 
   const inputHandler = (e: Event) => {
-    if (!config.form_abandonment) return;
+    if (!config.formAbandonment) return;
     const target = e.target as Element;
     if (!(target instanceof HTMLInputElement
       || target instanceof HTMLTextAreaElement
@@ -922,7 +909,7 @@ function initFormAbandonment(): void {
   document.addEventListener("input", inputHandler, { capture: true, passive: true });
 
   const submitHandler = (e: SubmitEvent) => {
-    if (!config.form_abandonment) return;
+    if (!config.formAbandonment) return;
     const form = e.target as HTMLFormElement;
     submittedForms.add(form);
     interactedForms.delete(form);
@@ -931,7 +918,7 @@ function initFormAbandonment(): void {
 
   // On navigation, emit abandonment for forms interacted with but not submitted
   const emitAbandonments = () => {
-    if (!config.form_abandonment) return;
+    if (!config.formAbandonment) return;
     for (const [form, interactionTime] of interactedForms) {
       if (submittedForms.has(form)) continue;
       const selector = elementSelector(form);
@@ -963,7 +950,7 @@ function initUserTiming(): void {
 
   try {
     const observer = new PerformanceObserver((list) => {
-      if (!config.user_timing) return;
+      if (!config.userTiming) return;
       for (const entry of list.getEntries()) {
         const isMeasure = entry.entryType === "measure";
         addBreadcrumb({

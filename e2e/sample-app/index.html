@@ -43,9 +43,13 @@
 
     <script src="/dist/browser.umd.js"></script>
     <script>
+      // window.__appsignalConfig is set by e2e tests (via page.addInitScript)
+      // when they need to exercise non-default config knobs. In normal page
+      // loads the variable is undefined and the spread is a no-op.
       AppsignalBrowser.init({
         key: "your-app-key",
         endpoint: location.origin,
+        ...(window.__appsignalConfig || {}),
       });
       document.getElementById("status").textContent = "SDK initialised";
 

@@ -1,12 +1,12 @@
 # @appsignal/browser
 
-Standalone JavaScript SDK that collects frontend errors, breadcrumbs, web vitals, session data, and session replay recordings from customer web apps.
+Standalone JavaScript SDK that collects frontend errors, breadcrumbs, web vitals, and session data from customer web apps.
 
 ## Goal
 
-One package covering all frontend observability: error tracking, breadcrumbs, web vitals, session replay. Ships as ES module and UMD bundle. Posts to `/ingest/browser` on the AppSignal backend.
+Frontend observability essentials: error tracking, breadcrumbs, web vitals. Ships as ES module and UMD bundle. Posts to `/ingest/browser` on the AppSignal backend. Session replay is out of scope for v1.
 
-Collection behavior is controlled server-side via the config system. On init, the SDK fetches its effective config from `GET /ingest/browser/config?key=<key>` and applies whatever the operator has set. Replay can be disabled in staging, sample rates tuned per namespace, breadcrumb categories toggled — all without shipping a new frontend build. Only the ingestion key is required in the SDK call.
+All collection behavior is set in `init()`; the SDK does not fetch any server-side config. Sample rates, breadcrumb categories, privacy selectors, and other knobs are part of the `BrowserConfig` object passed at startup. Only the ingestion key is required — every other knob has a sensible default.
 
 ## Interface
 
@@ -67,12 +67,43 @@ interface BrowserConfig {
   // Glob syntax. Only requests matching these patterns get trace headers.
   // Example: ["api.example.com/**", "localhost:3000/**"]
   tracePropagationTargets?: string[];
+
+  // Collection knobs. Every group is optional; omitted keys inherit defaults.
+  errors?: {
+    enabled?: boolean;             // default: true
+    sampleRate?: number;           // 0..1, default: 1.0
+  };
+  breadcrumbs?: {
+    enabled?: boolean;             // default: true
+    network?: boolean;             // default: true — fetch/XHR breadcrumbs
+    networkBlocklist?: string[];   // glob URL patterns to suppress
+    console?: boolean;             // default: true — patches warn/error
+    clicks?: boolean;              // default: true
+    longTasks?: boolean;           // default: true
+    scrollDepth?: boolean;         // default: true
+    formAbandonment?: boolean;     // default: true
+    userTiming?: boolean;          // default: false — opt-in (chatty)
+    capacity?: number;             // ring buffer size, default: 100
+  };
+  webVitals?: {
+    enabled?: boolean;             // default: true
+  };
+  session?: {
+    inactivityTimeoutMs?: number;  // default: 1_800_000 (30 minutes)
+  };
+  privacy?: {
+    queryParamsAllowlist?: string[];  // glob list, default: [] (strip all)
+    dom?: {
+      maskText?: string[];         // CSS selectors — text content masked
+      blockElement?: string[];     // CSS selectors — element + subtree dropped
+    };
+  };
 }
 ```
 
 Both filtering hooks run **before any buffering** — `beforeError` at the SDK's entry point for errors, `beforeBreadcrumb` at the breadcrumb ring buffer's push site. Returning `null` from either drops the event completely; mutating fields propagates into the eventual payload. This split avoids the common asymmetry in other SDKs (a "drop early" list plus a "modify late" hook) by giving every event type the same early-pipeline shape.
 
-All collection toggles, sample rates, replay settings, and breadcrumb options are configured server-side and fetched on init. The full field reference lives with the backend config. Client-side options (`beforeError`, `beforeBreadcrumb`, `tracePropagationTargets`) are set in `init()` since they contain code or are page-load settings.
+All collection knobs are passed at `init()` time. There is no server-side config fetch and no remote kill switch. To stop collection mid-session, call `destroy()`. To change a knob, redeploy with the new value (or pass a different config object next time `init()` runs — for example, in a single-page app that re-mounts the SDK).
 
 ### API
 
@@ -114,67 +145,17 @@ function destroy(): void;
 
 ### Init and config
 
-On `init()`, all collectors (breadcrumbs, errors, vitals, replay) start immediately using a hardcoded fallback config so no early session data is lost. Replay recording begins from the first DOM mutation.
+`init(config)` merges the caller's `BrowserConfig` with built-in defaults once, synchronously, then starts every collector with the resolved config. There is no server-side config fetch, no fallback-then-real-config dance, and no remote kill switch — every knob lives in the JS call and is locked for the lifetime of the SDK instance. To change a knob, call `destroy()` and `init()` again with a new config, or redeploy with the new value.
 
-In parallel, the plugin fetches the effective server config:
+Defaults are tuned to collect by default and lean on the privacy hooks to scope what ships:
 
-```
-GET /ingest/browser/config?key=<ingestion-key>
-```
+- All collectors enabled (`errors`, `breadcrumbs`, `webVitals`).
+- `errors.sampleRate: 1.0`.
+- `privacy.queryParamsAllowlist: []` — strip every query param from captured URLs (network breadcrumbs, navigation breadcrumbs, `page_url`, `referrer`, vital `page_url`). OAuth-style query-shaped fragments are scrubbed by the same rule; hash routes and opaque anchors are preserved verbatim.
+- `breadcrumbs.userTiming: false` — opt-in because `performance.mark/measure` instrumentation can flood the ring buffer.
+- `session.inactivityTimeoutMs: 1_800_000` (30 minutes).
 
-When the config arrives, it propagates to all modules:
-- If `enabled` is false, buffers are discarded and collection stops.
-- Breadcrumbs: real `network_blocklist` replaces fallback; the real `privacy.query_params_allowlist` and `privacy.dom.*` selectors propagate to every URL/DOM consumer (network breadcrumbs, navigation, click breadcrumbs, vitals, session context, replay). Blocked/stripped requests are handled correctly from this point.
-- Errors: real `sample_rate` takes effect for subsequent errors.
-- Replay sampling: a per-session sampling roll is derived from `session_id` (FNV-1a hash → `[0, 1)`) and compared against the real `sample_rate`. Because the roll is a function of the session ID, the decision is stable across page loads within one session — multi-page apps don't re-roll on every navigation, so "10 % of sessions" stays "10 % of sessions" rather than collapsing into "10 % of page loads". Unsampled sessions discard their replay buffer. Sessions with `error_replay` keep recording but only flush replay data if an error occurs (see *Session replay* below for the per-error window semantics).
-
-The fallback is safe and captures everything:
-- All collectors enabled so no data is missed.
-- `replay.sample_rate: 1.0` so all sessions record from the first DOM mutation. Real rate narrows this on config arrival.
-- `replay.mask_all_inputs: true` and `privacy.query_params_allowlist: []` (strip all query params; OAuth-style fragments scrubbed by the same rule, hash routes preserved) — safe defaults protect PII.
-
-During the config fetch window (~100ms), the plugin may collect slightly more than the server config allows (breadcrumbs from blocklisted URLs, errors at 100% vs. server rate). Acceptable: collecting too much briefly beats missing early session data.
-
-**Honored at runtime.** Every per-category breadcrumb toggle (`breadcrumbs.console`, `clicks`, `network`, `long_tasks`, `scroll_depth`, `form_abandonment`, `user_timing`) is gated inside its handler against the live config, so flipping a category off in server config takes effect on the next event without a reinit. Listeners stay attached either way — the gate is at the call site — keeping the cost of an "off" toggle to one branch per event. To stop *all* collection (not just breadcrumbs), the server returns top-level `enabled: false`, which tears down every collector.
-
-If the config request fails, the plugin continues with the fallback. Not cached across page loads; fetched fresh on every `init()`.
-
-The response is a JSON object matching the resolved `BrowserConfig` for the key's node:
-
-```json
-{
-  "enabled": true,
-  "errors": { "enabled": true, "sample_rate": 1.0 },
-  "privacy": {
-    "query_params_allowlist": [],
-    "dom": {
-      "mask_text": [],
-      "block_element": []
-    }
-  },
-  "breadcrumbs": {
-    "enabled": true,
-    "network": true,
-    "network_blocklist": [],
-    "console": true,
-    "clicks": true,
-    "long_tasks": true,
-    "scroll_depth": true,
-    "form_abandonment": true,
-    "user_timing": false,
-    "capacity": 100
-  },
-  "web_vitals": { "enabled": true },
-  "replay": {
-    "enabled": true,
-    "sample_rate": 0.1,
-    "error_replay": true,
-    "mask_all_inputs": true,
-    "max_duration_ms": 14400000
-  },
-  "session": { "inactivity_timeout_ms": 1800000 }
-}
-```
+Per-category breadcrumb toggles (`breadcrumbs.network`, `clicks`, `console`, etc.) are read by each handler at fire time, so the cost of an "off" toggle is one branch per event. They aren't intended to flip at runtime — they're locked at init — but the indirection keeps the call sites uniform and would let a future runtime override path slot in without restructuring the handlers.
 
 ### Session model
 
@@ -221,7 +202,7 @@ Text capped at 50 characters. Also checks `title`, `aria-label`, `alt`, `placeho
 
 **Document load breadcrumb.** On init, a `network` breadcrumb for the initial document load using `PerformanceNavigationTiming`, with the same timing breakdown as other network breadcrumbs (dns, connect, ssl, ttfb, download) and `initiator: "document"`. Timestamp uses navigation start time so it sorts first.
 
-**Network breadcrumbs.** Patch `XMLHttpRequest` and `fetch`. Record: method, URL (scrubbed through `privacy.query_params_allowlist` — see *Privacy and PII* for fragment behavior), status code, duration, initiator type (`"fetch"`, `"xhr"`, or `"document"`). Default allowlist is empty, so all query params are stripped to avoid PII. When configured, only matching keys are preserved (entries are glob-matched, so `utm_*` keeps every UTM param). Skips requests to the AppSignal `/ingest/browser` endpoint and any URL matching `breadcrumbs.network_blocklist` — matched against host + path using glob syntax (`*` matches one segment, `**` across segments). Blocked URLs never leave the browser.
+**Network breadcrumbs.** Patch `XMLHttpRequest` and `fetch`. Record: method, URL (scrubbed through `privacy.queryParamsAllowlist` — see *Privacy and PII* for fragment behavior), status code, duration, initiator type (`"fetch"`, `"xhr"`, or `"document"`). Default allowlist is empty, so all query params are stripped to avoid PII. When configured, only matching keys are preserved (entries are glob-matched, so `utm_*` keeps every UTM param). Skips requests to the AppSignal `/ingest/browser` endpoint and any URL matching `breadcrumbs.networkBlocklist` — matched against host + path using glob syntax (`*` matches one segment, `**` across segments). Blocked URLs never leave the browser.
 
 **Resource timing waterfall.** Each network breadcrumb is enriched with a `resource_timing` sub-object containing the full `PerformanceResourceTiming` waterfall from the browser, when available. The sub-object is stored in `data.resource_timing` and has this shape:
 
@@ -311,7 +292,7 @@ Vitals use the `web-vitals/attribution` build, providing attribution alongside t
 
 FCP and TTFB are collected without attribution (basic handler).
 
-Vitals are sent in the `vitals` array of the `events` payload, separate from `BrowserEvent` entries. Attributed to the page URL at collection time, with query params filtered through `privacy.query_params_allowlist` (same rules as network breadcrumbs). All params stripped by default.
+Vitals are sent in the `vitals` array of the `events` payload, separate from `BrowserEvent` entries. Attributed to the page URL at collection time, with query params filtered through `privacy.queryParamsAllowlist` (same rules as network breadcrumbs). All params stripped by default.
 
 Vital names: `web.vital.lcp`, `web.vital.cls`, `web.vital.inp`, `web.vital.fcp`, `web.vital.ttfb`. The backend ingests them into the generic metric system (not a dedicated table). Each vital is a gauge with dimensions for page URL path, browser, device type, and app version. Reuses existing metric storage, aggregation (p75, p95), alerting, and dashboards. Page URL path is the primary grouping dimension. When query params are present (via allowlist), they are stored as an additional dimension so the UI can show per-param breakdowns as children of the path aggregate.
 
@@ -343,35 +324,7 @@ beforeError: (e) => {
 
 ### Session replay
 
-Uses [@rrweb/record](https://github.com/rrweb-io/rrweb) (recorder-only, not the full rrweb bundle) to record the DOM as an event sequence.
-
-**When to record.** Recording always starts immediately on `init()` because the fallback config has `replay.sample_rate: 1.0`. The sampling roll is derived from `session_id` (FNV-1a → `[0, 1)`), so the decision is deterministic per session and stable across page loads — multi-page apps don't re-roll on every navigation. When the server config arrives, the roll is compared against the real sample rate:
-- `seededRandom(session_id) < replay.sample_rate`: sampled. Recording continues; chunks flush normally.
-- Not sampled, `replay.error_replay = true`: recording continues but chunks ship only when an error fires. On each error, the SDK ships the **pre-error buffer** (events since the most recent rrweb `FullSnapshot` — up to ~1 minute of context) plus a **5 s post-error tail** of subsequent activity. Errors that land inside an active tail are absorbed: they don't trigger a fresh flush or extend the window, so per-session upload stays bounded even on cascading errors. The pre-error window length is bounded by the full-snapshot interval (60 s, hardcoded) — both are implementation details, not server-tunable.
-- Not sampled, `replay.error_replay = false`: buffer discarded, recording stops.
-
-This ensures replay data is captured from the first DOM mutation regardless of config fetch time. The fallback sample rate of 1.0 drives this; no special "always record" logic needed.
-
-**What server config *can't* save you from.** Server-side `replay.enabled: false` (or `sample_rate: 0` with `error_replay: false`) gates *upload* — no chunks ever leave the browser — but doesn't gate *download* of rrweb itself. The rrweb code is fetched eagerly regardless of what the server eventually says, because the SDK doesn't yet know the answer:
-
-- **UMD** (`browser.umd.js`) inlines rrweb (~84 KB gz of the 103 KB total). The cost lands at script-tag eval, long before the config GET resolves.
-- **ESM** splits rrweb into a separate chunk, but `initReplay` calls `await import("@rrweb/record")` synchronously from `init()` (driven by the fallback `sample_rate: 1.0`), so the chunk fetch fires in parallel with the config GET — not after it.
-
-Once the config arrives, recording may stop and buffered chunks may be discarded, but the rrweb bytes are already on the user's machine. For projects that genuinely never want to pay the rrweb download, the only escape is at code level: don't load the SDK at all on pages where replay isn't wanted, since there's no client-side `replay.enabled` flag in `init()`.
-
-**Privacy.** All text content masked by default. Input values, text nodes, and placeholder text replaced with `*`. Images replaced with a solid placeholder. `replay.mask_all_inputs` defaults to `true`. Relaxable per-element with `data-rrweb-unmasked`.
-
-Additional masking via the cross-cutting `privacy.dom.*` selectors (also consumed by click breadcrumbs — see *Privacy and PII*):
-- `privacy.dom.mask_text` — CSS selectors whose text content is masked with `*`. Applied on top of `mask_all_inputs`. Use for specific sensitive fields when `mask_all_inputs` is off.
-- `privacy.dom.block_element` — CSS selectors whose elements are replaced entirely with a solid placeholder and never recorded. Use for payment iframes, SSN fields, or any widget you do not want recorded at all.
-
-**Event batching.** rrweb events are batched every 5 seconds, or immediately on session end or error. Gzip compression via Web Worker is planned but not yet implemented.
-
-**Recording chunks.** Long sessions produce multiple chunks. Each references the `session_id` and carries a `chunk_index`. The backend assembles them in order.
-
-**Maximum recording duration.** Stops after `replay.max_duration_ms` (default 4 hours). Configurable server-side. Combined with the 30-minute inactivity timeout, most recordings are much shorter.
-
-**Storage budget.** The in-memory rrweb buffer is naturally bounded by the full-snapshot interval (60 s of mutations between two `FullSnapshot`s). On every full-snapshot boundary the previous buffer is either shipped (sampled sessions) or dropped (unsampled `error_replay` sessions, since the old `FullSnapshot` it anchored on is gone). No size cap is needed — the buffer never grows beyond one snapshot interval. A separate 32 MB cap bounds the *transport* retry queue (failed-send chunks waiting for the network to recover); see *Retry* below for eviction semantics.
+Out of scope for v1. The `replay` module is a stub; rrweb is not bundled and never loaded at runtime. Replay will return as a future major version once the storage path is in place.
 
 ### Event batching and transport
 
@@ -419,7 +372,7 @@ The SDK has no built-in consent state. If your app needs a GDPR-style consent ga
 
 ### Privacy and PII
 
-PII controls live under a single cross-cutting `privacy.*` namespace. Each knob lists the subsystems it applies to; channel-specific knobs (`breadcrumbs.network_blocklist`, `replay.mask_all_inputs`) stay in their feature namespace.
+PII controls live under a single cross-cutting `privacy.*` namespace. Each knob lists the subsystems it applies to; channel-specific knobs (`breadcrumbs.networkBlocklist`) stay in their feature namespace.
 
 ```ts
 privacy: {
@@ -431,20 +384,19 @@ privacy: {
 }
 ```
 
-**`privacy.query_params_allowlist`** — applied wherever a URL is captured: network breadcrumb URLs, SPA navigation breadcrumbs (`data.from`, `data.to`), `session_context.page_url`, `session_context.referrer`, and `web_vitals.page_url`. Entries are glob-matched (`utm_*` keeps every UTM param). Default empty: every query param is stripped. Fragments are handled by a heuristic: hash routes (`#/checkout`) and opaque anchors (`#section-1`) are preserved verbatim; query-like fragments (`#access_token=…&token_type=bearer`) are scrubbed by the same allowlist. This defends against OAuth implicit-flow leaks without breaking apps that use hash-based routing.
+**`privacy.queryParamsAllowlist`** — applied wherever a URL is captured: network breadcrumb URLs, SPA navigation breadcrumbs (`data.from`, `data.to`), `session_context.page_url`, `session_context.referrer`, and `web_vitals.page_url`. Entries are glob-matched (`utm_*` keeps every UTM param). Default empty: every query param is stripped. Fragments are handled by a heuristic: hash routes (`#/checkout`) and opaque anchors (`#section-1`) are preserved verbatim; query-like fragments (`#access_token=…&token_type=bearer`) are scrubbed by the same allowlist. This defends against OAuth implicit-flow leaks without breaking apps that use hash-based routing.
 
-**`privacy.dom.mask_text`** — CSS selectors whose **text content** is masked everywhere the SDK captures from the DOM. Session replay masks text to `*` (via rrweb's `maskTextSelector`). Click breadcrumbs replace the captured text with `"[masked]"` when the click target matches or descends from a listed selector — the breadcrumb still fires (you see *that* a click happened) but no PII text rides along.
+**`privacy.dom.maskText`** — CSS selectors whose **text content** is masked everywhere the SDK captures from the DOM. Session replay masks text to `*` (via rrweb's `maskTextSelector`). Click breadcrumbs replace the captured text with `"[masked]"` when the click target matches or descends from a listed selector — the breadcrumb still fires (you see *that* a click happened) but no PII text rides along.
 
-**`privacy.dom.block_element`** — CSS selectors whose **elements** are excluded from capture entirely. Session replay records a placeholder of the same dimensions (via rrweb's `blockSelector`); the subtree is never recorded. Click breadcrumbs are suppressed entirely — including rage / dead / error_click derivatives — when the click target matches or descends from a blocked element. Use for payment iframes, SSN fields, or any widget whose interaction shouldn't surface at all.
+**`privacy.dom.blockElement`** — CSS selectors whose **elements** are excluded from capture entirely. Session replay records a placeholder of the same dimensions (via rrweb's `blockSelector`); the subtree is never recorded. Click breadcrumbs are suppressed entirely — including rage / dead / error_click derivatives — when the click target matches or descends from a blocked element. Use for payment iframes, SSN fields, or any widget whose interaction shouldn't surface at all.
 
 Both DOM selectors use `el.closest()` semantics, so masking or blocking a wrapper covers every descendant — matches the rrweb model.
 
 Other defaults that round out the privacy posture:
 
-- URLs matching `breadcrumbs.network_blocklist` never recorded (glob syntax).
+- URLs matching `breadcrumbs.networkBlocklist` never recorded (glob syntax).
 - **HTTP bodies (request and response) are never captured.** No config exposes them.
 - Console messages truncated at 200 chars.
-- Replay masks all text and inputs by default (`replay.mask_all_inputs: true`, applied as rrweb's global text/input masking).
 - User fields (id, email, name) never collected unless `setUser()` is called; cleared via `clearUser()`.
 - No cookies read or written beyond `anonymous_id` in `localStorage`.
 
