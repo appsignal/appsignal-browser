@@ -77,7 +77,7 @@ test.describe("network breadcrumb filtering", () => {
     // doesn't block requests, only their breadcrumb), so the API endpoint
     // captures the call — that confirms we tested the right thing rather than
     // a no-op.
-    await withSdkConfig(page, { breadcrumbs: { networkBlocklist: ["**/auth/**"] } });
+    await withSdkConfig(page, { privacy: { networkBlocklist: ["**/auth/**"] } });
 
     await page.goto("/");
     await page.click("#trigger-fetch-blocked");
@@ -171,9 +171,13 @@ test.describe("error filtering", () => {
 
 test.describe("user context", () => {
   test("clearUser removes user fields from subsequent payloads", async ({ page, request }) => {
-    // setUser attaches user_id/user_email/user_name to every payload's session
-    // context until cleared. clearUser must remove the in-memory user AND the
-    // localStorage copy; the next event's session context must omit those keys.
+    // setUser attaches the user_id to every error payload's `tags` until
+    // cleared. clearUser must remove the in-memory user AND the localStorage
+    // copy; the next error must ship without user_id on tags.
+    //
+    // The FrontendTransaction wire shape only carries user_id (not email /
+    // name) — those would need a separate test against the events stream
+    // where the full SessionContext travels.
     await page.goto("/");
 
     await page.evaluate(() => {
@@ -187,9 +191,8 @@ test.describe("user context", () => {
     const firstError = await pollFor(request, (items) =>
       ingestErrors(items).find((e) => (e.message as string)?.includes("first error with user")),
     );
-    const firstSession = firstError.session as Record<string, unknown>;
-    expect(firstSession.user_id).toBe("test-user-1");
-    expect(firstSession.user_email).toBe("test@example.com");
+    const firstTags = firstError.session as Record<string, unknown>;
+    expect(firstTags.user_id).toBe("test-user-1");
 
     await reset(request);
 
@@ -203,10 +206,8 @@ test.describe("user context", () => {
     const secondError = await pollFor(request, (items) =>
       ingestErrors(items).find((e) => (e.message as string)?.includes("second error without user")),
     );
-    const secondSession = secondError.session as Record<string, unknown>;
-    expect(secondSession.user_id).toBeUndefined();
-    expect(secondSession.user_email).toBeUndefined();
-    expect(secondSession.user_name).toBeUndefined();
+    const secondTags = secondError.session as Record<string, unknown>;
+    expect(secondTags.user_id).toBeUndefined();
   });
 });
 

@@ -7,15 +7,48 @@ import { safeUrl, globMatch, scrubUrl } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
-let buffer: RingBuffer<Breadcrumb> = new RingBuffer<Breadcrumb>(100);
+// Two parallel ring buffers, split at write time:
+//
+// - sessionBuffer holds *everything* up to 100 entries. It drains on every
+//   events flush and represents the full user-activity stream the server
+//   needs to reconstruct journeys.
+// - errorBuffer holds *only debug-relevant* categories up to 25 entries.
+//   It's snapshotted (not drained) every time an error fires. Pre-filtering
+//   at push time keeps fresh useful context in the buffer even when noisy
+//   UX-derived categories (rage_click, scroll_depth, …) dominate the page.
+//
+// The capacities and allowlist are hardcoded; we don't expose them as
+// config because there are no good knobs for an end-user to pick from.
+const SESSION_BUFFER_CAPACITY = 100;
+const ERROR_BUFFER_CAPACITY = 25;
+// Allowlist (not denylist) so any new SDK-emitted category defaults to
+// "session-only" until it's explicitly proven useful for error context.
+// `addManualBreadcrumb` bypasses this check — host-supplied breadcrumbs
+// are inherently intentional debugging context.
+const ERROR_BUFFER_CATEGORIES: ReadonlySet<string> = new Set([
+  "navigation",
+  "click",
+  "network",
+  "console",
+  "error",
+  "long_task",
+  "visibility",
+]);
+
+let sessionBuffer = new RingBuffer<Breadcrumb>(SESSION_BUFFER_CAPACITY);
+let errorBuffer = new RingBuffer<Breadcrumb>(ERROR_BUFFER_CAPACITY);
 let config: ResolvedConfig["breadcrumbs"];
 let beforeBreadcrumbHook: ((breadcrumb: Breadcrumb) => Breadcrumb | null) | undefined;
 let queryParamsAllowlist: string[] = [];
+let networkBlocklist: string[] = [];
 // Pre-joined selectors so the hot path (every click) doesn't reformat them.
 // `null` means the list is empty — skip the el.closest() check entirely.
 let maskTextSelector: string | null = null;
 let blockElementSelector: string | null = null;
-let collectEndpoint = "";
+// All SDK-internal POST destinations (events + errors). The network
+// breadcrumb collector skips any URL that contains one of these so the
+// SDK's own requests don't show up as breadcrumbs in their own payload.
+let internalEndpoints: string[] = [];
 
 function setPrivacyDom(dom: ResolvedConfig["privacy"]["dom"]): void {
   maskTextSelector = dom.maskText.length ? dom.maskText.join(", ") : null;
@@ -73,8 +106,9 @@ function ensureNavigationHook(): void {
 
 export function initBreadcrumbs(
   resolved: ResolvedConfig["breadcrumbs"],
-  endpoint: string,
+  internalEndpointsForFilter: string[],
   privacyQueryParamsAllowlist: string[] = [],
+  privacyNetworkBlocklist: string[] = [],
   privacyDom: ResolvedConfig["privacy"]["dom"] = { maskText: [], blockElement: [] },
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null,
 ): void {
@@ -83,9 +117,11 @@ export function initBreadcrumbs(
   config = resolved;
   beforeBreadcrumbHook = beforeBreadcrumb;
   queryParamsAllowlist = privacyQueryParamsAllowlist;
+  networkBlocklist = privacyNetworkBlocklist;
   setPrivacyDom(privacyDom);
-  collectEndpoint = endpoint;
-  buffer = new RingBuffer<Breadcrumb>(config.capacity);
+  internalEndpoints = internalEndpointsForFilter;
+  sessionBuffer = new RingBuffer<Breadcrumb>(SESSION_BUFFER_CAPACITY);
+  errorBuffer = new RingBuffer<Breadcrumb>(ERROR_BUFFER_CAPACITY);
 
   // Register all collectors unconditionally — each handler reads the
   // module-level `config` and short-circuits when its category is off.
@@ -111,33 +147,33 @@ export function initBreadcrumbs(
   initConsole();
   initLongTasks();
   initScrollDepth();
-  initFormAbandonment();
-  initUserTiming();
   initVisibility();
   initTabLifecycle();
 }
 
 export function addBreadcrumb(breadcrumb: Breadcrumb): void {
+  const result = applyBeforeBreadcrumb(breadcrumb);
+  if (!result) return;
+  sessionBuffer.push(result);
+  if (ERROR_BUFFER_CATEGORIES.has(result.category)) {
+    errorBuffer.push(result);
+  }
+}
+
+// beforeBreadcrumb decides whether the breadcrumb enters either buffer.
+// A null return drops it from every downstream payload (error and periodic
+// events flush alike). A thrown callback shouldn't break the SDK — treat
+// it as passthrough rather than drop, so a bug in user code doesn't
+// silently swallow breadcrumbs.
+function applyBeforeBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   // Hot path: every network request, click, console call. Skip the hook
   // entirely when none is configured, rather than running it as identity.
-  if (!beforeBreadcrumbHook) {
-    buffer.push(breadcrumb);
-    return;
-  }
-
-  // beforeBreadcrumb decides whether the breadcrumb enters the buffer.
-  // A null return drops it from every downstream payload (error and
-  // periodic events flush alike). A thrown callback shouldn't break the
-  // SDK — treat it as passthrough rather than drop, so a bug in user code
-  // doesn't silently swallow breadcrumbs.
-  let result: Breadcrumb | null;
+  if (!beforeBreadcrumbHook) return breadcrumb;
   try {
-    result = beforeBreadcrumbHook(breadcrumb);
+    return beforeBreadcrumbHook(breadcrumb);
   } catch {
-    result = breadcrumb;
+    return breadcrumb;
   }
-  if (!result) return;
-  buffer.push(result);
 }
 
 export function addManualBreadcrumb(input: {
@@ -145,24 +181,44 @@ export function addManualBreadcrumb(input: {
   message: string;
   data?: Record<string, unknown>;
 }): void {
-  addBreadcrumb({
+  // Host-supplied breadcrumbs bypass the error-buffer allowlist — the host
+  // called addBreadcrumb() intentionally for debugging, so the breadcrumb
+  // belongs in error context regardless of its category name.
+  const result = applyBeforeBreadcrumb({
     timestamp: Date.now(),
     category: input.category,
     message: input.message,
     data: input.data,
   });
+  if (!result) return;
+  sessionBuffer.push(result);
+  errorBuffer.push(result);
 }
 
+/** Snapshot of the *session* buffer — every breadcrumb that's been pushed
+ * and not yet drained, including UX-derived categories. This is what tests
+ * inspect and what would feed any future "session journey" view. */
 export function getSnapshot(): Breadcrumb[] {
-  return buffer.snapshot();
+  return sessionBuffer.snapshot();
+}
+
+/** Snapshot of the error-context buffer — the last 25 debug-relevant
+ * breadcrumbs. Pre-filtered at push time; consumers (errors.ts) don't
+ * need to slice or strip categories. */
+export function getErrorBreadcrumbs(): Breadcrumb[] {
+  return errorBuffer.snapshot();
 }
 
 export function drainBreadcrumbs(): Breadcrumb[] {
-  return buffer.drain();
+  // Drain only the session buffer — the error buffer keeps its contents
+  // across flushes so a later error still sees context from before the
+  // most recent events flush.
+  return sessionBuffer.drain();
 }
 
 export function clearBreadcrumbs(): void {
-  buffer.clear();
+  sessionBuffer.clear();
+  errorBuffer.clear();
 }
 
 // --- Click tracking ---
@@ -639,13 +695,11 @@ function isBlocklisted(url: string): boolean {
   const parsed = safeUrl(url);
   if (!parsed) return false;
   const hostPath = parsed.host + parsed.pathname;
-  return config.networkBlocklist.some((pattern: string) =>
-    globMatch(pattern, hostPath),
-  );
+  return networkBlocklist.some((pattern) => globMatch(pattern, hostPath));
 }
 
 function isCollectEndpoint(url: string): boolean {
-  return url.includes(collectEndpoint);
+  return internalEndpoints.some((e) => url.includes(e));
 }
 
 async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
@@ -880,99 +934,6 @@ function initScrollDepth(): void {
   );
 }
 
-// --- Form abandonment tracking ---
-
-function initFormAbandonment(): void {
-  // A form counts as "interacted" only when the user actually types into it.
-  // Focusing an input (tabbing through the page, clicking into a search box
-  // to paste, etc.) isn't enough — users do that constantly on apps with a
-  // global search/filter bar without intending to fill a form. We also skip
-  // GET forms, which are almost always filters / search (Rails-style
-  // shareable URLs) rather than real data-entry. The combination cuts the
-  // false-positive rate to near zero on content-heavy dashboards.
-  const interactedForms = new Map<HTMLFormElement, number>();
-  const submittedForms = new WeakSet<HTMLFormElement>();
-
-  const inputHandler = (e: Event) => {
-    if (!config.formAbandonment) return;
-    const target = e.target as Element;
-    if (!(target instanceof HTMLInputElement
-      || target instanceof HTMLTextAreaElement
-      || target instanceof HTMLSelectElement)) return;
-    const form = target.closest("form");
-    if (!form) return;
-    // Skip GET forms — typically search / filter, not abandonment candidates.
-    const method = (form.method || "get").toLowerCase();
-    if (method === "get") return;
-    if (!interactedForms.has(form)) interactedForms.set(form, Date.now());
-  };
-  document.addEventListener("input", inputHandler, { capture: true, passive: true });
-
-  const submitHandler = (e: SubmitEvent) => {
-    if (!config.formAbandonment) return;
-    const form = e.target as HTMLFormElement;
-    submittedForms.add(form);
-    interactedForms.delete(form);
-  };
-  document.addEventListener("submit", submitHandler, { capture: true, passive: true });
-
-  // On navigation, emit abandonment for forms interacted with but not submitted
-  const emitAbandonments = () => {
-    if (!config.formAbandonment) return;
-    for (const [form, interactionTime] of interactedForms) {
-      if (submittedForms.has(form)) continue;
-      const selector = elementSelector(form);
-      addBreadcrumb({
-        timestamp: interactionTime,
-        category: "form_abandonment",
-        message: selector,
-        data: { action: form.getAttribute("action") || undefined, method: form.method || "get" },
-      });
-    }
-    interactedForms.clear();
-  };
-
-  onBeforeNavigation(emitAbandonments);
-  const beforeUnloadHandler = () => emitAbandonments();
-  window.addEventListener("beforeunload", beforeUnloadHandler);
-
-  cleanups.push(
-    () => document.removeEventListener("input", inputHandler, { capture: true }),
-    () => document.removeEventListener("submit", submitHandler, { capture: true }),
-    () => window.removeEventListener("beforeunload", beforeUnloadHandler),
-  );
-}
-
-// --- User timing tracking ---
-
-function initUserTiming(): void {
-  if (typeof PerformanceObserver === "undefined") return;
-
-  try {
-    const observer = new PerformanceObserver((list) => {
-      if (!config.userTiming) return;
-      for (const entry of list.getEntries()) {
-        const isMeasure = entry.entryType === "measure";
-        addBreadcrumb({
-          timestamp: Math.round(performance.timeOrigin + entry.startTime),
-          category: "user_timing",
-          message: isMeasure
-            ? `${entry.name} (${Math.round(entry.duration)}ms)`
-            : entry.name,
-          data: {
-            type: entry.entryType,
-            duration: isMeasure ? Math.round(entry.duration) : undefined,
-          },
-        });
-      }
-    });
-    observer.observe({ entryTypes: ["mark", "measure"] });
-    cleanups.push(() => observer.disconnect());
-  } catch {
-    // mark/measure observation not supported
-  }
-}
-
 // --- Visibility tracking ---
 
 function initVisibility(): void {
@@ -1029,6 +990,7 @@ export function destroyBreadcrumbs(): void {
   postNavListeners = [];
   resourceTimings.clear();
   recentClicks = [];
-  buffer = new RingBuffer<Breadcrumb>(100);
+  sessionBuffer = new RingBuffer<Breadcrumb>(SESSION_BUFFER_CAPACITY);
+  errorBuffer = new RingBuffer<Breadcrumb>(ERROR_BUFFER_CAPACITY);
   beforeBreadcrumbHook = undefined;
 }

@@ -74,25 +74,19 @@ interface BrowserConfig {
     sampleRate?: number;           // 0..1, default: 1.0
   };
   breadcrumbs?: {
-    enabled?: boolean;             // default: true
     network?: boolean;             // default: true — fetch/XHR breadcrumbs
-    networkBlocklist?: string[];   // glob URL patterns to suppress
     console?: boolean;             // default: true — patches warn/error
     clicks?: boolean;              // default: true
     longTasks?: boolean;           // default: true
     scrollDepth?: boolean;         // default: true
-    formAbandonment?: boolean;     // default: true
-    userTiming?: boolean;          // default: false — opt-in (chatty)
     capacity?: number;             // ring buffer size, default: 100
-  };
-  webVitals?: {
-    enabled?: boolean;             // default: true
   };
   session?: {
     inactivityTimeoutMs?: number;  // default: 1_800_000 (30 minutes)
   };
   privacy?: {
     queryParamsAllowlist?: string[];  // glob list, default: [] (strip all)
+    networkBlocklist?: string[];      // glob URL patterns — request never recorded
     dom?: {
       maskText?: string[];         // CSS selectors — text content masked
       blockElement?: string[];     // CSS selectors — element + subtree dropped
@@ -149,10 +143,10 @@ function destroy(): void;
 
 Defaults are tuned to collect by default and lean on the privacy hooks to scope what ships:
 
-- All collectors enabled (`errors`, `breadcrumbs`, `webVitals`).
-- `errors.sampleRate: 1.0`.
+- `errors.sampleRate: 1.0`; `errors.enabled: true`.
+- Breadcrumbs and web vitals run unconditionally — there is no top-level off switch (use `destroy()` to stop the SDK, or `breadcrumbs.network: false` / per-category toggles to narrow what's collected).
 - `privacy.queryParamsAllowlist: []` — strip every query param from captured URLs (network breadcrumbs, navigation breadcrumbs, `page_url`, `referrer`, vital `page_url`). OAuth-style query-shaped fragments are scrubbed by the same rule; hash routes and opaque anchors are preserved verbatim.
-- `breadcrumbs.userTiming: false` — opt-in because `performance.mark/measure` instrumentation can flood the ring buffer.
+- `privacy.networkBlocklist: []` — glob URL patterns to suppress entirely from network breadcrumbs (host + path match).
 - `session.inactivityTimeoutMs: 1_800_000` (30 minutes).
 
 Per-category breadcrumb toggles (`breadcrumbs.network`, `clicks`, `console`, etc.) are read by each handler at fire time, so the cost of an "off" toggle is one branch per event. They aren't intended to flip at runtime — they're locked at init — but the indirection keeps the call sites uniform and would let a future runtime override path slot in without restructuring the handlers.
@@ -202,7 +196,7 @@ Text capped at 50 characters. Also checks `title`, `aria-label`, `alt`, `placeho
 
 **Document load breadcrumb.** On init, a `network` breadcrumb for the initial document load using `PerformanceNavigationTiming`, with the same timing breakdown as other network breadcrumbs (dns, connect, ssl, ttfb, download) and `initiator: "document"`. Timestamp uses navigation start time so it sorts first.
 
-**Network breadcrumbs.** Patch `XMLHttpRequest` and `fetch`. Record: method, URL (scrubbed through `privacy.queryParamsAllowlist` — see *Privacy and PII* for fragment behavior), status code, duration, initiator type (`"fetch"`, `"xhr"`, or `"document"`). Default allowlist is empty, so all query params are stripped to avoid PII. When configured, only matching keys are preserved (entries are glob-matched, so `utm_*` keeps every UTM param). Skips requests to the AppSignal `/ingest/browser` endpoint and any URL matching `breadcrumbs.networkBlocklist` — matched against host + path using glob syntax (`*` matches one segment, `**` across segments). Blocked URLs never leave the browser.
+**Network breadcrumbs.** Patch `XMLHttpRequest` and `fetch`. Record: method, URL (scrubbed through `privacy.queryParamsAllowlist` — see *Privacy and PII* for fragment behavior), status code, duration, initiator type (`"fetch"`, `"xhr"`, or `"document"`). Default allowlist is empty, so all query params are stripped to avoid PII. When configured, only matching keys are preserved (entries are glob-matched, so `utm_*` keeps every UTM param). Skips requests to the AppSignal `/ingest/browser` endpoint and any URL matching `privacy.networkBlocklist` — matched against host + path using glob syntax (`*` matches one segment, `**` across segments). Blocked URLs never leave the browser.
 
 **Resource timing waterfall.** Each network breadcrumb is enriched with a `resource_timing` sub-object containing the full `PerformanceResourceTiming` waterfall from the browser, when available. The sub-object is stored in `data.resource_timing` and has this shape:
 
@@ -256,10 +250,6 @@ Example network breadcrumb with resource timing:
 **Long task breadcrumbs.** Tries Long Animation Frame API (`long-animation-frame`, Chrome 123+) for script attribution (source URL, function name, invoker). Falls back to the basic `longtask` observer (no attribution). Records any main thread block >50ms: timestamp, duration (ms), and when available `source_url`, `source_function`, `invoker`. Long tasks cause unresponsive UI; seeing one right before an error is a strong signal.
 
 **Scroll depth breadcrumbs.** Track max scroll percentage per page. Throttled scroll listener (200ms) updates the high-water mark. Flushed as `scroll_depth` on navigation (pushState, replaceState, popstate) or tab hidden. Data: `{ percent: 72, url: "..." }`. Tells you which pages users read vs. bounce.
-
-**Form abandonment breadcrumbs.** Detect users who start a form but never submit. Track `input` events on form fields (input, textarea, select) — a keystroke, not just focus — to mark a form as interacted; `submit` marks it submitted. `GET` forms are skipped because they're almost always search / filter UIs producing shareable URLs, not data-entry intent. On navigation or `beforeunload`, emit a `form_abandonment` breadcrumb for each interacted-but-not-submitted form. Data: `{ action: "...", method: "post" }`.
-
-**User timing breadcrumbs.** Observe `performance.mark()` and `performance.measure()` via `PerformanceObserver`. These are developer-instrumented timings the app already considers worth measuring. Each mark emits a `user_timing` breadcrumb with the mark name. Each measure emits one with name and duration: `"dashboard-load (340ms)"`. Data: `{ type: "mark"|"measure", duration?: number }`. Bridges "a network request happened" and "the meaningful operation completed" in the timeline.
 
 **Visibility change breadcrumbs.** On `visibilitychange`, record whether the tab became hidden or visible. Useful for detecting if the user switched away mid-flow before an error.
 
@@ -353,7 +343,7 @@ When `tracePropagationTargets` is configured, the plugin injects a [W3C `tracepa
 
 Header format: `00-{traceId}-{spanId}-01` where `traceId` is a random 32-hex-char string and `spanId` a random 16-hex-char string. Backend APM (AppSignal, OpenTelemetry, any W3C-compatible tracer) reads the header and continues the trace, so the frontend click and backend handler appear as one connected trace.
 
-Only requests matching `tracePropagationTargets` get the header. Prevents leaking trace context to third-party APIs. Glob syntax (same as `network_blocklist`).
+Only requests matching `tracePropagationTargets` get the header. Prevents leaking trace context to third-party APIs. Glob syntax (same as `privacy.networkBlocklist`).
 
 **Concurrent same-URL requests** (e.g. a polling component firing two `GET`s before the first returns) each get their own `traceId`. Trace IDs are queued FIFO per URL; the network breadcrumb pipeline shifts them in the order they were recorded, so each breadcrumb's `data.trace_id` matches the request that produced it. Without this, two requests to the same URL would clobber each other's ID and the second breadcrumb would either inherit the first's trace or have none.
 
@@ -372,19 +362,22 @@ The SDK has no built-in consent state. If your app needs a GDPR-style consent ga
 
 ### Privacy and PII
 
-PII controls live under a single cross-cutting `privacy.*` namespace. Each knob lists the subsystems it applies to; channel-specific knobs (`breadcrumbs.networkBlocklist`) stay in their feature namespace.
+PII controls live under a single cross-cutting `privacy.*` namespace.
 
 ```ts
 privacy: {
-  query_params_allowlist: string[]   // URL scrubbing — see below
+  queryParamsAllowlist: string[]   // URL scrubbing — see below
+  networkBlocklist: string[]       // glob URL patterns — request never recorded
   dom: {
-    mask_text: string[]              // CSS selectors — text content masked
-    block_element: string[]          // CSS selectors — element + subtree dropped
+    maskText: string[]             // CSS selectors — text content masked
+    blockElement: string[]         // CSS selectors — element + subtree dropped
   }
 }
 ```
 
 **`privacy.queryParamsAllowlist`** — applied wherever a URL is captured: network breadcrumb URLs, SPA navigation breadcrumbs (`data.from`, `data.to`), `session_context.page_url`, `session_context.referrer`, and `web_vitals.page_url`. Entries are glob-matched (`utm_*` keeps every UTM param). Default empty: every query param is stripped. Fragments are handled by a heuristic: hash routes (`#/checkout`) and opaque anchors (`#section-1`) are preserved verbatim; query-like fragments (`#access_token=…&token_type=bearer`) are scrubbed by the same allowlist. This defends against OAuth implicit-flow leaks without breaking apps that use hash-based routing.
+
+**`privacy.networkBlocklist`** — glob URL patterns that should never be recorded. Matched against host + pathname (`*` matches one segment, `**` across segments). Default empty. Today this suppresses the network breadcrumb entirely; when replay returns it will also gate replay's network capture. The request itself still happens — only its capture in SDK data is suppressed.
 
 **`privacy.dom.maskText`** — CSS selectors whose **text content** is masked everywhere the SDK captures from the DOM. Session replay masks text to `*` (via rrweb's `maskTextSelector`). Click breadcrumbs replace the captured text with `"[masked]"` when the click target matches or descends from a listed selector — the breadcrumb still fires (you see *that* a click happened) but no PII text rides along.
 
@@ -394,7 +387,6 @@ Both DOM selectors use `el.closest()` semantics, so masking or blocking a wrappe
 
 Other defaults that round out the privacy posture:
 
-- URLs matching `breadcrumbs.networkBlocklist` never recorded (glob syntax).
 - **HTTP bodies (request and response) are never captured.** No config exposes them.
 - Console messages truncated at 200 chars.
 - User fields (id, email, name) never collected unless `setUser()` is called; cleared via `clearUser()`.

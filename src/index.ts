@@ -5,7 +5,7 @@ import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcru
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
 
-import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
+import { initTransport, sendEvents, sendBeaconEvents, sendVitals, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
@@ -20,7 +20,11 @@ let initialized = false;
 // Lifecycle subscription teardowns
 let lifecycleUnsubscribers: (() => void)[] = [];
 
-const COLLECT_PATH = "/ingest/browser";
+// Internal SDK paths the network-breadcrumb collector must ignore so the
+// SDK's own POSTs don't end up in their own breadcrumb trail. Transport
+// owns the URL templates per kind; this list only exists for self-filtering.
+const EVENTS_PATH = "/ingest/browser";
+const ERROR_PATH = "/collect";
 const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
@@ -30,7 +34,7 @@ export function init(config: BrowserConfig): void {
   resolved = resolveConfig(config);
 
   const endpoint = resolveEndpoint(config);
-  initTransport(endpoint + COLLECT_PATH, config.key);
+  initTransport(endpoint, config.key);
   startCollection(endpoint);
 }
 
@@ -113,8 +117,9 @@ function startCollection(endpoint: string): void {
   initNetworkHook();
   initBreadcrumbs(
     cfg.breadcrumbs,
-    endpoint + COLLECT_PATH,
+    [endpoint + EVENTS_PATH, endpoint + ERROR_PATH],
     cfg.privacy.queryParamsAllowlist,
+    cfg.privacy.networkBlocklist,
     cfg.privacy.dom,
     clientConfig?.beforeBreadcrumb,
   );
@@ -176,22 +181,26 @@ function stopCollection(): void {
 function flushEvents(useBeacon: boolean): void {
   if (!initialized) return;
 
+  // Two POSTs per flush — one for breadcrumbs (legacy /ingest/browser),
+  // one for vitals (/metrics/webvitals). Each kind has its own URL and
+  // content type; bundling them was awkward across two different ingest
+  // routes. Same cadence as before, no special lifecycle batching.
   const breadcrumbs = drainBreadcrumbs();
-  const vitals = drainVitals();
-
-  if (breadcrumbs.length === 0 && vitals.length === 0) return;
-
-  const payload: EventPayload = {
-    type: "events",
-    session: getSessionContext(),
-    breadcrumbs,
-    vitals,
-    app_version: clientConfig?.appVersion,
-  };
-
-  if (useBeacon) {
-    sendBeaconEvents(payload);
-  } else {
-    sendEvents(payload);
+  if (breadcrumbs.length > 0) {
+    const payload: EventPayload = {
+      type: "events",
+      session: getSessionContext(),
+      breadcrumbs,
+      app_version: clientConfig?.appVersion,
+    };
+    if (useBeacon) {
+      sendBeaconEvents(payload);
+    } else {
+      sendEvents(payload);
+    }
   }
+
+  // sendVitals no-ops on empty and picks beacon vs fetch from
+  // document.visibilityState — useBeacon doesn't apply here.
+  sendVitals(drainVitals());
 }

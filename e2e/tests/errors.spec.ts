@@ -1,8 +1,8 @@
 // End-to-end error capture. Two paths through errors.ts:initErrors —
 // window.onerror (synchronous throws that escape the call stack) and
 // unhandledrejection (promise rejects with no .catch). Both must produce
-// a type:"error" payload at the ingest endpoint, with the original
-// message intact and a session_id attached.
+// a FrontendTransaction POST to /collect with the original message
+// intact and a session_id attached.
 
 import { test, expect } from "../fixtures.js";
 import { reset, ingestErrors, pollFor } from "../helpers.js";
@@ -22,8 +22,9 @@ test("uncaught throw is captured via window.onerror", async ({ page, request }) 
   );
 
   expect(err).toMatchObject({
-    type: "error",
     message: expect.stringContaining("e2e thrown error"),
+    // `session` here is the test-helper alias for the FrontendTransaction's
+    // `tags` map (see ingestErrors). session_id rides on tags.
     session: expect.objectContaining({ session_id: expect.any(String) }),
   });
 });
@@ -44,7 +45,6 @@ test("unhandled promise rejection is captured via unhandledrejection", async ({ 
   );
 
   expect(err).toMatchObject({
-    type: "error",
     message: expect.stringContaining(marker),
     error_class: "Error",
   });

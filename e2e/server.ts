@@ -82,7 +82,17 @@ const server = createServer(async (req, res) => {
   }
 
   // ── SDK ingest (mock) ──────────────────────────────────────────────────
-  if (pathname === "/ingest/browser" && req.method === "POST") {
+  // Three routes the v1 SDK targets:
+  //  - /ingest/browser  (events/breadcrumbs, replay when it returns)
+  //  - /collect         (errors as FrontendTransaction)
+  //  - /metrics/webvitals (vitals array)
+  // All three captured under kind="ingest"; helpers disambiguate by path.
+  if (
+    req.method === "POST" &&
+    (pathname === "/ingest/browser" ||
+      pathname === "/collect" ||
+      pathname === "/metrics/webvitals")
+  ) {
     const body = await readBody(req);
     captured.push({
       kind: "ingest",

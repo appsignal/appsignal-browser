@@ -67,26 +67,60 @@ export async function flush(page: Page): Promise<void> {
   });
 }
 
-function jsonBodiesOfType(items: Captured[], type: string): Array<Record<string, unknown>> {
+function jsonBodiesAtPath(items: Captured[], path: string): Array<Record<string, unknown>> {
   return items
-    .filter((i): i is CapturedIngest => i.kind === "ingest")
+    .filter((i): i is CapturedIngest => i.kind === "ingest" && i.path === path)
     .map((i) => {
       try { return JSON.parse(i.body) as Record<string, unknown>; } catch { return null; }
     })
-    .filter((b): b is Record<string, unknown> => b !== null && b.type === type);
+    .filter((b): b is Record<string, unknown> => b !== null);
 }
 
 export function ingestEvents(items: Captured[]): Array<Record<string, unknown>> {
-  return jsonBodiesOfType(items, "events");
+  // /ingest/browser carries events + (when replay returns) replay chunks.
+  // Filter by the discriminator inside the body to keep events isolated.
+  return jsonBodiesAtPath(items, "/ingest/browser").filter((b) => b.type === "events");
 }
 
 /** Kept for the skipped replay/error-replay specs. */
 export function ingestReplays(items: Captured[]): Array<Record<string, unknown>> {
-  return jsonBodiesOfType(items, "replay");
+  return jsonBodiesAtPath(items, "/ingest/browser").filter((b) => b.type === "replay");
 }
 
+/** Errors POST to /collect as FrontendTransaction objects. Flatten the
+ * wire shape into a test-friendly view so existing assertions keep working:
+ *   - top-level `message`     ← `error.message`
+ *   - top-level `error_class` ← `error.name`
+ *   - top-level `stack`       ← `error.backtrace.join("\n")`
+ *   - top-level `session`     ← `tags` (carries session_id / tab_id /
+ *                                anonymous_id / optional user_id; we add the
+ *                                user_email / user_name shims when present
+ *                                on tags too)
+ *   - top-level `breadcrumbs` ← `breadcrumbs` (passes through unchanged) */
 export function ingestErrors(items: Captured[]): Array<Record<string, unknown>> {
-  return jsonBodiesOfType(items, "error");
+  return jsonBodiesAtPath(items, "/collect").map((b) => {
+    const err = (b.error ?? {}) as Record<string, unknown>;
+    const tags = (b.tags ?? {}) as Record<string, unknown>;
+    return {
+      ...b,
+      message: err.message,
+      error_class: err.name,
+      stack: Array.isArray(err.backtrace) ? (err.backtrace as string[]).join("\n") : undefined,
+      session: tags,
+    };
+  });
+}
+
+export function ingestVitals(items: Captured[]): Array<Record<string, unknown>> {
+  // Vitals POST as a bare JSON array; flatten so callers get a flat list.
+  return items
+    .filter((i): i is CapturedIngest => i.kind === "ingest" && i.path === "/metrics/webvitals")
+    .flatMap((i) => {
+      try {
+        const arr = JSON.parse(i.body) as unknown;
+        return Array.isArray(arr) ? (arr as Array<Record<string, unknown>>) : [];
+      } catch { return []; }
+    });
 }
 
 export function networkBreadcrumbs(items: Captured[]): Array<Record<string, unknown>> {

@@ -23,14 +23,16 @@ vi.mock("web-vitals/attribution", () => {
 
 import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
 
+// metric.id values match how the `web-vitals` library reports them — the same
+// id is reused across `reportAllChanges: true` updates for one observation.
 function fakeLCP(value: number) {
-  return { name: "LCP", value, rating: "good", attribution: { element: "h1" } };
+  return { id: "v3-lcp-1", name: "LCP", value, rating: "good", attribution: { element: "h1" } };
 }
 function fakeCLS(value: number) {
-  return { name: "CLS", value, rating: "good", attribution: { largestShiftTarget: "div" } };
+  return { id: "v3-cls-1", name: "CLS", value, rating: "good", attribution: { largestShiftTarget: "div" } };
 }
 function fakeINP(value: number) {
-  return { name: "INP", value, rating: "good", attribution: { interactionTarget: "button", interactionType: "pointer" } };
+  return { id: "v3-inp-1", name: "INP", value, rating: "good", attribution: { interactionTarget: "button", interactionType: "pointer" } };
 }
 
 function setLocation(href: string) {
@@ -70,7 +72,7 @@ describe("vitals", () => {
       handlers.lcp.cb(fakeLCP(1200));
       handlers.lcp.cb(fakeLCP(2500));
       handlers.lcp.cb(fakeLCP(3000));
-      const lcps = drainVitals().filter(v => v.name === "web.vital.lcp");
+      const lcps = drainVitals().filter(v => v.name === "LCP");
       expect(lcps).toHaveLength(1);
       expect(lcps[0].value).toBe(3000);
     });
@@ -82,7 +84,7 @@ describe("vitals", () => {
       setLocation("https://example.com/b");
       handlers.lcp.cb(fakeLCP(2500));
 
-      const lcps = drainVitals().filter(v => v.name === "web.vital.lcp");
+      const lcps = drainVitals().filter(v => v.name === "LCP");
       expect(lcps).toHaveLength(2);
       const byUrl = new Map(lcps.map(v => [v.page_url, v.value]));
       expect(byUrl.get("https://example.com/a")).toBe(1500);
@@ -97,8 +99,8 @@ describe("vitals", () => {
       handlers.inp.cb(fakeINP(820));
 
       const vitals = drainVitals();
-      const cls = vitals.filter(v => v.name === "web.vital.cls");
-      const inp = vitals.filter(v => v.name === "web.vital.inp");
+      const cls = vitals.filter(v => v.name === "CLS");
+      const inp = vitals.filter(v => v.name === "INP");
       expect(cls).toHaveLength(1);
       expect(cls[0].value).toBe(0.35);
       expect(inp).toHaveLength(1);

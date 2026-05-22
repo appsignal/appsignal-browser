@@ -62,6 +62,9 @@ describe("SDK integration", () => {
     const testCrumb = body.breadcrumbs.find((b: { category: string }) => b.category === "test");
     expect(testCrumb).toBeDefined();
     expect(testCrumb.message).toBe("hello");
+    // Vitals POST to /metrics/webvitals on their own; they should not
+    // ride inside the events payload.
+    expect(body.vitals).toBeUndefined();
   });
 
   it("does not send before init", () => {
@@ -137,14 +140,13 @@ describe("SDK integration", () => {
 
     captureError(new Error("manual error"));
 
-    const errorPayloads = sentPayloads.filter(p => {
-      try { return JSON.parse(p.body).type === "error"; } catch { return false; }
-    });
+    // Errors POST to /collect; events go to /ingest/browser.
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/collect"));
     expect(errorPayloads.length).toBeGreaterThan(0);
 
     const body = JSON.parse(errorPayloads[0].body);
-    expect(body.message).toBe("manual error");
-    expect(body.session.session_id).toBeTruthy();
+    expect(body.error.message).toBe("manual error");
+    expect(body.tags.session_id).toBeTruthy();
   });
 
   it("endSession rotates session_id and clears user between flushes", () => {
@@ -186,28 +188,31 @@ describe("SDK integration", () => {
     flush();
 
     const eventPayloads = sentPayloads
+      .filter(p => p.url.includes("/ingest/browser"))
       .map(p => { try { return JSON.parse(p.body) } catch { return null } })
       .filter(b => b?.type === "events");
     const errorPayloads = sentPayloads
+      .filter(p => p.url.includes("/collect"))
       .map(p => { try { return JSON.parse(p.body) } catch { return null } })
-      .filter(b => b?.type === "error");
+      .filter(b => !!b);
 
     expect(eventPayloads.length).toBeGreaterThan(0);
     expect(errorPayloads.length).toBeGreaterThan(0);
 
+    // Events carry the full SessionContext; errors carry a flat tags map.
     const eventTab = eventPayloads[0].session.tab_id;
-    const errorTab = errorPayloads[0].session.tab_id;
+    const errorTab = errorPayloads[0].tags.tab_id;
     expect(eventTab).toBeTruthy();
     expect(eventTab).toBe(errorTab);
     expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
   });
 
   it("dropped noise errors leave a later real error's breadcrumb trail clean", () => {
-    // The user-visible payoff of early-pipeline filtering. Fire 8 noisy
-    // ResizeObserver errors (beforeError drops them) then a real one. The
-    // real error's payload.breadcrumbs[] must carry zero ResizeObserver
-    // error breadcrumbs — the early-pipeline drop has to skip the
-    // breadcrumb add, not just the send.
+    // The user-visible payoff of early-pipeline filtering. Errors no longer
+    // bundle breadcrumbs themselves (FrontendTransaction is minimal); the
+    // breadcrumb trail flows separately via the events stream. The drop has
+    // to skip the breadcrumb add, not just the send — otherwise the next
+    // events flush carries ResizeObserver noise.
     init({
       key: "test-key",
       beforeError: (e) => /ResizeObserver/.test(e.message) ? null : e,
@@ -217,17 +222,23 @@ describe("SDK integration", () => {
       captureError(new Error(`ResizeObserver loop limit exceeded #${i}`));
     }
     captureError(new Error("real diagnostic error after noise"));
+    flush();
 
     const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/collect"))
       .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
-      .filter((b) => b?.type === "error");
+      .filter((b) => !!b);
 
     expect(errorPayloads).toHaveLength(1);
-    expect(errorPayloads[0].message).toBe("real diagnostic error after noise");
+    expect(errorPayloads[0].error.message).toBe("real diagnostic error after noise");
 
-    const noisyErrorCrumbs = (
-      errorPayloads[0].breadcrumbs as Array<{ category: string; message: string }>
-    ).filter((b) => b.category === "error" && b.message.includes("ResizeObserver"));
+    const eventBodies = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events");
+    const noisyErrorCrumbs = eventBodies
+      .flatMap((b) => (b.breadcrumbs ?? []) as Array<{ category: string; message: string }>)
+      .filter((b) => b.category === "error" && b.message.includes("ResizeObserver"));
     expect(noisyErrorCrumbs).toHaveLength(0);
   });
 

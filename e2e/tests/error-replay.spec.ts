@@ -13,17 +13,16 @@
 
 import { test, expect } from "../fixtures.js";
 import { reset, setConfig, captured, ingestReplays, pollFor } from "../helpers.js";
-import { defaultConfig } from "../default-config.js";
 
 test.beforeEach(async ({ request }) => {
   await reset(request);
 });
 
 test.skip("error on an unsampled session ships a replay chunk via the error window", async ({ page, request }) => {
-  const config = defaultConfig();
-  (config.replay as Record<string, unknown>).sample_rate = 0;
-  (config.replay as Record<string, unknown>).error_replay = true;
-  await setConfig(request, config);
+  // Narrows replay sampling so only the error-window path can produce a
+  // chunk. Exact shape is a placeholder — when replay returns, this gets
+  // rewritten against whatever config-delivery API v2 ships with.
+  await setConfig(request, { replay: { sample_rate: 0, error_replay: true } });
 
   await page.goto("/");
 

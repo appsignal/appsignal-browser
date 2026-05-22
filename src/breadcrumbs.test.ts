@@ -4,6 +4,7 @@ import {
   addBreadcrumb,
   addManualBreadcrumb,
   getSnapshot,
+  getErrorBreadcrumbs,
   drainBreadcrumbs,
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
@@ -19,21 +20,16 @@ vi.mock("./tracing.js", () => ({
 }));
 
 const defaultBreadcrumbConfig: ResolvedConfig["breadcrumbs"] = {
-  enabled: true,
   network: false,
-  networkBlocklist: [],
   console: false,
   clicks: false,
   longTasks: false,
   scrollDepth: false,
-  formAbandonment: false,
-  userTiming: false,
-  capacity: 100,
 };
 
 describe("breadcrumbs", () => {
   beforeEach(() => {
-    initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
     clearBreadcrumbs();
   });
 
@@ -61,20 +57,16 @@ describe("breadcrumbs", () => {
     expect(snapshot[0].timestamp).toBeLessThanOrEqual(after);
   });
 
-  it("respects capacity limit", () => {
-    initBreadcrumbs(
-      { ...defaultBreadcrumbConfig, capacity: 3 },
-      "http://localhost/ingest/browser",
-    );
-
-    for (let i = 0; i < 5; i++) {
+  it("session buffer caps at 100 — oldest entries evicted past that", () => {
+    for (let i = 0; i < 105; i++) {
       addBreadcrumb({ timestamp: i, category: "test", message: `msg ${i}` });
     }
 
     const snapshot = getSnapshot();
-    expect(snapshot).toHaveLength(3);
-    expect(snapshot[0].message).toBe("msg 2");
-    expect(snapshot[2].message).toBe("msg 4");
+    expect(snapshot).toHaveLength(100);
+    // FIFO eviction: first 5 dropped, snapshot starts at msg 5.
+    expect(snapshot[0].message).toBe("msg 5");
+    expect(snapshot[99].message).toBe("msg 104");
   });
 
   it("clearBreadcrumbs empties the buffer", () => {
@@ -102,9 +94,79 @@ describe("breadcrumbs", () => {
     expect(drained[0].message).toBe("a");
     expect(drained[1].message).toBe("b");
 
-    // Buffer is now empty
+    // Session buffer is now empty
     expect(getSnapshot()).toHaveLength(0);
     expect(drainBreadcrumbs()).toHaveLength(0);
+  });
+
+  describe("error-context buffer", () => {
+    it("admits only allowlisted SDK categories", () => {
+      // Allowlist means new SDK-emitted categories default to session-only.
+      // To opt a category in for errors it has to be added to
+      // ERROR_BUFFER_CATEGORIES explicitly — a safer default than denylist.
+      const allowed = [
+        "navigation", "click", "network",
+        "console", "error", "long_task", "visibility",
+      ];
+      for (const category of allowed) {
+        addBreadcrumb({ timestamp: 1, category, message: `${category} crumb` });
+      }
+      expect(getErrorBreadcrumbs()).toHaveLength(allowed.length);
+    });
+
+    it("rejects un-allowlisted SDK categories (rage_click, dead_click, scroll_depth, …)", () => {
+      // These stay in the session stream — UX signals belong in the journey
+      // view, just not in the error payload.
+      const noise = ["rage_click", "dead_click", "error_click", "scroll_depth", "tab"];
+      for (const category of noise) {
+        addBreadcrumb({ timestamp: 1, category, message: `${category} noise` });
+      }
+      expect(getSnapshot()).toHaveLength(noise.length);
+      expect(getErrorBreadcrumbs()).toHaveLength(0);
+    });
+
+    it("addManualBreadcrumb bypasses the allowlist — any host category lands in errors", () => {
+      // Hosts call addBreadcrumb() intentionally for debugging; forcing
+      // them to use one of the SDK's reserved categories would be a
+      // hostile API. Manual breadcrumbs always land in both buffers.
+      addManualBreadcrumb({ category: "checkout-step", message: "entered payment" });
+      addManualBreadcrumb({ category: "feature-flag", message: "v2 ui enabled" });
+
+      const errCrumbs = getErrorBreadcrumbs();
+      expect(errCrumbs).toHaveLength(2);
+      expect(errCrumbs.map((c) => c.category)).toEqual(["checkout-step", "feature-flag"]);
+      // Also in session buffer.
+      expect(getSnapshot()).toHaveLength(2);
+    });
+
+    it("caps at 25 — oldest debug-relevant entries evicted past that", () => {
+      // Interleave useful + UX-noise pushes to confirm that the cap is on
+      // useful entries specifically: 40 clicks land, the noise doesn't
+      // consume budget, and the error buffer keeps the most recent 25.
+      for (let i = 0; i < 40; i++) {
+        addBreadcrumb({ timestamp: i, category: "click", message: `click #${i}` });
+        addBreadcrumb({ timestamp: i, category: "rage_click", message: `rage #${i}` });
+      }
+
+      const errCrumbs = getErrorBreadcrumbs();
+      expect(errCrumbs).toHaveLength(25);
+      expect(errCrumbs[0].message).toBe("click #15");
+      expect(errCrumbs[24].message).toBe("click #39");
+      // None of the rage_click noise leaked through.
+      expect(errCrumbs.every((c) => c.category === "click")).toBe(true);
+    });
+
+    it("survives an events flush — error buffer keeps context drainBreadcrumbs cleared from session", () => {
+      // Important when an error fires shortly after the periodic 30 s flush:
+      // the session buffer is empty, but the error buffer must still carry
+      // context from before the flush.
+      addBreadcrumb({ timestamp: 1, category: "click", message: "before flush" });
+      drainBreadcrumbs();
+
+      expect(getSnapshot()).toHaveLength(0);
+      expect(getErrorBreadcrumbs()).toHaveLength(1);
+      expect(getErrorBreadcrumbs()[0].message).toBe("before flush");
+    });
   });
 
   it("snapshot still works after drain (for error payloads)", () => {
@@ -124,10 +186,11 @@ describe("breadcrumbs", () => {
     function setup(hook: (breadcrumb: Parameters<typeof addBreadcrumb>[0]) => ReturnType<typeof addBreadcrumb> | unknown): void {
       initBreadcrumbs(
         defaultBreadcrumbConfig,
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
+        [],
         [],
         { maskText: [], blockElement: [] },
-        hook as Parameters<typeof initBreadcrumbs>[4],
+        hook as Parameters<typeof initBreadcrumbs>[5],
       );
       clearBreadcrumbs();
       (hook as unknown as { mockClear?: () => void }).mockClear?.();
@@ -192,14 +255,14 @@ describe("breadcrumbs", () => {
     // Start with network disabled
     initBreadcrumbs(
       { ...defaultBreadcrumbConfig, network: false },
-      "http://localhost/ingest/browser",
+      ["http://localhost/ingest/browser"],
     );
 
     // Re-init to enable network — config is locked at init time, so a
     // category change happens via initBreadcrumbs, not a mid-life setter.
     initBreadcrumbs(
       { ...defaultBreadcrumbConfig, network: true },
-      "http://localhost/ingest/browser",
+      ["http://localhost/ingest/browser"],
     );
 
     // The config reference is updated — new network breadcrumbs would
@@ -230,7 +293,7 @@ describe("breadcrumbs", () => {
       initNetworkHook();
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, network: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
 
       await window.fetch("http://example.com/api/missing");
@@ -262,7 +325,7 @@ describe("breadcrumbs", () => {
       initNetworkHook();
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, network: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
 
       await window.fetch("http://example.com/api/sync");
@@ -290,7 +353,7 @@ describe("breadcrumbs", () => {
       initNetworkHook();
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, network: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
 
       await window.fetch("http://example.com/api/down").catch(() => {});
@@ -311,7 +374,7 @@ describe("breadcrumbs", () => {
     // verify the new config wins.)
     initBreadcrumbs(
       { ...defaultBreadcrumbConfig, clicks: true },
-      "http://localhost/ingest/browser",
+      ["http://localhost/ingest/browser"],
     );
 
     const button = document.createElement("button");
@@ -324,7 +387,7 @@ describe("breadcrumbs", () => {
 
     initBreadcrumbs(
       { ...defaultBreadcrumbConfig, clicks: false },
-      "http://localhost/ingest/browser",
+      ["http://localhost/ingest/browser"],
     );
     // initBreadcrumbs calls destroyBreadcrumbs which clears the buffer; start
     // the post-reinit count from the cleared baseline.
@@ -341,7 +404,7 @@ describe("breadcrumbs", () => {
     it("records click events", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
 
       const button = document.createElement("button");
@@ -362,7 +425,7 @@ describe("breadcrumbs", () => {
     it("detects rage clicks synchronously", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
 
       const button = document.createElement("button");
@@ -388,7 +451,7 @@ describe("breadcrumbs", () => {
       // mutations that happen between clicks.
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
 
       const button = document.createElement("button");
@@ -413,7 +476,8 @@ describe("breadcrumbs", () => {
       // click happened on a PII element); the text content does not ride along.
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
+        [],
         [],
         { maskText: [".pii"], blockElement: [] },
       );
@@ -437,7 +501,8 @@ describe("breadcrumbs", () => {
       // semantics where ancestor masking covers the whole subtree.
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
+        [],
         [],
         { maskText: ["[data-pii]"], blockElement: [] },
       );
@@ -462,7 +527,8 @@ describe("breadcrumbs", () => {
       // early-return in the handler).
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
+        [],
         [],
         { maskText: [], blockElement: [".payment-form"] },
       );
@@ -492,7 +558,8 @@ describe("breadcrumbs", () => {
       // re-calling initBreadcrumbs. setPrivacyDom rebuilds the selector cache.
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
+        [],
         [],
         { maskText: [], blockElement: [] },
       );
@@ -508,7 +575,8 @@ describe("breadcrumbs", () => {
 
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, clicks: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
+        [],
         [],
         { maskText: [".pii"], blockElement: [] },
       );
@@ -528,7 +596,7 @@ describe("breadcrumbs", () => {
     it("records console.warn", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, console: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
       console.warn("test warning");
 
@@ -543,7 +611,7 @@ describe("breadcrumbs", () => {
     it("records console.error", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, console: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
       console.error("test error");
 
@@ -557,7 +625,7 @@ describe("breadcrumbs", () => {
     it("truncates long console messages to 200 chars", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, console: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
       console.warn("x".repeat(300));
 
@@ -573,7 +641,7 @@ describe("breadcrumbs", () => {
       vi.useFakeTimers();
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, scrollDepth: true },
-        "http://localhost/ingest/browser",
+        ["http://localhost/ingest/browser"],
       );
       clearBreadcrumbs();
 
@@ -605,164 +673,9 @@ describe("breadcrumbs", () => {
     });
   });
 
-  describe("form abandonment breadcrumbs", () => {
-    it("records form abandonment on navigation away", () => {
-      initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, formAbandonment: true },
-        "http://localhost/ingest/browser",
-      );
-      clearBreadcrumbs();
-
-      const form = document.createElement("form");
-      form.method = "post"; // non-GET — GET forms are treated as search/filter
-      const input = document.createElement("input");
-      input.type = "text";
-      form.appendChild(input);
-      document.body.appendChild(form);
-
-      // A keystroke (input event) marks the form as interacted — focus alone
-      // no longer counts, to filter out tab-through / click-to-paste noise.
-      input.value = "hello";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-
-      // Navigate away without submitting
-      window.dispatchEvent(new PopStateEvent("popstate"));
-
-      const abandonments = getSnapshot().filter((b) => b.category === "form_abandonment");
-      expect(abandonments.length).toBeGreaterThanOrEqual(1);
-      expect(abandonments[0].message).toContain("form");
-
-      document.body.removeChild(form);
-    });
-
-    it("ignores GET forms (search / filter UIs)", () => {
-      initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, formAbandonment: true },
-        "http://localhost/ingest/browser",
-      );
-      clearBreadcrumbs();
-
-      const form = document.createElement("form");
-      // default method is GET
-      const input = document.createElement("input");
-      input.type = "search";
-      form.appendChild(input);
-      document.body.appendChild(form);
-
-      input.value = "query";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      window.dispatchEvent(new PopStateEvent("popstate"));
-
-      const abandonments = getSnapshot().filter((b) => b.category === "form_abandonment");
-      expect(abandonments.length).toBe(0);
-
-      document.body.removeChild(form);
-    });
-
-    it("ignores focus without keystroke (no real interaction)", () => {
-      initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, formAbandonment: true },
-        "http://localhost/ingest/browser",
-      );
-      clearBreadcrumbs();
-
-      const form = document.createElement("form");
-      form.method = "post";
-      const input = document.createElement("input");
-      input.type = "text";
-      form.appendChild(input);
-      document.body.appendChild(form);
-
-      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-      window.dispatchEvent(new PopStateEvent("popstate"));
-
-      const abandonments = getSnapshot().filter((b) => b.category === "form_abandonment");
-      expect(abandonments.length).toBe(0);
-
-      document.body.removeChild(form);
-    });
-
-    it("does not record if form was submitted", () => {
-      initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, formAbandonment: true },
-        "http://localhost/ingest/browser",
-      );
-      clearBreadcrumbs();
-
-      const form = document.createElement("form");
-      form.method = "post";
-      const input = document.createElement("input");
-      input.type = "text";
-      form.appendChild(input);
-      document.body.appendChild(form);
-
-      // Type into the input, then submit
-      input.value = "hello";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      form.dispatchEvent(new SubmitEvent("submit", { bubbles: true }));
-
-      // Navigate away
-      window.dispatchEvent(new PopStateEvent("popstate"));
-
-      const abandonments = getSnapshot().filter((b) => b.category === "form_abandonment");
-      expect(abandonments).toHaveLength(0);
-
-      document.body.removeChild(form);
-    });
-  });
-
-  describe("user timing breadcrumbs", () => {
-    it("records performance.mark entries", () => {
-      initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, userTiming: true },
-        "http://localhost/ingest/browser",
-      );
-      clearBreadcrumbs();
-
-      performance.mark("test-mark");
-
-      // PerformanceObserver fires asynchronously — give it a tick
-      return new Promise<void>((resolve) => {
-        setTimeout(() => {
-          const timings = getSnapshot().filter((b) => b.category === "user_timing");
-          expect(timings.length).toBeGreaterThanOrEqual(1);
-          expect(timings.some((t) => t.message === "test-mark")).toBe(true);
-          performance.clearMarks("test-mark");
-          resolve();
-        }, 50);
-      });
-    });
-
-    it("records performance.measure entries with duration", () => {
-      initBreadcrumbs(
-        { ...defaultBreadcrumbConfig, userTiming: true },
-        "http://localhost/ingest/browser",
-      );
-      clearBreadcrumbs();
-
-      performance.mark("measure-start");
-      performance.mark("measure-end");
-      performance.measure("test-measure", "measure-start", "measure-end");
-
-      return new Promise<void>((resolve) => {
-        setTimeout(() => {
-          const timings = getSnapshot().filter(
-            (b) => b.category === "user_timing" && b.data?.type === "measure",
-          );
-          expect(timings.length).toBeGreaterThanOrEqual(1);
-          expect(timings[0].message).toContain("test-measure");
-          expect(timings[0].data?.duration).toBeDefined();
-          performance.clearMarks();
-          performance.clearMeasures();
-          resolve();
-        }, 50);
-      });
-    });
-  });
-
   describe("visibility breadcrumbs", () => {
     it("records visibilitychange events", () => {
-      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+      initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
 
       document.dispatchEvent(new Event("visibilitychange"));
 
@@ -774,7 +687,7 @@ describe("breadcrumbs", () => {
 
   describe("tab lifecycle breadcrumbs", () => {
     it("emits exactly one tab_open per init", () => {
-      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+      initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
 
       const open = getSnapshot().filter(
         (b) => b.category === "tab" && b.data?.event === "open",
@@ -784,7 +697,7 @@ describe("breadcrumbs", () => {
     });
 
     it("emits exactly one tab_close per pagehide", () => {
-      initBreadcrumbs(defaultBreadcrumbConfig, "http://localhost/ingest/browser");
+      initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
       clearBreadcrumbs();
 
       window.dispatchEvent(new Event("pagehide"));

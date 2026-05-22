@@ -52,18 +52,21 @@ export function initVitals(queryParamsAllowlist: string[]): void {
 }
 
 /** Build a web-vitals callback. The extractor adds metric-specific fields
- * (element, interaction_type) on top of the common name/value/rating shape. */
+ * (element, interaction_type) on top of the common shape required by the
+ * server's WebVital struct. */
 function reporter<T extends MetricWithAttribution>(
   extract: (m: T) => Partial<VitalEntry>,
 ): (metric: T) => void {
   return (metric: T) => {
     if (destroyed) return;
     pushOrReplaceVital({
-      name: `web.vital.${metric.name.toLowerCase()}`,
+      id: metric.id,
+      label: "browser-web-vital",
+      name: metric.name,
+      startTime: Date.now(),
       value: metric.value,
-      rating: metric.rating,
       page_url: scrubUrl(location.href, allowlist),
-      timestamp: Date.now(),
+      rating: metric.rating,
       ...extract(metric),
     });
   };
