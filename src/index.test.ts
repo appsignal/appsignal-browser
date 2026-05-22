@@ -62,6 +62,9 @@ describe("SDK integration", () => {
     const testCrumb = body.breadcrumbs.find((b: { category: string }) => b.category === "test");
     expect(testCrumb).toBeDefined();
     expect(testCrumb.message).toBe("hello");
+    // Vitals POST to /metrics/webvitals on their own; they should not
+    // ride inside the events payload.
+    expect(body.vitals).toBeUndefined();
   });
 
   it("does not send before init", () => {

@@ -1,15 +1,18 @@
-import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
+import type { EventPayload, FrontendTransaction, ReplayChunk, VitalEntry } from "./types.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
 
-// Errors go to `${base}/collect?api_key=…` with application/json.
-// Everything else (events, replay) keeps the existing
-// `${base}/ingest/browser?key=…` with text/plain.
+// Each kind has its own URL + key param + content type:
+// - events/replay: ${base}/ingest/browser?key=… text/plain (legacy ingest)
+// - errors: ${base}/collect?api_key=… application/json
+// - vitals: ${base}/metrics/webvitals?api_key=… application/json,
+//   shipped as a JSON array (the server accepts arrays).
 const EVENTS_PATH = "/ingest/browser";
 const ERROR_PATH = "/collect";
+const VITALS_PATH = "/metrics/webvitals";
 
-type Kind = "events" | "error";
+type Kind = "events" | "error" | "vitals";
 
 // Chromium-enforced cap on `sendBeacon` bodies. `fetch({keepalive:true})`
 // shares the same cap, so there is no point falling back to keepalive for
@@ -69,13 +72,18 @@ export function destroyTransport(): void {
 }
 
 function urlFor(kind: Kind): string {
-  const path = kind === "error" ? ERROR_PATH : EVENTS_PATH;
-  const param = kind === "error" ? "api_key" : "key";
+  const path =
+    kind === "error" ? ERROR_PATH :
+    kind === "vitals" ? VITALS_PATH :
+    EVENTS_PATH;
+  // Legacy events ingest uses `key=`; the new /collect and /metrics/webvitals
+  // routes expect `api_key=`.
+  const param = kind === "events" ? "key" : "api_key";
   return `${baseEndpoint}${path}?${param}=${encodeURIComponent(ingestionKey)}`;
 }
 
 function contentTypeFor(kind: Kind): string {
-  return kind === "error" ? "application/json" : "text/plain";
+  return kind === "events" ? "text/plain" : "application/json";
 }
 
 export function sendError(payload: FrontendTransaction): void {
@@ -91,6 +99,19 @@ export function sendError(payload: FrontendTransaction): void {
 
 export function sendEvents(payload: EventPayload): void {
   send(JSON.stringify(payload), "events");
+}
+
+/** POST the drained web vitals as a JSON array. No-op on empty arrays.
+ * Uses sendBeacon when the document is already hidden so a flush from a
+ * visibility-hidden or pagehide handler survives unload. */
+export function sendVitals(payload: VitalEntry[]): void {
+  if (payload.length === 0) return;
+  const body = JSON.stringify(payload);
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    flushOnUnload(body, "vitals");
+    return;
+  }
+  send(body, "vitals");
 }
 
 export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initTransport, sendError, sendEvents, sendReplayChunk, destroyTransport } from "./transport.js";
-import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext } from "./types.js";
+import { initTransport, sendError, sendEvents, sendReplayChunk, sendVitals, destroyTransport } from "./transport.js";
+import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext, VitalEntry } from "./types.js";
 
 const mockSession: SessionContext = {
   session_id: "test-session",
@@ -93,12 +93,62 @@ describe("transport", () => {
       type: "events",
       session: mockSession,
       breadcrumbs: [],
-      vitals: [],
     };
 
     sendEvents(payload);
 
     expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("POSTs vitals to /metrics/webvitals as a JSON array with api_key", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+
+    const vitals: VitalEntry[] = [
+      { name: "web.vital.lcp", value: 2140, rating: "good", page_url: "http://localhost/", timestamp: 1 },
+      { name: "web.vital.cls", value: 0.04, rating: "good", page_url: "http://localhost/", timestamp: 2 },
+    ];
+
+    sendVitals(vitals);
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://localhost/metrics/webvitals?api_key=test-key",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body).toHaveLength(2);
+    expect(body[0].name).toBe("web.vital.lcp");
+  });
+
+  it("sendVitals no-ops on an empty array", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    const beaconSpy = vi.fn().mockReturnValue(true);
+    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
+
+    sendVitals([]);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(beaconSpy).not.toHaveBeenCalled();
+  });
+
+  it("sendVitals uses sendBeacon when document.visibilityState is hidden", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    const beaconSpy = vi.fn().mockReturnValue(true);
+    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
+
+    setVisibility("hidden");
+    sendVitals([
+      { name: "web.vital.lcp", value: 2140, rating: "good", page_url: "http://localhost/", timestamp: 1 },
+    ]);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(beaconSpy).toHaveBeenCalledWith(
+      "http://localhost/metrics/webvitals?api_key=test-key",
+      expect.any(Blob),
+    );
   });
 
   const replayPayload = (eventsSizeBytes = 100): ReplayChunk => ({

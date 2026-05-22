@@ -268,7 +268,6 @@ export interface EventPayload {
   type: "events";
   session: SessionContext;
   breadcrumbs: Breadcrumb[];
-  vitals: VitalEntry[];
   app_version?: string;
 }
 

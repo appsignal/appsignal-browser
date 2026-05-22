@@ -5,7 +5,7 @@ import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcru
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
 
-import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
+import { initTransport, sendEvents, sendBeaconEvents, sendVitals, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
@@ -181,22 +181,26 @@ function stopCollection(): void {
 function flushEvents(useBeacon: boolean): void {
   if (!initialized) return;
 
+  // Two POSTs per flush — one for breadcrumbs (legacy /ingest/browser),
+  // one for vitals (/metrics/webvitals). Each kind has its own URL and
+  // content type; bundling them was awkward across two different ingest
+  // routes. Same cadence as before, no special lifecycle batching.
   const breadcrumbs = drainBreadcrumbs();
-  const vitals = drainVitals();
-
-  if (breadcrumbs.length === 0 && vitals.length === 0) return;
-
-  const payload: EventPayload = {
-    type: "events",
-    session: getSessionContext(),
-    breadcrumbs,
-    vitals,
-    app_version: clientConfig?.appVersion,
-  };
-
-  if (useBeacon) {
-    sendBeaconEvents(payload);
-  } else {
-    sendEvents(payload);
+  if (breadcrumbs.length > 0) {
+    const payload: EventPayload = {
+      type: "events",
+      session: getSessionContext(),
+      breadcrumbs,
+      app_version: clientConfig?.appVersion,
+    };
+    if (useBeacon) {
+      sendBeaconEvents(payload);
+    } else {
+      sendEvents(payload);
+    }
   }
+
+  // sendVitals no-ops on empty and picks beacon vs fetch from
+  // document.visibilityState — useBeacon doesn't apply here.
+  sendVitals(drainVitals());
 }
