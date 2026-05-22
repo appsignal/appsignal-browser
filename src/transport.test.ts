@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { initTransport, sendError, sendEvents, sendReplayChunk, destroyTransport } from "./transport.js";
-import type { BrowserError, EventPayload, ReplayChunk, SessionContext } from "./types.js";
+import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext } from "./types.js";
 
 const mockSession: SessionContext = {
   session_id: "test-session",
+  tab_id: "test-tab",
   anonymous_id: "test-anon",
   page_url: "http://localhost/",
   referrer: "",
@@ -16,9 +17,34 @@ const mockSession: SessionContext = {
   timezone: "UTC",
 };
 
+function errorPayload(message = "Test error"): FrontendTransaction {
+  return {
+    timestamp: Math.floor(Date.now() / 1000),
+    namespace: "browser",
+    action: "/test",
+    error: { name: "Error", message, backtrace: [] },
+    breadcrumbs: [],
+    tags: {
+      session_id: mockSession.session_id,
+      tab_id: mockSession.tab_id,
+      anonymous_id: mockSession.anonymous_id,
+    },
+    environment: { url: "http://localhost/test" },
+    user_agent: "test",
+  };
+}
+
+function setVisibility(state: "visible" | "hidden"): void {
+  Object.defineProperty(document, "visibilityState", {
+    value: state,
+    configurable: true,
+  });
+}
+
 describe("transport", () => {
   beforeEach(() => {
-    initTransport("http://localhost/ingest/browser", "test-key");
+    initTransport("http://localhost", "test-key");
+    setVisibility("visible");
     vi.restoreAllMocks();
   });
 
@@ -28,25 +54,35 @@ describe("transport", () => {
     vi.useRealTimers();
   });
 
-  it("sends error payload via fetch", () => {
+  it("POSTs errors to /collect with api_key and application/json", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
 
-    const payload: BrowserError = {
-      type: "error",
-      timestamp: Date.now(),
-      message: "Test error",
-      breadcrumbs: [],
-      session: mockSession,
-    };
-
-    sendError(payload);
+    sendError(errorPayload());
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser?key=test-key",
+      "http://localhost/collect?api_key=test-key",
       expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "text/plain" },
+        headers: { "Content-Type": "application/json" },
       }),
+    );
+  });
+
+  it("sendError uses sendBeacon when document.visibilityState is hidden", () => {
+    // Mid-unload the fetch can be cancelled; beacon survives. Trade-off:
+    // beacon Blob type is constrained to CORS-safelisted values so JSON
+    // ships as text/plain.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    const beaconSpy = vi.fn().mockReturnValue(true);
+    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
+
+    setVisibility("hidden");
+    sendError(errorPayload());
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(beaconSpy).toHaveBeenCalledWith(
+      "http://localhost/collect?api_key=test-key",
+      expect.any(Blob),
     );
   });
 
@@ -68,6 +104,7 @@ describe("transport", () => {
   const replayPayload = (eventsSizeBytes = 100): ReplayChunk => ({
     type: "replay",
     session_id: "sess",
+    tab_id: "tab",
     chunk_index: 0,
     events: ["x".repeat(eventsSizeBytes)],
   });
@@ -193,25 +230,13 @@ describe("transport", () => {
     // (e.g. a leftover event handler) must not dispatch to the old target.
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
 
-    sendError({
-      type: "error",
-      timestamp: Date.now(),
-      message: "pre-destroy",
-      breadcrumbs: [],
-      session: mockSession,
-    });
+    sendError(errorPayload("pre-destroy"));
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
     destroyTransport();
     fetchSpy.mockClear();
 
-    sendError({
-      type: "error",
-      timestamp: Date.now(),
-      message: "post-destroy",
-      breadcrumbs: [],
-      session: mockSession,
-    });
+    sendError(errorPayload("post-destroy"));
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

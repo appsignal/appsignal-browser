@@ -1,7 +1,15 @@
-import type { BrowserError, EventPayload, ReplayChunk } from "./types.js";
+import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
 
-let endpoint = "";
+let baseEndpoint = "";
 let ingestionKey = "";
+
+// Errors go to `${base}/collect?api_key=…` with application/json.
+// Everything else (events, replay) keeps the existing
+// `${base}/ingest/browser?key=…` with text/plain.
+const EVENTS_PATH = "/ingest/browser";
+const ERROR_PATH = "/collect";
+
+type Kind = "events" | "error";
 
 // Chromium-enforced cap on `sendBeacon` bodies. `fetch({keepalive:true})`
 // shares the same cap, so there is no point falling back to keepalive for
@@ -22,17 +30,21 @@ const BASE_RETRY_MS = 1000;
 // while bounding worst-case memory.
 const MAX_QUEUE_BYTES = 32 * 1024 * 1024;
 
+interface Queued { body: string; kind: Kind; }
+
 // Queued payloads — covers offline plus payloads whose in-line retries
 // were exhausted on 429/5xx or network error.
-let retryQueue: string[] = [];
+let retryQueue: Queued[] = [];
 let retryQueueBytes = 0;
 let listeningForOnline = false;
 // Pending in-line retry setTimeouts. Tracked so destroyTransport() can
 // cancel them instead of letting a stray fetch fire against a torn-down SDK.
 const pendingRetries = new Set<ReturnType<typeof setTimeout>>();
 
-export function initTransport(ep: string, key: string): void {
-  endpoint = ep;
+/** Configure transport. `endpoint` is the BASE origin (no path) — paths and
+ * query params are appended internally per payload kind. */
+export function initTransport(endpoint: string, key: string): void {
+  baseEndpoint = endpoint.replace(/\/$/, "");
   ingestionKey = key;
 }
 
@@ -52,24 +64,41 @@ export function destroyTransport(): void {
   }
   retryQueue = [];
   retryQueueBytes = 0;
-  endpoint = "";
+  baseEndpoint = "";
   ingestionKey = "";
 }
 
-export function sendError(payload: BrowserError): void {
-  send(JSON.stringify(payload));
+function urlFor(kind: Kind): string {
+  const path = kind === "error" ? ERROR_PATH : EVENTS_PATH;
+  const param = kind === "error" ? "api_key" : "key";
+  return `${baseEndpoint}${path}?${param}=${encodeURIComponent(ingestionKey)}`;
+}
+
+function contentTypeFor(kind: Kind): string {
+  return kind === "error" ? "application/json" : "text/plain";
+}
+
+export function sendError(payload: FrontendTransaction): void {
+  const body = JSON.stringify(payload);
+  // Mid-unload (visibility hidden), the fetch is at risk of cancellation —
+  // navigating away aborts in-flight requests. sendBeacon survives unload.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    flushOnUnload(body, "error");
+    return;
+  }
+  send(body, "error");
 }
 
 export function sendEvents(payload: EventPayload): void {
-  send(JSON.stringify(payload));
+  send(JSON.stringify(payload), "events");
 }
 
 export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
   const body = JSON.stringify(payload);
   if (useBeacon) {
-    flushOnUnload(body);
+    flushOnUnload(body, "events");
   } else {
-    send(body);
+    send(body, "events");
   }
 }
 
@@ -77,7 +106,7 @@ export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
  * than the beacon cap are dropped rather than attempted — the keepalive fetch
  * fallback shares the same cap and silently rejects oversize bodies anyway. */
 export function sendBeaconEvents(payload: EventPayload): void {
-  flushOnUnload(JSON.stringify(payload));
+  flushOnUnload(JSON.stringify(payload), "events");
 }
 
 /** Send a payload during page unload using sendBeacon. Bounded to
@@ -85,41 +114,44 @@ export function sendBeaconEvents(payload: EventPayload): void {
  * fetch({keepalive:true}) silently reject them. The dropped payload is
  * whatever accumulated since the last periodic flush — bounded by the
  * flush cadence (5 s replay / 30 s events). */
-function flushOnUnload(body: string): void {
+function flushOnUnload(body: string, kind: Kind): void {
   if (!navigator.onLine) {
-    enqueue(body);
+    enqueue(body, kind);
     return;
   }
 
   if (typeof navigator.sendBeacon !== "function") return;
   if (body.length > BEACON_MAX_BYTES) return;
 
-  const url = `${endpoint}?key=${encodeURIComponent(ingestionKey)}`;
-  const blob = new Blob([body], { type: "text/plain" });
-  navigator.sendBeacon(url, blob);
+  // application/json triggers a CORS preflight in cross-origin sendBeacon
+  // calls, which the spec disallows — for same-origin /collect this works
+  // because no preflight is needed. The server accepts application/json
+  // on both fetch and beacon paths.
+  const blob = new Blob([body], { type: contentTypeFor(kind) });
+  navigator.sendBeacon(urlFor(kind), blob);
 }
 
-function send(body: string): void {
+function send(body: string, kind: Kind): void {
   // Drop payloads that exceed the size limit
   if (body.length > MAX_PAYLOAD_BYTES) return;
 
   if (!navigator.onLine) {
-    enqueue(body);
+    enqueue(body, kind);
     return;
   }
-  doFetch(body, 0);
+  doFetch(body, 0, kind);
 }
 
-function enqueue(body: string): void {
+function enqueue(body: string, kind: Kind): void {
   // A single body that already exceeds the cap can't ever fit; drop it
   // rather than evicting everything else trying to make room.
   if (body.length > MAX_QUEUE_BYTES) return;
   // Evict oldest entries until the new body fits under the byte cap.
   while (retryQueue.length > 0 && retryQueueBytes + body.length > MAX_QUEUE_BYTES) {
     const dropped = retryQueue.shift()!;
-    retryQueueBytes -= dropped.length;
+    retryQueueBytes -= dropped.body.length;
   }
-  retryQueue.push(body);
+  retryQueue.push({ body, kind });
   retryQueueBytes += body.length;
   startOnlineListener();
   scheduleRetryDrain();
@@ -159,8 +191,8 @@ function scheduleRetryDrain(): void {
 function drainQueue(): void {
   const items = retryQueue.splice(0);
   retryQueueBytes = 0;
-  for (const body of items) {
-    doFetch(body, 0);
+  for (const item of items) {
+    doFetch(item.body, 0, item.kind);
   }
 }
 
@@ -173,14 +205,13 @@ function retryDelay(attempt: number, is429: boolean): number {
   return delay + jitter;
 }
 
-function doFetch(body: string, attempt: number): void {
-  // destroyTransport() clears endpoint — bail out rather than fire a stray
-  // fetch at the current origin with an empty key.
-  if (endpoint === "") return;
-  const url = `${endpoint}?key=${encodeURIComponent(ingestionKey)}`;
-  fetch(url, {
+function doFetch(body: string, attempt: number, kind: Kind): void {
+  // destroyTransport() clears the base endpoint — bail out rather than fire
+  // a stray fetch at the current origin with an empty key.
+  if (baseEndpoint === "") return;
+  fetch(urlFor(kind), {
     method: "POST",
-    headers: { "Content-Type": "text/plain" },
+    headers: { "Content-Type": contentTypeFor(kind) },
     body,
   })
     .then((response) => {
@@ -188,30 +219,30 @@ function doFetch(body: string, attempt: number): void {
 
       if (response.status === 429 || response.status >= 500) {
         if (attempt < MAX_RETRIES) {
-          scheduleRetry(body, attempt + 1, response.status === 429);
+          scheduleRetry(body, attempt + 1, response.status === 429, kind);
         } else {
           // Out of in-line retries but server may recover — hand off to the
           // retry queue so we don't drop replay chunks on transient outages.
-          enqueue(body);
+          enqueue(body, kind);
         }
       }
       // 4xx (except 429): drop — client error, retrying won't help
     })
     .catch(() => {
       if (!navigator.onLine) {
-        enqueue(body);
+        enqueue(body, kind);
       } else if (attempt < MAX_RETRIES) {
-        scheduleRetry(body, attempt + 1, false);
+        scheduleRetry(body, attempt + 1, false, kind);
       } else {
-        enqueue(body);
+        enqueue(body, kind);
       }
     });
 }
 
-function scheduleRetry(body: string, attempt: number, is429: boolean): void {
+function scheduleRetry(body: string, attempt: number, is429: boolean, kind: Kind): void {
   const timer = setTimeout(() => {
     pendingRetries.delete(timer);
-    doFetch(body, attempt);
+    doFetch(body, attempt, kind);
   }, retryDelay(attempt - 1, is429));
   pendingRetries.add(timer);
 }

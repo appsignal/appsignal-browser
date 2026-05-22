@@ -26,12 +26,10 @@ export interface BrowserConfig {
 
   errors?: ErrorsConfig;
   breadcrumbs?: BreadcrumbsConfig;
-  webVitals?: WebVitalsConfig;
   session?: SessionConfig;
   /** Cross-cutting privacy controls. Each knob lists the subsystems that
    * consume it; if no subsystem applies (e.g. error messages, console args)
-   * the knob has no effect there. Channel-specific knobs (e.g.
-   * `breadcrumbs.networkBlocklist`) stay in their feature namespace. */
+   * the knob has no effect there. */
   privacy?: PrivacyConfig;
 }
 
@@ -41,20 +39,11 @@ export interface ErrorsConfig {
 }
 
 export interface BreadcrumbsConfig {
-  enabled?: boolean;
   network?: boolean;
-  networkBlocklist?: string[];
   console?: boolean;
   clicks?: boolean;
   longTasks?: boolean;
   scrollDepth?: boolean;
-  formAbandonment?: boolean;
-  userTiming?: boolean;
-  capacity?: number;
-}
-
-export interface WebVitalsConfig {
-  enabled?: boolean;
 }
 
 export interface SessionConfig {
@@ -75,6 +64,10 @@ export interface PrivacyConfig {
    *  - `session_context.page_url` and `session_context.referrer`
    *  - `web_vitals.page_url` */
   queryParamsAllowlist?: string[];
+  /** Glob URL patterns whose requests are never recorded. Matched against
+   * host + pathname. Today applied to network breadcrumbs; when replay
+   * returns it will gate replay's network capture too. */
+  networkBlocklist?: string[];
   /** DOM-derived captures only. Selectors are CSS selectors evaluated
    * against live DOM nodes; they have no effect on data that isn't sourced
    * from an element (error messages, console args, network bodies). */
@@ -101,10 +94,10 @@ export interface PrivacyDomConfig {
 export interface ResolvedConfig {
   errors: Required<ErrorsConfig>;
   breadcrumbs: Required<BreadcrumbsConfig>;
-  webVitals: Required<WebVitalsConfig>;
   session: Required<SessionConfig>;
   privacy: {
     queryParamsAllowlist: string[];
+    networkBlocklist: string[];
     dom: Required<PrivacyDomConfig>;
   };
 }
@@ -112,22 +105,16 @@ export interface ResolvedConfig {
 export const DEFAULT_CONFIG: ResolvedConfig = {
   errors: { enabled: true, sampleRate: 1.0 },
   breadcrumbs: {
-    enabled: true,
     network: true,
-    networkBlocklist: [],
     console: true,
     clicks: true,
     longTasks: true,
     scrollDepth: true,
-    formAbandonment: true,
-    // Off by default — heavy developer instrumentation can flood the ring buffer.
-    userTiming: false,
-    capacity: 100,
   },
-  webVitals: { enabled: true },
   session: { inactivityTimeoutMs: 1_800_000 },
   privacy: {
     queryParamsAllowlist: [],
+    networkBlocklist: [],
     dom: { maskText: [], blockElement: [] },
   },
 };
@@ -140,11 +127,12 @@ export function resolveConfig(input: BrowserConfig): ResolvedConfig {
   return {
     errors: { ...d.errors, ...input.errors },
     breadcrumbs: { ...d.breadcrumbs, ...input.breadcrumbs },
-    webVitals: { ...d.webVitals, ...input.webVitals },
     session: { ...d.session, ...input.session },
     privacy: {
       queryParamsAllowlist:
         input.privacy?.queryParamsAllowlist ?? d.privacy.queryParamsAllowlist,
+      networkBlocklist:
+        input.privacy?.networkBlocklist ?? d.privacy.networkBlocklist,
       dom: { ...d.privacy.dom, ...input.privacy?.dom },
     },
   };
@@ -215,6 +203,55 @@ export interface BrowserError {
   app_version?: string;
   suppressed_count?: number;
   context?: Record<string, unknown>;
+}
+
+/** Wire shape for errors POSTed to `/collect`. Aligned with AppSignal's
+ * Transaction schema. Kept separate from `BrowserError` because subscribers
+ * (`onErrorReported`) still want the richer internal shape — only the
+ * network format follows this. */
+export interface FrontendTransaction {
+  /** Unix seconds (not milliseconds). */
+  timestamp: number;
+  namespace: "browser";
+  /** Route template if known, else `location.pathname`. */
+  action: string;
+  /** Maps to `BrowserConfig.appVersion`. */
+  revision?: string;
+  error: {
+    name: string;
+    message: string;
+    /** Stack lines, one per array entry. Empty when no stack was captured. */
+    backtrace: string[];
+  };
+  breadcrumbs: TransactionBreadcrumb[];
+  tags: {
+    session_id: string;
+    tab_id: string;
+    anonymous_id: string;
+    user_id?: string;
+  };
+  environment: {
+    url: string;
+  };
+  user_agent: string;
+}
+
+/** Wire shape for a breadcrumb inside a FrontendTransaction.
+ *
+ * Different from the internal `Breadcrumb` in three ways:
+ * - timestamp in unix seconds (internal is ms)
+ * - `category` uses server-side names (e.g. "request" for what the SDK
+ *   internally calls "network")
+ * - `action` is a category-specific identifier (selector for clicks, URL
+ *   for navigation/request, etc.) — present even when empty
+ * - `metadata` always present (defaults to `{}`) where internal `data` is
+ *   optional */
+export interface TransactionBreadcrumb {
+  timestamp: number;
+  category: string;
+  action: string;
+  message: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface VitalEntry {

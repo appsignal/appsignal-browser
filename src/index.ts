@@ -20,7 +20,11 @@ let initialized = false;
 // Lifecycle subscription teardowns
 let lifecycleUnsubscribers: (() => void)[] = [];
 
-const COLLECT_PATH = "/ingest/browser";
+// Internal SDK paths the network-breadcrumb collector must ignore so the
+// SDK's own POSTs don't end up in their own breadcrumb trail. Transport
+// owns the URL templates per kind; this list only exists for self-filtering.
+const EVENTS_PATH = "/ingest/browser";
+const ERROR_PATH = "/collect";
 const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
@@ -30,7 +34,7 @@ export function init(config: BrowserConfig): void {
   resolved = resolveConfig(config);
 
   const endpoint = resolveEndpoint(config);
-  initTransport(endpoint + COLLECT_PATH, config.key);
+  initTransport(endpoint, config.key);
   startCollection(endpoint);
 }
 
@@ -113,8 +117,9 @@ function startCollection(endpoint: string): void {
   initNetworkHook();
   initBreadcrumbs(
     cfg.breadcrumbs,
-    endpoint + COLLECT_PATH,
+    [endpoint + EVENTS_PATH, endpoint + ERROR_PATH],
     cfg.privacy.queryParamsAllowlist,
+    cfg.privacy.networkBlocklist,
     cfg.privacy.dom,
     clientConfig?.beforeBreadcrumb,
   );

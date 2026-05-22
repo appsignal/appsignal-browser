@@ -1,6 +1,14 @@
-import type { BrowserError, IncomingError, ResolvedConfig } from "./types.js";
+import type {
+  Breadcrumb,
+  BrowserError,
+  FrontendTransaction,
+  IncomingError,
+  ResolvedConfig,
+  SessionContext,
+  TransactionBreadcrumb,
+} from "./types.js";
 import { getSessionContext } from "./session.js";
-import { addBreadcrumb, getSnapshot } from "./breadcrumbs.js";
+import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
@@ -169,19 +177,94 @@ function handleError(
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
   if (checkDedupe(dedupeKey, now)) return;
 
+  const session = getSessionContext();
   const payload: BrowserError = {
     type: "error",
     timestamp: now,
-    breadcrumbs: getSnapshot(),
-    session: getSessionContext(),
+    // Already filtered (UX-only categories excluded) and capped to 25 by
+    // the error-context ring buffer in breadcrumbs.ts.
+    breadcrumbs: getErrorBreadcrumbs(),
+    session,
     app_version: appVersion,
     ...effective,
   };
 
-  sendError(payload);
+  sendError(toFrontendTransaction(payload, session));
 
   for (const l of errorListeners) {
     try { l(payload); } catch { /* don't break the chain */ }
+  }
+}
+
+function toFrontendTransaction(
+  error: BrowserError,
+  session: SessionContext,
+): FrontendTransaction {
+  return {
+    // Server expects unix seconds, not milliseconds.
+    timestamp: Math.floor(error.timestamp / 1000),
+    namespace: "browser",
+    // No router integration yet; fall back to the raw pathname.
+    action: location.pathname,
+    revision: error.app_version,
+    error: {
+      name: error.error_class || "Error",
+      message: error.message,
+      backtrace: error.stack ? error.stack.split("\n") : [],
+    },
+    breadcrumbs: error.breadcrumbs.map(toTransactionBreadcrumb),
+    tags: {
+      session_id: session.session_id,
+      tab_id: session.tab_id,
+      anonymous_id: session.anonymous_id,
+      ...(session.user_id ? { user_id: session.user_id } : {}),
+    },
+    environment: { url: location.href },
+    user_agent: navigator.userAgent,
+  };
+}
+
+function toTransactionBreadcrumb(b: Breadcrumb): TransactionBreadcrumb {
+  const data = b.data ?? {};
+  return {
+    timestamp: Math.floor(b.timestamp / 1000),
+    // Internal taxonomy uses "network"; server expects "request". Other
+    // categories pass through unchanged.
+    category: b.category === "network" ? "request" : b.category,
+    action: actionForBreadcrumb(b.category, data),
+    message: b.message,
+    metadata: data,
+  };
+}
+
+// `action` on a breadcrumb is a category-specific primary identifier. For
+// clicks it's the CSS selector; for navigation it's the destination URL;
+// for network/request it's the request URL; and so on. We pick from the
+// breadcrumb's `data` rather than introducing new fields at capture time.
+function actionForBreadcrumb(
+  category: string,
+  data: Record<string, unknown>,
+): string {
+  switch (category) {
+    case "navigation":
+      return String(data.to ?? data.url ?? "");
+    case "click":
+    case "rage_click":
+    case "dead_click":
+    case "error_click":
+      return String(data.selector ?? "");
+    case "network":
+      return String(data.url ?? "");
+    case "console":
+      return String(data.level ?? "");
+    case "visibility":
+    case "tab":
+      return String(data.state ?? "");
+    default:
+      // Includes "error", "long_task", "scroll_depth", and manual
+      // breadcrumbs. Manual callers can put their own primary identifier
+      // under `data.action` if they have one.
+      return String(data.action ?? "");
   }
 }
 
