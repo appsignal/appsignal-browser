@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { initReplay, applyReplaySampling, onError, stopReplay, discardReplay } from "./replay.js";
 import * as transport from "./transport.js";
-import type { ServerConfig } from "./types.js";
-import { DEFAULT_SERVER_CONFIG } from "./types.js";
+import type { ReplayConfig } from "./types.js";
+import { DEFAULT_REPLAY_CONFIG } from "./types.js";
 
 // Mock transport to capture sent chunks
 vi.mock("./transport.js", () => ({
@@ -36,12 +36,12 @@ vi.mock("@rrweb/record", () => ({
 
 const sendChunkMock = transport.sendReplayChunk as ReturnType<typeof vi.fn>;
 
-function defaultReplayConfig(): ServerConfig["replay"] {
-  return { ...DEFAULT_SERVER_CONFIG.replay };
+function defaultReplayConfig(): ReplayConfig {
+  return { ...DEFAULT_REPLAY_CONFIG };
 }
 
-function disabledReplayConfig(): ServerConfig["replay"] {
-  return { ...DEFAULT_SERVER_CONFIG.replay, enabled: false };
+function disabledReplayConfig(): ReplayConfig {
+  return { ...DEFAULT_REPLAY_CONFIG, enabled: false };
 }
 
 describe("replay", () => {

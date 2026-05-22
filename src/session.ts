@@ -286,12 +286,6 @@ function getStaticContextFields(): StaticContextFields {
   return fields;
 }
 
-/** Update the query-param allowlist after the server config arrives. The
- * cached `staticContextFields.referrer` stays raw; scrubUrl runs on each read. */
-export function updateSessionConfig(allowlist: string[]): void {
-  queryParamsAllowlist = allowlist;
-}
-
 export function getSessionContext(): SessionContext {
   const stat = getStaticContextFields();
   const ctx: SessionContext = {

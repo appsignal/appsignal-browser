@@ -1,4 +1,5 @@
-/** Client-side configuration — only the ingestion key is required. */
+/** Client-side configuration. All knobs live here — there is no server-side
+ * config fetch. Every group is optional; only `key` is required. */
 export interface BrowserConfig {
   key: string;
   endpoint?: string;
@@ -22,86 +23,137 @@ export interface BrowserConfig {
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to inject trace context headers into. Glob syntax. */
   tracePropagationTargets?: string[];
+
+  errors?: ErrorsConfig;
+  breadcrumbs?: BreadcrumbsConfig;
+  webVitals?: WebVitalsConfig;
+  session?: SessionConfig;
+  /** Cross-cutting privacy controls. Each knob lists the subsystems that
+   * consume it; if no subsystem applies (e.g. error messages, console args)
+   * the knob has no effect there. Channel-specific knobs (e.g.
+   * `breadcrumbs.networkBlocklist`) stay in their feature namespace. */
+  privacy?: PrivacyConfig;
+}
+
+export interface ErrorsConfig {
+  enabled?: boolean;
+  sampleRate?: number;
+}
+
+export interface BreadcrumbsConfig {
+  enabled?: boolean;
+  network?: boolean;
+  networkBlocklist?: string[];
+  console?: boolean;
+  clicks?: boolean;
+  longTasks?: boolean;
+  scrollDepth?: boolean;
+  formAbandonment?: boolean;
+  userTiming?: boolean;
+  capacity?: number;
+}
+
+export interface WebVitalsConfig {
+  enabled?: boolean;
+}
+
+export interface SessionConfig {
+  inactivityTimeoutMs?: number;
+}
+
+export interface PrivacyConfig {
+  /** Query-string keys to keep in captured URLs. Empty list strips all
+   * params. Glob-matched (e.g. `"utm_*"` keeps every UTM key).
+   *
+   * Fragments are scrubbed by the same allowlist *only when they look like
+   * a query string* (`#k=v&k=v`); hash routes (`#/route`) and opaque
+   * anchors (`#section-1`) are preserved.
+   *
+   * Applied to:
+   *  - network breadcrumb URLs (request/response capture)
+   *  - SPA navigation breadcrumbs (`data.from`, `data.to`)
+   *  - `session_context.page_url` and `session_context.referrer`
+   *  - `web_vitals.page_url` */
+  queryParamsAllowlist?: string[];
+  /** DOM-derived captures only. Selectors are CSS selectors evaluated
+   * against live DOM nodes; they have no effect on data that isn't sourced
+   * from an element (error messages, console args, network bodies). */
+  dom?: PrivacyDomConfig;
+}
+
+export interface PrivacyDomConfig {
+  /** CSS selectors whose **text content** is masked. The element itself,
+   * its structure, and its non-text attributes are still recorded — only
+   * the visible text is replaced. Applied to click breadcrumb text content
+   * (→ `"[masked]"`) when the click target matches or descends from a
+   * listed selector. */
+  maskText?: string[];
+  /** CSS selectors whose **elements are entirely excluded** from capture.
+   * Click breadcrumbs — and any rage/dead/error click derived from them —
+   * are suppressed when the click target matches or descends from a listed
+   * selector. */
+  blockElement?: string[];
+}
+
+/** Fully-resolved config (every field present) — the shape modules see
+ * after defaults are merged with the user's input. Distinct from
+ * BrowserConfig because that has Partial groups for ergonomic init() calls. */
+export interface ResolvedConfig {
+  errors: Required<ErrorsConfig>;
+  breadcrumbs: Required<BreadcrumbsConfig>;
+  webVitals: Required<WebVitalsConfig>;
+  session: Required<SessionConfig>;
+  privacy: {
+    queryParamsAllowlist: string[];
+    dom: Required<PrivacyDomConfig>;
+  };
+}
+
+export const DEFAULT_CONFIG: ResolvedConfig = {
+  errors: { enabled: true, sampleRate: 1.0 },
+  breadcrumbs: {
+    enabled: true,
+    network: true,
+    networkBlocklist: [],
+    console: true,
+    clicks: true,
+    longTasks: true,
+    scrollDepth: true,
+    formAbandonment: true,
+    // Off by default — heavy developer instrumentation can flood the ring buffer.
+    userTiming: false,
+    capacity: 100,
+  },
+  webVitals: { enabled: true },
+  session: { inactivityTimeoutMs: 1_800_000 },
+  privacy: {
+    queryParamsAllowlist: [],
+    dom: { maskText: [], blockElement: [] },
+  },
+};
+
+/** Merge user input over the static defaults. Group-level only — leaf
+ * arrays replace rather than concat, which is what users want for an
+ * allowlist/blocklist. */
+export function resolveConfig(input: BrowserConfig): ResolvedConfig {
+  const d = DEFAULT_CONFIG;
+  return {
+    errors: { ...d.errors, ...input.errors },
+    breadcrumbs: { ...d.breadcrumbs, ...input.breadcrumbs },
+    webVitals: { ...d.webVitals, ...input.webVitals },
+    session: { ...d.session, ...input.session },
+    privacy: {
+      queryParamsAllowlist:
+        input.privacy?.queryParamsAllowlist ?? d.privacy.queryParamsAllowlist,
+      dom: { ...d.privacy.dom, ...input.privacy?.dom },
+    },
+  };
 }
 
 export interface UserContext {
   id?: string;
   email?: string;
   name?: string;
-}
-
-/** Server-side config fetched on init. */
-export interface ServerConfig {
-  enabled: boolean;
-  errors: { enabled: boolean; sample_rate: number };
-  /** Cross-cutting privacy controls. Each knob lists the subsystems that
-   * consume it; if no subsystem applies (e.g. error messages, console args)
-   * the knob has no effect there. Channel-specific knobs (e.g.
-   * `breadcrumbs.network_blocklist`, `replay.mask_all_inputs`) stay in their
-   * feature namespace. */
-  privacy: {
-    /** Query-string keys to keep in captured URLs. Empty list strips all
-     * params. Glob-matched (e.g. `"utm_*"` keeps every UTM key).
-     *
-     * Fragments are scrubbed by the same allowlist *only when they look like
-     * a query string* (`#k=v&k=v`); hash routes (`#/route`) and opaque
-     * anchors (`#section-1`) are preserved.
-     *
-     * Applied to:
-     *  - network breadcrumb URLs (request/response capture)
-     *  - SPA navigation breadcrumbs (`data.from`, `data.to`)
-     *  - `session_context.page_url` and `session_context.referrer`
-     *  - `web_vitals.page_url` */
-    query_params_allowlist: string[];
-    /** DOM-derived captures only. Selectors are CSS selectors evaluated
-     * against live DOM nodes; they have no effect on data that isn't sourced
-     * from an element (error messages, console args, network bodies). */
-    dom: {
-      /** CSS selectors whose **text content** is masked. The element itself,
-       * its structure, and its non-text attributes are still recorded —
-       * only the visible text is replaced.
-       *
-       * Applied to:
-       *  - session replay (rrweb `maskTextSelector`: text → `*`)
-       *  - click breadcrumb text content (→ `"[masked]"`) when the click
-       *    target matches or descends from a listed selector */
-      mask_text: string[];
-      /** CSS selectors whose **elements are entirely excluded** from capture.
-       * The element and its subtree are never recorded.
-       *
-       * Applied to:
-       *  - session replay (rrweb `blockSelector`: subtree → placeholder)
-       *  - click breadcrumbs (the breadcrumb — and any rage/dead/error
-       *    click derived from it — is suppressed when the click target
-       *    matches or descends from a listed selector) */
-      block_element: string[];
-    };
-  };
-  breadcrumbs: {
-    enabled: boolean;
-    network: boolean;
-    network_blocklist: string[];
-    console: boolean;
-    clicks: boolean;
-    long_tasks: boolean;
-    scroll_depth: boolean;
-    form_abandonment: boolean;
-    user_timing: boolean;
-    capacity: number;
-  };
-  web_vitals: { enabled: boolean };
-  replay: {
-    enabled: boolean;
-    sample_rate: number;
-    error_replay: boolean;
-    /** Replay-specific: rrweb's `maskAllInputs` masks every form-field value
-     * as `***` regardless of selector. Not a cross-cutting concern (only
-     * rrweb knows what an "input" is in its serialised event stream), so
-     * stays here rather than under `privacy.dom`. */
-    mask_all_inputs: boolean;
-    max_duration_ms: number;
-  };
-  session: { inactivity_timeout_ms: number };
 }
 
 export interface Breadcrumb {
@@ -195,37 +247,32 @@ export interface ReplayChunk {
   app_version?: string;
 }
 
-export const DEFAULT_SERVER_CONFIG: ServerConfig = {
+// ─── Session replay (v1: not wired) ──────────────────────────────────────
+// The replay module still lives in src/replay.ts but isn't imported by
+// index.ts and isn't bundled. These types travel with it so the module
+// stays self-consistent and the tests keep running. When replay returns
+// for v2+, these get folded back into BrowserConfig/ResolvedConfig.
+
+export interface ReplayConfig {
+  enabled: boolean;
+  sample_rate: number;
+  error_replay: boolean;
+  /** rrweb's `maskAllInputs`: every form-field value renders as `***`. */
+  mask_all_inputs: boolean;
+  max_duration_ms: number;
+}
+
+export interface ReplayPrivacyDom {
+  /** CSS selectors whose text is replaced with `*` in rrweb output. */
+  mask_text: string[];
+  /** CSS selectors whose elements are replaced with a placeholder. */
+  block_element: string[];
+}
+
+export const DEFAULT_REPLAY_CONFIG: ReplayConfig = {
   enabled: true,
-  errors: { enabled: true, sample_rate: 1.0 },
-  privacy: {
-    query_params_allowlist: [],
-    dom: {
-      mask_text: [],
-      block_element: [],
-    },
-  },
-  breadcrumbs: {
-    enabled: true,
-    network: true,
-    network_blocklist: [],
-    console: true,
-    clicks: true,
-    long_tasks: true,
-    scroll_depth: true,
-    form_abandonment: true,
-    // Off by default — heavy developer instrumentation can flood the ring
-    // buffer. Matches the server-side default in crates/config/src/browser.rs.
-    user_timing: false,
-    capacity: 100,
-  },
-  web_vitals: { enabled: true },
-  replay: {
-    enabled: true,
-    sample_rate: 1.0,
-    error_replay: true,
-    mask_all_inputs: true,
-    max_duration_ms: 14_400_000, // 4 hours
-  },
-  session: { inactivity_timeout_ms: 1_800_000 },
+  sample_rate: 1.0,
+  error_replay: true,
+  mask_all_inputs: true,
+  max_duration_ms: 14_400_000, // 4 hours
 };

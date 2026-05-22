@@ -8,7 +8,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { readFile } from "fs/promises";
 import { resolve, extname, dirname } from "path";
 import { fileURLToPath } from "url";
-import { defaultConfig } from "./default-config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -26,7 +25,6 @@ type Captured =
     };
 
 let captured: Captured[] = [];
-let configResponse: unknown = defaultConfig();
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -78,24 +76,12 @@ const server = createServer(async (req, res) => {
   }
   if (pathname === "/__reset" && req.method === "POST") {
     captured = [];
-    configResponse = defaultConfig();
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-  if (pathname === "/__config" && req.method === "POST") {
-    configResponse = JSON.parse(await readBody(req));
     res.writeHead(204);
     res.end();
     return;
   }
 
   // ── SDK ingest (mock) ──────────────────────────────────────────────────
-  if (pathname === "/ingest/browser/config" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(configResponse));
-    return;
-  }
   if (pathname === "/ingest/browser" && req.method === "POST") {
     const body = await readBody(req);
     captured.push({

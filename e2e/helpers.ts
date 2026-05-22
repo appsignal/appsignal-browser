@@ -32,11 +32,28 @@ export async function captured(request: APIRequestContext): Promise<Captured[]> 
   return (await r.json()) as Captured[];
 }
 
-export async function setConfig(
-  request: APIRequestContext,
+/** Inject an SDK config override into the page before any script runs. The
+ * sample app reads window.__appsignalConfig in its init() call and spreads
+ * it over its default options — lets a test exercise allowlists, blocklists,
+ * etc. without a dedicated sample page per scenario. */
+export async function withSdkConfig(
+  page: Page,
   config: Record<string, unknown>,
 ): Promise<void> {
-  await request.post("/__config", { data: config });
+  await page.addInitScript((cfg) => {
+    (window as unknown as { __appsignalConfig: Record<string, unknown> }).__appsignalConfig = cfg;
+  }, config);
+}
+
+/** Kept for the skipped replay/error-replay specs. v1 does not ship a
+ * server-side config endpoint; the /__config route is also gone, so a call
+ * here would 404. Tests using it are marked `test.skip` until replay
+ * returns and the route comes back. */
+export async function setConfig(
+  _request: APIRequestContext,
+  _config: Record<string, unknown>,
+): Promise<void> {
+  /* no-op shim */
 }
 
 /** Force a flush via the SDK's flush() API after waiting long enough for any
@@ -63,6 +80,7 @@ export function ingestEvents(items: Captured[]): Array<Record<string, unknown>> 
   return jsonBodiesOfType(items, "events");
 }
 
+/** Kept for the skipped replay/error-replay specs. */
 export function ingestReplays(items: Captured[]): Array<Record<string, unknown>> {
   return jsonBodiesOfType(items, "replay");
 }

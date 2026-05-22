@@ -58,7 +58,7 @@ describe("errors", () => {
   });
 
   it("sends error events via transport", () => {
-    initErrors({ enabled: true, sample_rate: 1.0 }, "v1.0");
+    initErrors({ enabled: true, sampleRate: 1.0 }, "v1.0");
     fireError("Test error");
 
     expect(sendErrorMock).toHaveBeenCalledTimes(1);
@@ -68,7 +68,7 @@ describe("errors", () => {
   });
 
   it("captures error_class from the Error constructor name", () => {
-    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
     const err = new TypeError("Cannot read property 'name' of undefined");
     const event = new ErrorEvent("error", {
       message: err.message,
@@ -85,7 +85,7 @@ describe("errors", () => {
   });
 
   it("does not send when disabled", () => {
-    initErrors({ enabled: false, sample_rate: 1.0 });
+    initErrors({ enabled: false, sampleRate: 1.0 });
     fireError("Test error");
 
     expect(sendErrorMock).not.toHaveBeenCalled();
@@ -94,9 +94,9 @@ describe("errors", () => {
   it("repeated init does not stack listeners", () => {
     // Regression: a second initErrors used to leave the previous listener
     // attached, so a single dispatched error fired the pipeline twice.
-    initErrors({ enabled: true, sample_rate: 1.0 });
-    initErrors({ enabled: true, sample_rate: 1.0 });
-    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
     fireError("only once");
 
     expect(sendErrorMock).toHaveBeenCalledTimes(1);
@@ -108,7 +108,7 @@ describe("errors", () => {
         event.message = "redacted";
         return event;
       });
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
       fireError("sensitive data");
 
       const payload = sendErrorMock.mock.calls[0][0] as BrowserError;
@@ -117,7 +117,7 @@ describe("errors", () => {
 
     it("can drop the event by returning null", () => {
       const hook = vi.fn(() => null);
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
       fireError("drop me");
 
       expect(hook).toHaveBeenCalled();
@@ -128,7 +128,7 @@ describe("errors", () => {
       // The defining property of beforeError vs the old late-pipeline
       // beforeSend: a dropped error must not pollute the breadcrumb buffer
       // with its own error breadcrumb.
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, () => null);
+      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, () => null);
       fireError("never seen");
 
       const errorCrumbs = addBreadcrumbMock.mock.calls.filter(
@@ -138,7 +138,7 @@ describe("errors", () => {
     });
 
     it("dropping skips the lastErrorTimestamp update (early-pipeline)", () => {
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, () => null);
+      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, () => null);
       const before = getLastErrorTimestamp();
       fireError("never seen");
       expect(getLastErrorTimestamp()).toBe(before);
@@ -147,7 +147,7 @@ describe("errors", () => {
     it("supports common one-liner drop patterns (former ignoreErrors)", () => {
       const hook = (e: IncomingError): IncomingError | null =>
         /ResizeObserver/.test(e.message) ? null : e;
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
 
       fireError("ResizeObserver loop limit exceeded");
       expect(sendErrorMock).not.toHaveBeenCalled();
@@ -164,7 +164,7 @@ describe("errors", () => {
       const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const hook = vi.fn((event: IncomingError) => Promise.resolve(event)) as unknown as
         (event: IncomingError) => IncomingError | null;
-      initErrors({ enabled: true, sample_rate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
 
       fireError("async hook");
 
@@ -178,7 +178,7 @@ describe("errors", () => {
 
   describe("deduplication", () => {
     it("suppresses repeated identical errors after 5 occurrences", () => {
-      initErrors({ enabled: true, sample_rate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 });
 
       for (let i = 0; i < 10; i++) {
         fireError("dedup test error");
@@ -190,8 +190,8 @@ describe("errors", () => {
   });
 
   describe("sample rate", () => {
-    it("drops errors when sample_rate is 0", () => {
-      initErrors({ enabled: true, sample_rate: 0 });
+    it("drops errors when sampleRate is 0", () => {
+      initErrors({ enabled: true, sampleRate: 0 });
       fireError("should be dropped");
 
       expect(sendErrorMock).not.toHaveBeenCalled();
@@ -200,7 +200,7 @@ describe("errors", () => {
 
   it("updates lastErrorTimestamp", () => {
     const before = Date.now();
-    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
     fireError("timestamp test");
     const after = Date.now();
 
@@ -210,7 +210,7 @@ describe("errors", () => {
   });
 
   it("notifies onErrorReported subscribers after the error has shipped", () => {
-    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
     const subscriber = vi.fn();
     onErrorReported(subscriber);
 
@@ -222,7 +222,7 @@ describe("errors", () => {
 
   it("does not notify subscribers when beforeError drops the error", () => {
     initErrors(
-      { enabled: true, sample_rate: 1.0 },
+      { enabled: true, sampleRate: 1.0 },
       undefined,
       () => null,
     );
@@ -236,7 +236,7 @@ describe("errors", () => {
   });
 
   it("adds error breadcrumb", () => {
-    initErrors({ enabled: true, sample_rate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 });
     fireError("breadcrumb test error");
 
     const errorBreadcrumb = addBreadcrumbMock.mock.calls.find(

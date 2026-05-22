@@ -1,10 +1,9 @@
-import type { BrowserConfig, ServerConfig, EventPayload } from "./types.js";
-import { DEFAULT_SERVER_CONFIG } from "./types.js";
-import { initSession, getSessionId, getTabId, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession, updateSessionConfig } from "./session.js";
-import { initBreadcrumbs, updateBreadcrumbConfig, addManualBreadcrumb, drainBreadcrumbs, clearBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
-import { initErrors, updateErrorConfig, reportError, destroyErrors } from "./errors.js";
+import type { BrowserConfig, EventPayload, ResolvedConfig } from "./types.js";
+import { resolveConfig } from "./types.js";
+import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
+import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
-import { initReplay, applyReplaySampling, destroyReplay, discardReplay, flushReplay, clearChunkIndex } from "./replay.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
@@ -14,7 +13,7 @@ import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js
 export type { BrowserConfig } from "./types.js";
 
 let clientConfig: BrowserConfig | null = null;
-let serverConfig: ServerConfig = DEFAULT_SERVER_CONFIG;
+let resolved: ResolvedConfig | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
 
@@ -22,27 +21,17 @@ let initialized = false;
 let lifecycleUnsubscribers: (() => void)[] = [];
 
 const COLLECT_PATH = "/ingest/browser";
-const CONFIG_PATH = "/ingest/browser/config";
 const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
   if (initialized) return;
   initialized = true;
   clientConfig = config;
+  resolved = resolveConfig(config);
 
   const endpoint = resolveEndpoint(config);
   initTransport(endpoint + COLLECT_PATH, config.key);
-
-  // Start all collectors including replay with the fallback config.
-  // The fallback has replay sample_rate 1.0 so everything is recorded.
-  // The server config narrows what gets kept.
   startCollection(endpoint);
-
-  // Fetch server config and apply it — guard against destroy() during fetch
-  fetchServerConfig(endpoint, config.key).then((cfg) => {
-    if (!initialized) return;
-    applyServerConfig(cfg);
-  });
 }
 
 export function setUser(user: { id?: string; email?: string; name?: string }): void {
@@ -62,19 +51,14 @@ export function clearUser(): void {
  * navigation that would cancel a plain fetch. */
 export function endSession(): void {
   if (!initialized) return;
-  // Snapshot the current session_id first — touchActivity below may itself
-  // rotate the session if the inactivity window has already elapsed (app
-  // woke from long sleep). In that case the buffered events we're about to
-  // flush get attributed to the fresh session, not the one the caller
-  // meant to end; accept this as the documented behavior. The subsequent
-  // touchActivity keeps getSessionId() inside flushEvents/flushReplay
+  // touchActivity below may rotate the session if the inactivity window has
+  // already elapsed (app woke from long sleep). In that case the buffered
+  // events we're about to flush get attributed to the fresh session, not
+  // the one the caller meant to end; accept this as the documented behavior.
+  // The subsequent touchActivity keeps getSessionId() inside flushEvents
   // from rotating again mid-flush.
-  const sessionIdToClear = getSessionId();
-  const tabIdToClear = getTabId();
   touchActivity();
   flushEvents(true);
-  flushReplay(true);
-  clearChunkIndex(sessionIdToClear, tabIdToClear);
   sessionEndSession();
 }
 
@@ -109,7 +93,7 @@ export function destroy(): void {
   destroyTransport();
   initialized = false;
   clientConfig = null;
-  serverConfig = DEFAULT_SERVER_CONFIG;
+  resolved = null;
 }
 
 // --- Internal ---
@@ -119,24 +103,10 @@ function resolveEndpoint(config: BrowserConfig): string {
   return location.origin;
 }
 
-async function fetchServerConfig(
-  endpoint: string,
-  key: string,
-): Promise<ServerConfig> {
-  try {
-    const url = `${endpoint}${CONFIG_PATH}?key=${encodeURIComponent(key)}`;
-    const response = await fetch(url);
-    if (!response.ok) return DEFAULT_SERVER_CONFIG;
-    return await response.json();
-  } catch {
-    return DEFAULT_SERVER_CONFIG;
-  }
-}
-
 function startCollection(endpoint: string): void {
-  const cfg = DEFAULT_SERVER_CONFIG;
+  const cfg = resolved!;
 
-  initSession(cfg.session.inactivity_timeout_ms, cfg.privacy.query_params_allowlist);
+  initSession(cfg.session.inactivityTimeoutMs, cfg.privacy.queryParamsAllowlist);
   // Patch fetch/XHR once. Breadcrumbs and tracing both subscribe to the
   // hook instead of patching independently — that's what made destroy order
   // load-bearing.
@@ -144,7 +114,7 @@ function startCollection(endpoint: string): void {
   initBreadcrumbs(
     cfg.breadcrumbs,
     endpoint + COLLECT_PATH,
-    cfg.privacy.query_params_allowlist,
+    cfg.privacy.queryParamsAllowlist,
     cfg.privacy.dom,
     clientConfig?.beforeBreadcrumb,
   );
@@ -158,8 +128,7 @@ function startCollection(endpoint: string): void {
     initTracing(clientConfig.tracePropagationTargets);
   }
 
-  initVitals(cfg.privacy.query_params_allowlist);
-  initReplay(cfg.replay, clientConfig?.appVersion, cfg.privacy.dom);
+  initVitals(cfg.privacy.queryParamsAllowlist);
 
   // Periodic flush
   flushTimer = setInterval(() => flushEvents(false), FLUSH_INTERVAL_MS);
@@ -186,26 +155,9 @@ function startCollection(endpoint: string): void {
   onAfterNavigation(() => flushEvents(false));
 }
 
-function applyServerConfig(cfg: ServerConfig): void {
-  serverConfig = cfg;
-  if (!cfg.enabled) {
-    // Discard replay buffer before stopCollection (which would flush it)
-    discardReplay();
-    clearBreadcrumbs();
-    stopCollection();
-    return;
-  }
-  // Propagate real config to all modules
-  updateBreadcrumbConfig(cfg.breadcrumbs, cfg.privacy.query_params_allowlist, cfg.privacy.dom);
-  updateErrorConfig(cfg.errors);
-  updateSessionConfig(cfg.privacy.query_params_allowlist);
-  applyReplaySampling(cfg.replay);
-}
-
 function stopCollection(): void {
   // Unregister listeners before tearing down the hook so the hook doesn't
   // call into half-destroyed modules during in-flight requests.
-  destroyReplay();
   destroyTracing();
   destroyBreadcrumbs();
   destroyErrors();
@@ -222,7 +174,7 @@ function stopCollection(): void {
 }
 
 function flushEvents(useBeacon: boolean): void {
-  if (!initialized || !serverConfig.enabled) return;
+  if (!initialized) return;
 
   const breadcrumbs = drainBreadcrumbs();
   const vitals = drainVitals();
