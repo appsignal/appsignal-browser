@@ -252,12 +252,28 @@ export interface TransactionBreadcrumb {
   metadata: Record<string, unknown>;
 }
 
+/** Wire shape for web vitals POSTed to `/metrics/webvitals` as a JSON array.
+ * Aligned with the server's `WebVital` struct in
+ * `appsignal-processor-rs/public_endpoint/http_flusher/src/metrics/web_vitals_mapper.rs`:
+ *
+ *   - `id`, `label`, `name`, `startTime`, `value` are REQUIRED. Missing any of
+ *     them makes serde drop the whole entry silently (HTTP 200, zero metrics).
+ *   - `label="browser-web-vital"` is the discriminator that selects the
+ *     `browser_webvital_*` metric naming (vs legacy `webvital_*` for the
+ *     `@appsignal/javascript` SDK) and enables CLS×1000 scaling server-side.
+ *   - `name` is the bare metric kind ("LCP", "CLS", ...). Server lowercases
+ *     and prefixes → `browser_webvital_lcp`.
+ *   - `rating`, `element`, `interaction_type` are server-ignored today (kept
+ *     for future server-side features; payload cost is trivial).
+ */
 export interface VitalEntry {
+  id: string;
+  label: "browser-web-vital";
   name: string;
+  startTime: number;
   value: number;
-  rating: string;
-  page_url: string;
-  timestamp: number;
+  page_url?: string;
+  rating?: string;
   element?: string;
   interaction_type?: string;
 }

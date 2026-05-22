@@ -104,8 +104,8 @@ describe("transport", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
 
     const vitals: VitalEntry[] = [
-      { name: "web.vital.lcp", value: 2140, rating: "good", page_url: "http://localhost/", timestamp: 1 },
-      { name: "web.vital.cls", value: 0.04, rating: "good", page_url: "http://localhost/", timestamp: 2 },
+      { id: "v3-lcp-1", label: "browser-web-vital", name: "LCP", startTime: 1, value: 2140, page_url: "http://localhost/", rating: "good" },
+      { id: "v3-cls-1", label: "browser-web-vital", name: "CLS", startTime: 2, value: 0.04, page_url: "http://localhost/", rating: "good" },
     ];
 
     sendVitals(vitals);
@@ -120,7 +120,9 @@ describe("transport", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(Array.isArray(body)).toBe(true);
     expect(body).toHaveLength(2);
-    expect(body[0].name).toBe("web.vital.lcp");
+    expect(body[0].name).toBe("LCP");
+    expect(body[0].label).toBe("browser-web-vital");
+    expect(body[0].id).toBe("v3-lcp-1");
   });
 
   it("sendVitals no-ops on an empty array", () => {
@@ -141,7 +143,7 @@ describe("transport", () => {
 
     setVisibility("hidden");
     sendVitals([
-      { name: "web.vital.lcp", value: 2140, rating: "good", page_url: "http://localhost/", timestamp: 1 },
+      { id: "v3-lcp-1", label: "browser-web-vital", name: "LCP", startTime: 1, value: 2140, page_url: "http://localhost/", rating: "good" },
     ]);
 
     expect(fetchSpy).not.toHaveBeenCalled();
