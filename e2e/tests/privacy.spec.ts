@@ -77,7 +77,7 @@ test.describe("network breadcrumb filtering", () => {
     // doesn't block requests, only their breadcrumb), so the API endpoint
     // captures the call — that confirms we tested the right thing rather than
     // a no-op.
-    await withSdkConfig(page, { breadcrumbs: { networkBlocklist: ["**/auth/**"] } });
+    await withSdkConfig(page, { privacy: { networkBlocklist: ["**/auth/**"] } });
 
     await page.goto("/");
     await page.click("#trigger-fetch-blocked");
