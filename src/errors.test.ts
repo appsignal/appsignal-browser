@@ -301,7 +301,7 @@ describe("errors", () => {
       expect(sent).toEqual([]);
     });
 
-    it("renames category 'network' to 'request' and derives action from data.url", () => {
+    it("derives a network breadcrumb's action from data.url", () => {
       const crumb: Breadcrumb = {
         timestamp: 1747756799_000,
         category: "network",
@@ -313,12 +313,9 @@ describe("errors", () => {
       fireError("with network crumb");
 
       const sent = captureSentBreadcrumbs();
-      // network → request rename happens at the wire boundary so the
-      // internal taxonomy stays unchanged but the server gets its preferred
-      // category name.
       expect(sent[0]).toEqual({
         timestamp: 1747756799,
-        category: "request",
+        category: "network",
         action: "https://api.example.com/cart/items",
         message: "POST 500 https://api.example.com/cart/items",
         metadata: crumb.data,

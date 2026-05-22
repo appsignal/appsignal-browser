@@ -238,12 +238,10 @@ export interface FrontendTransaction {
 
 /** Wire shape for a breadcrumb inside a FrontendTransaction.
  *
- * Different from the internal `Breadcrumb` in three ways:
+ * Differs from the internal `Breadcrumb` in three ways:
  * - timestamp in unix seconds (internal is ms)
- * - `category` uses server-side names (e.g. "request" for what the SDK
- *   internally calls "network")
  * - `action` is a category-specific identifier (selector for clicks, URL
- *   for navigation/request, etc.) — present even when empty
+ *   for navigation/network, etc.) — present even when empty
  * - `metadata` always present (defaults to `{}`) where internal `data` is
  *   optional */
 export interface TransactionBreadcrumb {

@@ -228,9 +228,7 @@ function toTransactionBreadcrumb(b: Breadcrumb): TransactionBreadcrumb {
   const data = b.data ?? {};
   return {
     timestamp: Math.floor(b.timestamp / 1000),
-    // Internal taxonomy uses "network"; server expects "request". Other
-    // categories pass through unchanged.
-    category: b.category === "network" ? "request" : b.category,
+    category: b.category,
     action: actionForBreadcrumb(b.category, data),
     message: b.message,
     metadata: data,
