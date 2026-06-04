@@ -49,6 +49,10 @@
       AppsignalBrowser.init({
         key: "your-app-key",
         endpoint: location.origin,
+        // E2E exercises the breadcrumb/session journey stream, which is off by
+        // default (session.enabled defaults to false). Tests can still override
+        // via __appsignalConfig.
+        session: { enabled: true },
         ...(window.__appsignalConfig || {}),
       });
       document.getElementById("status").textContent = "SDK initialised";

@@ -27,6 +27,7 @@
       AppsignalBrowser.init({
         key: "your-app-key",
         endpoint: location.origin,
+        session: { enabled: true },
         // Drop known-noisy browser errors. Because beforeError runs early,
         // these errors never enter the breadcrumb timeline or consume a
         // dedupe slot — they're as if they never happened.
