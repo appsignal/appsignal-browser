@@ -1,11 +1,11 @@
-import type { BrowserConfig, EventPayload, ResolvedConfig } from "./types.js";
+import type { BrowserConfig, EventPayload, EventVital, ResolvedConfig } from "./types.js";
 import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
-import { initVitals, drainVitals, destroyVitals } from "./vitals.js";
+import { initVitals, drainVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
 
-import { initTransport, sendEvents, sendBeaconEvents, sendVitals, destroyTransport } from "./transport.js";
+import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
@@ -24,7 +24,7 @@ let lifecycleUnsubscribers: (() => void)[] = [];
 // SDK's own POSTs don't end up in their own breadcrumb trail. Transport
 // owns the URL templates per kind; this list only exists for self-filtering.
 const EVENTS_PATH = "/ingest/browser";
-const ERROR_PATH = "/collect";
+const ERROR_PATH = "/ingest/browser/errors";
 const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
@@ -82,6 +82,35 @@ export function addBreadcrumb(breadcrumb: {
 }): void {
   if (!initialized) return;
   addManualBreadcrumb(breadcrumb);
+}
+
+/** Tell the SDK which route template the user is currently on — typically
+ * a router-shaped string like `/users/:id` or `/orders/[id]/items`.
+ *
+ * Subsequent web-vital measurements are stamped with this template so the
+ * server can aggregate by route instead of by raw URL. Persists until the
+ * next call. Pass `null` to clear.
+ *
+ * If the host app never calls this, the server still groups vitals by an
+ * auto-derived template (numeric IDs and UUIDs collapse via regex), but
+ * explicit templates produce cleaner buckets — call this on every
+ * navigation in your router for best results.
+ *
+ * @example
+ * // React Router
+ * useEffect(() => {
+ *   appsignal.setRouteTemplate(route.path); // e.g. "/users/:id"
+ * }, [route.path]);
+ *
+ * @example
+ * // Next.js App Router
+ * useEffect(() => {
+ *   appsignal.setRouteTemplate(usePathname()); // e.g. "/users/[id]"
+ * }, [pathname]);
+ */
+export function setRouteTemplate(template: string | null): void {
+  if (!initialized) return;
+  setVitalsRouteTemplate(template);
 }
 
 export function flush(): void {
@@ -157,7 +186,15 @@ function startCollection(endpoint: string): void {
   // instead of wrapping history methods again. Fire *after* the hook so
   // the navigation breadcrumb (added by recordNav via onAfterNavigation)
   // lands in this flush, not the next one.
-  onAfterNavigation(() => flushEvents(false));
+  //
+  // markVitalsNavigation runs *after* flushEvents so any CLS entries
+  // accumulated under the outgoing URL ship with their current values
+  // before the baseline shifts. Subsequent CLS callbacks then report
+  // deltas against the post-flush cumulative — i.e. per-route shifts.
+  onAfterNavigation(() => {
+    flushEvents(false);
+    markVitalsNavigation();
+  });
 }
 
 function stopCollection(): void {
@@ -181,26 +218,38 @@ function stopCollection(): void {
 function flushEvents(useBeacon: boolean): void {
   if (!initialized) return;
 
-  // Two POSTs per flush — one for breadcrumbs (legacy /ingest/browser),
-  // one for vitals (/metrics/webvitals). Each kind has its own URL and
-  // content type; bundling them was awkward across two different ingest
-  // routes. Same cadence as before, no special lifecycle batching.
-  const breadcrumbs = drainBreadcrumbs();
-  if (breadcrumbs.length > 0) {
-    const payload: EventPayload = {
-      type: "events",
-      session: getSessionContext(),
-      breadcrumbs,
-      app_version: clientConfig?.appVersion,
-    };
-    if (useBeacon) {
-      sendBeaconEvents(payload);
-    } else {
-      sendEvents(payload);
-    }
-  }
+  // One POST per flush to /ingest/browser as an `events` payload. Web vitals
+  // always ride along; the session/journey stream (breadcrumbs, later replay)
+  // is included only when `session.enabled` (default false). With it off, only
+  // errors + web vitals leave the browser — breadcrumbs are still collected
+  // (for error-report context via /collect and the nav hook that drives
+  // per-route vitals), just not shipped here. Each vital carries its
+  // measurement-time `startTime` (epoch ms) as `timestamp`.
+  const sendSessionStream = resolved!.session.enabled;
+  const breadcrumbs = sendSessionStream ? drainBreadcrumbs() : [];
+  const session = getSessionContext();
+  const vitals: EventVital[] = drainVitals().map((v) => ({
+    name: v.name,
+    value: v.value,
+    rating: v.rating,
+    page_url: v.page_url ?? session.page_url,
+    timestamp: v.startTime,
+    element: v.element,
+    interaction_type: v.interaction_type,
+  }));
 
-  // sendVitals no-ops on empty and picks beacon vs fetch from
-  // document.visibilityState — useBeacon doesn't apply here.
-  sendVitals(drainVitals());
+  if (breadcrumbs.length === 0 && vitals.length === 0) return;
+
+  const payload: EventPayload = {
+    type: "events",
+    session,
+    breadcrumbs,
+    vitals,
+    app_version: clientConfig?.appVersion,
+  };
+  if (useBeacon) {
+    sendBeaconEvents(payload);
+  } else {
+    sendEvents(payload);
+  }
 }

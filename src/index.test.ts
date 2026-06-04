@@ -46,7 +46,7 @@ describe("SDK integration", () => {
   });
 
   it("initializes, collects breadcrumbs, and flushes them", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "hello" });
     flush();
@@ -62,9 +62,8 @@ describe("SDK integration", () => {
     const testCrumb = body.breadcrumbs.find((b: { category: string }) => b.category === "test");
     expect(testCrumb).toBeDefined();
     expect(testCrumb.message).toBe("hello");
-    // Vitals POST to /metrics/webvitals on their own; they should not
-    // ride inside the events payload.
-    expect(body.vitals).toBeUndefined();
+    // Web vitals ride inside the events payload (empty here — none collected).
+    expect(body.vitals).toEqual([]);
   });
 
   it("does not send before init", () => {
@@ -77,7 +76,7 @@ describe("SDK integration", () => {
   });
 
   it("sends events to the correct endpoint with ingestion key", () => {
-    init({ key: "my-key", endpoint: "https://example.com" });
+    init({ key: "my-key", endpoint: "https://example.com", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "check url" });
     flush();
@@ -98,27 +97,26 @@ describe("SDK integration", () => {
     });
     window.dispatchEvent(error);
 
-    const errorPayloads = sentPayloads.filter(p => {
-      try { return JSON.parse(p.body).type === "error"; } catch { return false; }
-    });
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser/errors"));
     expect(errorPayloads).toHaveLength(0);
   });
 
   it("second init call is ignored", () => {
-    init({ key: "key-1" });
+    init({ key: "key-1", session: { enabled: true } });
     init({ key: "key-2" });
 
     addBreadcrumb({ category: "test", message: "only one init" });
     flush();
 
-    const eventPayloads = sentPayloads.filter(p => p.url.includes("ingest/browser?key="));
+    const eventPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser"));
+    expect(eventPayloads.length).toBeGreaterThan(0);
     for (const p of eventPayloads) {
-      expect(p.url).toContain("key=key-1");
+      expect(p.url).toContain("api_key=key-1");
     }
   });
 
   it("destroy stops collection and cleans up", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "before", message: "before destroy" });
     flush();
@@ -136,12 +134,13 @@ describe("SDK integration", () => {
   });
 
   it("captureError sends error payload", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     captureError(new Error("manual error"));
 
-    // Errors POST to /collect; events go to /ingest/browser.
-    const errorPayloads = sentPayloads.filter(p => p.url.includes("/collect"));
+    // Errors POST to /ingest/browser/errors as FrontendTransaction; events
+    // POST to /ingest/browser. Distinguish by URL path.
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser/errors"));
     expect(errorPayloads.length).toBeGreaterThan(0);
 
     const body = JSON.parse(errorPayloads[0].body);
@@ -153,7 +152,7 @@ describe("SDK integration", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is
     // cleared in the process.
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
     setUser({ id: "u1", email: "one@test.com" });
 
     addBreadcrumb({ category: "before", message: "before logout" });
@@ -181,18 +180,18 @@ describe("SDK integration", () => {
   });
 
   it("attaches tab_id to event and error payloads", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "tab id check" });
     captureError(new Error("tab id error"));
     flush();
 
     const eventPayloads = sentPayloads
-      .filter(p => p.url.includes("/ingest/browser"))
+      .filter(p => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
       .map(p => { try { return JSON.parse(p.body) } catch { return null } })
       .filter(b => b?.type === "events");
     const errorPayloads = sentPayloads
-      .filter(p => p.url.includes("/collect"))
+      .filter(p => p.url.includes("/ingest/browser/errors"))
       .map(p => { try { return JSON.parse(p.body) } catch { return null } })
       .filter(b => !!b);
 
@@ -216,6 +215,7 @@ describe("SDK integration", () => {
     init({
       key: "test-key",
       beforeError: (e) => /ResizeObserver/.test(e.message) ? null : e,
+      session: { enabled: true },
     });
 
     for (let i = 0; i < 8; i++) {
@@ -225,7 +225,7 @@ describe("SDK integration", () => {
     flush();
 
     const errorPayloads = sentPayloads
-      .filter((p) => p.url.includes("/collect"))
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
       .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
       .filter((b) => !!b);
 
@@ -233,13 +233,37 @@ describe("SDK integration", () => {
     expect(errorPayloads[0].error.message).toBe("real diagnostic error after noise");
 
     const eventBodies = sentPayloads
-      .filter((p) => p.url.includes("/ingest/browser"))
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
       .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
       .filter((b) => b?.type === "events");
     const noisyErrorCrumbs = eventBodies
       .flatMap((b) => (b.breadcrumbs ?? []) as Array<{ category: string; message: string }>)
       .filter((b) => b.category === "error" && b.message.includes("ResizeObserver"));
     expect(noisyErrorCrumbs).toHaveLength(0);
+  });
+
+  it("session.enabled=false (default) ships only errors, no journey events", () => {
+    // With the session/journey stream disabled (the default), breadcrumb
+    // activity alone must not produce an events payload — only errors leave
+    // the browser (web vitals would still ride an events payload, but none are
+    // emitted in jsdom).
+    init({ key: "test-key", session: { enabled: false } });
+
+    addBreadcrumb({ category: "test", message: "should not ship" });
+    captureError(new Error("real error"));
+    flush();
+
+    const eventPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events");
+    const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => !!b);
+
+    expect(eventPayloads).toHaveLength(0);
+    expect(errorPayloads.length).toBeGreaterThan(0);
   });
 
   it("destroy fully unwinds the fetch patch chain when tracing is enabled", async () => {
@@ -261,7 +285,7 @@ describe("SDK integration", () => {
   });
 
   it("setUser attaches user context to payloads", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     setUser({ id: "u1", email: "test@test.com", name: "Test User" });
 

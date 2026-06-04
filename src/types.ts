@@ -47,6 +47,14 @@ export interface BreadcrumbsConfig {
 }
 
 export interface SessionConfig {
+  /** Whether the session/journey stream is *sent* — the periodic `events`
+   * payload's breadcrumbs (and, later, session replay). Web vitals always
+   * ship and errors (with their own breadcrumb trail via `/collect`) are
+   * unaffected; a `session_id` is still generated for those. Defaults to
+   * false: the processor currently ignores session + breadcrumbs on
+   * `/ingest/browser` (v1 reads vitals only), so shipping them is wasted
+   * bandwidth until the Sessions/Replay tier exists server-side. */
+  enabled?: boolean;
   inactivityTimeoutMs?: number;
 }
 
@@ -111,7 +119,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
     longTasks: true,
     scrollDepth: true,
   },
-  session: { inactivityTimeoutMs: 1_800_000 },
+  session: { enabled: false, inactivityTimeoutMs: 1_800_000 },
   privacy: {
     queryParamsAllowlist: [],
     networkBlocklist: [],
@@ -272,8 +280,28 @@ export interface VitalEntry {
   name: string;
   startTime: number;
   value: number;
+  /** Route identifier — either the template the host app set via
+   * `setRouteTemplate("/users/:id")` or `location.href` (the server then
+   * auto-templates it). One field; one wire shape. */
   page_url?: string;
   rating?: string;
+  element?: string;
+  interaction_type?: string;
+}
+
+/** Web vital as sent inside an `events` payload to `/ingest/browser`. Matches
+ * the processor's `VitalPayload` (browser/convert.rs): bare metric name, value,
+ * epoch-ms timestamp, and the dimensions kept for query-time aggregation.
+ *
+ * `page_url` here is what the SDK decides to send: the current route template
+ * if `setRouteTemplate` was called, otherwise the raw URL. The server runs
+ * `auto_template` either way — idempotent on templates, helpful on raw URLs. */
+export interface EventVital {
+  name: string;
+  value: number;
+  rating?: string;
+  page_url: string;
+  timestamp: number;
   element?: string;
   interaction_type?: string;
 }
@@ -282,6 +310,7 @@ export interface EventPayload {
   type: "events";
   session: SessionContext;
   breadcrumbs: Breadcrumb[];
+  vitals: EventVital[];
   app_version?: string;
 }
 

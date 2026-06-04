@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initTransport, sendError, sendEvents, sendReplayChunk, sendVitals, destroyTransport } from "./transport.js";
-import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext, VitalEntry } from "./types.js";
+import { initTransport, sendError, sendEvents, sendReplayChunk, destroyTransport } from "./transport.js";
+import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext } from "./types.js";
 
 const mockSession: SessionContext = {
   session_id: "test-session",
@@ -54,13 +54,13 @@ describe("transport", () => {
     vi.useRealTimers();
   });
 
-  it("POSTs errors to /collect with api_key and application/json", () => {
+  it("POSTs errors to /ingest/browser/errors with api_key and application/json", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
 
     sendError(errorPayload());
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost/collect?api_key=test-key",
+      "http://localhost/ingest/browser/errors?api_key=test-key",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -69,9 +69,9 @@ describe("transport", () => {
   });
 
   it("sendError uses sendBeacon when document.visibilityState is hidden", () => {
-    // Mid-unload the fetch can be cancelled; beacon survives. Trade-off:
-    // beacon Blob type is constrained to CORS-safelisted values so JSON
-    // ships as text/plain.
+    // Mid-unload the fetch can be cancelled; beacon survives. The beacon Blob
+    // type is constrained to CORS-safelisted values, so the JSON body ships as
+    // text/plain (which the ingest endpoint reads raw anyway).
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
     const beaconSpy = vi.fn().mockReturnValue(true);
     (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
@@ -81,7 +81,7 @@ describe("transport", () => {
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(beaconSpy).toHaveBeenCalledWith(
-      "http://localhost/collect?api_key=test-key",
+      "http://localhost/ingest/browser/errors?api_key=test-key",
       expect.any(Blob),
     );
   });
@@ -93,64 +93,12 @@ describe("transport", () => {
       type: "events",
       session: mockSession,
       breadcrumbs: [],
+      vitals: [],
     };
 
     sendEvents(payload);
 
     expect(fetchSpy).toHaveBeenCalled();
-  });
-
-  it("POSTs vitals to /metrics/webvitals as a JSON array with api_key", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
-
-    const vitals: VitalEntry[] = [
-      { id: "v3-lcp-1", label: "browser-web-vital", name: "LCP", startTime: 1, value: 2140, page_url: "http://localhost/", rating: "good" },
-      { id: "v3-cls-1", label: "browser-web-vital", name: "CLS", startTime: 2, value: 0.04, page_url: "http://localhost/", rating: "good" },
-    ];
-
-    sendVitals(vitals);
-
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost/metrics/webvitals?api_key=test-key",
-      expect.objectContaining({
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(Array.isArray(body)).toBe(true);
-    expect(body).toHaveLength(2);
-    expect(body[0].name).toBe("LCP");
-    expect(body[0].label).toBe("browser-web-vital");
-    expect(body[0].id).toBe("v3-lcp-1");
-  });
-
-  it("sendVitals no-ops on an empty array", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
-    const beaconSpy = vi.fn().mockReturnValue(true);
-    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
-
-    sendVitals([]);
-
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(beaconSpy).not.toHaveBeenCalled();
-  });
-
-  it("sendVitals uses sendBeacon when document.visibilityState is hidden", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
-    const beaconSpy = vi.fn().mockReturnValue(true);
-    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
-
-    setVisibility("hidden");
-    sendVitals([
-      { id: "v3-lcp-1", label: "browser-web-vital", name: "LCP", startTime: 1, value: 2140, page_url: "http://localhost/", rating: "good" },
-    ]);
-
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(beaconSpy).toHaveBeenCalledWith(
-      "http://localhost/metrics/webvitals?api_key=test-key",
-      expect.any(Blob),
-    );
   });
 
   const replayPayload = (eventsSizeBytes = 100): ReplayChunk => ({
@@ -170,7 +118,7 @@ describe("transport", () => {
 
     expect(beaconSpy).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser?key=test-key",
+      "http://localhost/ingest/browser?api_key=test-key",
       expect.objectContaining({ method: "POST" }),
     );
     // Plain fetch path — no keepalive
@@ -185,7 +133,7 @@ describe("transport", () => {
     sendReplayChunk(replayPayload(), true);
 
     expect(beaconSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser?key=test-key",
+      "http://localhost/ingest/browser?api_key=test-key",
       expect.any(Blob),
     );
     expect(fetchSpy).not.toHaveBeenCalled();

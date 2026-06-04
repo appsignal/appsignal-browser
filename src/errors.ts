@@ -196,6 +196,10 @@ function handleError(
   }
 }
 
+// Map our internal BrowserError to the AppSignal `FrontendTransaction` wire
+// shape consumed by the processor's frontend_errors pipeline. `revision` is
+// the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
+// site_id + revision); without it stacks land unsymbolicated.
 function toFrontendTransaction(
   error: BrowserError,
   session: SessionContext,
