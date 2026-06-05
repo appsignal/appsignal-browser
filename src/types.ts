@@ -262,12 +262,12 @@ export interface TransactionBreadcrumb {
 }
 
 /** Internal in-memory shape the vitals reporters collect (see `vitals.ts`).
- * Maps 1:1 to the wire `EventVital` at send time, where `startTime` becomes
- * the epoch-ms `timestamp`. `name` is the bare metric kind ("LCP", "CLS", ...). */
+ * Maps 1:1 to the wire `EventVital`. `name` is the bare metric kind
+ * ("LCP", "CLS", ...); `timestamp` is epoch-ms of when the metric occurred. */
 export interface VitalEntry {
   name: string;
   value: number;
-  startTime: number;
+  timestamp: number;
   /** Route identifier — either the template the host app set via
    * `setRouteTemplate("/users/:id")` or `location.href` (the server then
    * auto-templates it). */

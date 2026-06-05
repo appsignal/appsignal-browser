@@ -82,7 +82,7 @@ export function initVitals(queryParamsAllowlist: string[]): void {
       const pageValue = Math.max(0, metric.value - clsBaseline);
       pushOrReplaceVital({
         name: metric.name,
-        startTime: Date.now(),
+        timestamp: occurredAt(metric),
         value: pageValue,
         page_url: resolvePageUrl(),
       });
@@ -106,11 +106,24 @@ function reporter(resolveUrl: () => string = resolvePageUrl): (metric: Metric) =
     if (destroyed) return;
     pushOrReplaceVital({
       name: metric.name,
-      startTime: Date.now(),
+      timestamp: occurredAt(metric),
       value: metric.value,
       page_url: resolveUrl(),
     });
   };
+}
+
+/** Wall-clock epoch-ms of when the metric actually occurred. A web vital is
+ * reported when it finalises — for LCP/CLS/INP that can be long after the
+ * event itself (e.g. at page-hide on a long-lived SPA), so `Date.now()` at
+ * callback time would stamp it into the wrong minute bucket server-side. Each
+ * underlying `PerformanceEntry.startTime` is measured from navigation start;
+ * `performance.timeOrigin` anchors that to the epoch. Falls back to now if a
+ * metric ever arrives without entries. */
+function occurredAt(metric: Metric): number {
+  const entries = metric.entries ?? [];
+  const last = entries[entries.length - 1];
+  return Math.round(performance.timeOrigin + (last ? last.startTime : performance.now()));
 }
 
 let destroyed = false;

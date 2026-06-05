@@ -23,15 +23,17 @@ vi.mock("web-vitals", () => {
 
 import { initVitals, drainVitals, destroyVitals, setRouteTemplate, markVitalsNavigation } from "./vitals.js";
 
-// The reporters read only name and value off the metric.
-function fakeLCP(value: number) {
-  return { name: "LCP", value };
+// The reporters read name, value, and entries[].startTime off the metric.
+// `startTime` is the performance entry's time-from-navigation; tests that
+// don't care about the timestamp omit it (occurredAt falls back to now).
+function fakeLCP(value: number, startTime?: number) {
+  return { name: "LCP", value, entries: startTime == null ? [] : [{ startTime }] };
 }
 function fakeCLS(value: number) {
-  return { name: "CLS", value };
+  return { name: "CLS", value, entries: [] };
 }
 function fakeINP(value: number) {
-  return { name: "INP", value };
+  return { name: "INP", value, entries: [] };
 }
 
 function setLocation(href: string) {
@@ -64,6 +66,17 @@ describe("vitals", () => {
       initVitals([]);
       expect(handlers.fcp.opts).toBeUndefined();
       expect(handlers.ttfb.opts).toBeUndefined();
+    });
+
+    it("stamps the metric with its occurrence time, not the report time", () => {
+      // web-vitals can report a metric long after it occurred (e.g. LCP
+      // finalising at page-hide). The timestamp must reflect when the entry
+      // happened — performance.timeOrigin + entry.startTime — so the server
+      // buckets it into the right minute regardless of when the callback ran.
+      initVitals([]);
+      handlers.lcp.cb(fakeLCP(2400, 1500));
+      const lcp = drainVitals().find((v) => v.name === "LCP");
+      expect(lcp?.timestamp).toBe(Math.round(performance.timeOrigin + 1500));
     });
 
     it("keeps only the latest LCP value for the same page", () => {

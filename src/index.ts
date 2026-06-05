@@ -223,8 +223,7 @@ function flushEvents(useBeacon: boolean): void {
   // is included only when `session.enabled` (default false). With it off, only
   // errors + web vitals leave the browser — breadcrumbs are still collected
   // (for error-report context via /ingest/browser/errors and the nav hook that
-  // drives per-route vitals), just not shipped here. Each vital carries its
-  // measurement-time `startTime` (epoch ms) as `timestamp`.
+  // drives per-route vitals), just not shipped here.
   const sendSessionStream = resolved!.session.enabled;
   const breadcrumbs = sendSessionStream ? drainBreadcrumbs() : [];
   const session = getSessionContext();
@@ -232,7 +231,7 @@ function flushEvents(useBeacon: boolean): void {
     name: v.name,
     value: v.value,
     page_url: v.page_url ?? session.page_url,
-    timestamp: v.startTime,
+    timestamp: v.timestamp,
   }));
 
   if (breadcrumbs.length === 0 && vitals.length === 0) return;
