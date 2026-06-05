@@ -61,14 +61,14 @@ export function initVitals(queryParamsAllowlist: string[]): void {
   currentRouteTemplate = "";
   loadRoute = null;
 
-  // LCP, INP, and CLS all finalise through web-vitals' `whenIdleOrHidden`
-  // helper, which uses `requestIdleCallback` (or `setTimeout(0)` as a
-  // fallback). All three run AFTER our flush on page-unload, so the final
-  // metric would land in collectedVitals too late to ship. Using
-  // `reportAllChanges: true` pushes values during the page's normal
-  // lifetime as they update, and pushOrReplaceVital keeps only the latest
-  // per (metric, page) so we don't pollute parquet with intermediate rows.
-  // FCP and TTFB fire once early in the page, so they don't need this.
+  // `reportAllChanges: true` surfaces LCP/CLS/INP as they update through the
+  // page's life, not just at finalisation. That's what lets the SDK capture a
+  // route's CLS/INP at the navigation that ends it — without it, web-vitals
+  // reports those once, at page-hide, when an SPA is already on its final
+  // route. pushOrReplaceVital keeps only the latest per (metric, page); the
+  // flush model (see index.ts) drains vitals only at route/page boundaries, so
+  // the rising intermediate values aren't shipped. FCP/TTFB fire once, early,
+  // and are registered without it.
   onLCP(reporter(resolveLoadPageUrl), { reportAllChanges: true });
 
   // CLS uses its own handler instead of `reporter` because the value

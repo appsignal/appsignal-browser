@@ -164,12 +164,8 @@ function startCollection(endpoint: string): void {
 
   initVitals(cfg.privacy.queryParamsAllowlist);
 
-  // Periodic flush — streams the breadcrumb/session journey only. Vitals are
-  // deliberately excluded: with reportAllChanges the buffer holds an ever-
-  // rising intermediate value, so draining it on a timer would ship the same
-  // metric repeatedly as separate, non-final samples. Vitals ride the
-  // navigation + page-hide flushes instead, where their value is final for the
-  // route. (With session streaming off — the default — this becomes a no-op.)
+  // Periodic flush: breadcrumb/session journey only (a no-op when session
+  // streaming is off, the default). Vitals are excluded — see flushEvents.
   flushTimer = setInterval(() => flushEvents({ includeVitals: false }), FLUSH_INTERVAL_MS);
 
   // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
@@ -233,9 +229,10 @@ function flushEvents({
   // context via /ingest/browser/errors and the nav hook that drives per-route
   // vitals), just not shipped here.
   //
-  // Vitals are drained only when `includeVitals` — i.e. at the boundaries where
-  // their value is final for a route (SPA navigation, visibility-hidden/
-  // pagehide, manual flush/destroy), never on the periodic timer.
+  // Vitals drain only when `includeVitals` (SPA navigation, visibility-hidden/
+  // pagehide, manual flush/destroy) — never on the periodic timer. Under
+  // reportAllChanges the buffered value keeps rising, so a timed drain would
+  // ship the same metric repeatedly as separate, non-final samples.
   const sendSessionStream = resolved!.session.enabled;
   const breadcrumbs = sendSessionStream ? drainBreadcrumbs() : [];
   const session = getSessionContext();

@@ -82,6 +82,7 @@ interface BrowserConfig {
     capacity?: number;             // ring buffer size, default: 100
   };
   session?: {
+    enabled?: boolean;             // default: false — ship the breadcrumb/session journey stream
     inactivityTimeoutMs?: number;  // default: 1_800_000 (30 minutes)
   };
   privacy?: {
@@ -144,9 +145,10 @@ function destroy(): void;
 Defaults are tuned to collect by default and lean on the privacy hooks to scope what ships:
 
 - `errors.sampleRate: 1.0`; `errors.enabled: true`.
-- Breadcrumbs and web vitals run unconditionally — there is no top-level off switch (use `destroy()` to stop the SDK, or `breadcrumbs.network: false` / per-category toggles to narrow what's collected).
+- Web vitals always ship. Breadcrumbs are always *collected* (errors carry their recent trail), but the breadcrumb/session journey stream is only *sent* when `session.enabled: true`. There is no top-level off switch for collection; use `destroy()` to stop the SDK, or `breadcrumbs.network: false` / per-category toggles to narrow what's collected.
 - `privacy.queryParamsAllowlist: []` — strip every query param from captured URLs (network breadcrumbs, navigation breadcrumbs, `page_url`, `referrer`, vital `page_url`). OAuth-style query-shaped fragments are scrubbed by the same rule; hash routes and opaque anchors are preserved verbatim.
 - `privacy.networkBlocklist: []` — glob URL patterns to suppress entirely from network breadcrumbs (host + path match).
+- `session.enabled: false` — only errors + web vitals leave the browser; the breadcrumb/session journey stream stays local until opted in.
 - `session.inactivityTimeoutMs: 1_800_000` (30 minutes).
 
 Per-category breadcrumb toggles (`breadcrumbs.network`, `clicks`, `console`, etc.) are read by each handler at fire time, so the cost of an "off" toggle is one branch per event. They aren't intended to flip at runtime — they're locked at init — but the indirection keeps the call sites uniform and would let a future runtime override path slot in without restructuring the handlers.
@@ -175,7 +177,7 @@ A session is a continuous period of user activity on a website.
 
 ### Breadcrumbs
 
-Ordered timeline of events during a session. Flushed with the session payload and sent immediately before error events. Individual categories and ring buffer capacity are controlled via server config.
+Ordered timeline of events during a session. Snapshotted into error payloads, and (when `session.enabled`) drained into the periodic events flush. Individual categories and ring buffer capacity are set via the `breadcrumbs.*` config at `init()`.
 
 **Click breadcrumbs.** On every `click`, record a breadcrumb with a human-readable label. Label resolution priority:
 
@@ -271,20 +273,15 @@ Collect Core Web Vitals and supplementary metrics from the [web-vitals](https://
 | FCP | First Contentful Paint | No |
 | TTFB | Time to First Byte | No |
 
-Each metric is associated with a page navigation. Interaction-dependent metrics (INP) are only recorded after at least one interaction. CLS accumulates over the life of the page.
+Each metric is attributed to a route. **Load metrics** (LCP, FCP, TTFB) are anchored to the initial navigation and frozen to the route they loaded on — a late LCP that fires *after* a client-side navigation stays on the initial route, per the Core Web Vitals spec (its largest-contentful-paint stream is finalized by the interaction that starts the soft nav). **CLS and INP** accrue per route: CLS is reported as the delta since the last navigation, so each route gets only its own shifts; INP is only recorded after an interaction. Call `setRouteTemplate()` on each router navigation so the server aggregates by route shape (`/users/:id`) rather than raw URL.
 
-LCP, CLS, and INP are registered with `reportAllChanges: true` so their values flow into the SDK as they update, not only at page lifecycle end. Each time a callback fires, the SDK replaces any existing queued vital with the same `(name, page_url)` pair — only the latest value per (metric, page) is held for the next flush. This avoids a race where `web-vitals` would otherwise defer final LCP / CLS / INP finalization to its `whenIdleOrHidden` helper (which runs via `requestIdleCallback` / `setTimeout(0)`), landing after the SDK's own unload-time flush and losing the metric. FCP and TTFB fire once, early in the page, and do not need this treatment.
+LCP, CLS, and INP are registered with `reportAllChanges: true` so their values flow into the SDK as they update, not only at page-lifecycle end. This is what makes per-route attribution possible: without it `web-vitals` reports CLS/INP exactly once, at page-hide — by which point an SPA is on its final route, so a route's value could never be captured at the navigation that ends it. Each callback replaces any queued vital with the same `(name, page_url)` pair, holding only the latest value per (metric, page). FCP and TTFB fire once, early, and are registered without it.
 
-Vitals use the `web-vitals/attribution` build, providing attribution alongside the value:
-- **LCP**: `element` — CSS selector of the largest contentful element.
-- **CLS**: `element` — CSS selector of the largest layout shift target.
-- **INP**: `element` — CSS selector of the interaction target. `interaction_type` — `"pointer"` or `"keyboard"`.
+Per-sample attribution (which element caused a slow LCP, the INP interaction target) is **not** collected in v1: it's per-visit diagnostic data that belongs in a raw sample store, not the aggregated metrics pipeline this feeds.
 
-FCP and TTFB are collected without attribution (basic handler).
+Vitals ride in the `vitals` array of the `events` payload. Each entry carries just `name`, `value`, `page_url`, and `timestamp` (the metric's occurrence time, derived from `performance.timeOrigin + entry.startTime`) — the four fields the server stores. `page_url` is the `setRouteTemplate()` template if set, otherwise the raw URL (the server auto-templates it); query params are filtered through `privacy.queryParamsAllowlist` first (all stripped by default).
 
-Vitals are sent in the `vitals` array of the `events` payload, separate from `BrowserEvent` entries. Attributed to the page URL at collection time, with query params filtered through `privacy.queryParamsAllowlist` (same rules as network breadcrumbs). All params stripped by default.
-
-Vital names: `web.vital.lcp`, `web.vital.cls`, `web.vital.inp`, `web.vital.fcp`, `web.vital.ttfb`. The backend ingests them into the generic metric system (not a dedicated table). Each vital is a gauge with dimensions for page URL path, browser, device type, and app version. Reuses existing metric storage, aggregation (p75, p95), alerting, and dashboards. Page URL path is the primary grouping dimension. When query params are present (via allowlist), they are stored as an additional dimension so the UI can show per-param breakdowns as children of the path aggregate.
+Server-side the names become `browser_webvital_lcp` / `_cls` / `_inp` / `_fcp` / `_ttfb` and feed the metrics_v3 aggregation pipeline, which folds samples by `(name, page_url, app_version)` per minute into `metrics.browser_webvitals_minutely` with p90 / p95 percentiles. CLS is stored ×1000 so all five share an integer scale. Rating (good / needs-improvement / poor) is derived from `value` at query time against Google's thresholds — not stored.
 
 ### Error collection
 
@@ -318,16 +315,15 @@ Out of scope for v1. The `replay` module is a stub; rrweb is not bundled and nev
 
 ### Event batching and transport
 
-All non-error, non-replay events (breadcrumbs, vitals, session metadata) are batched into one payload, sent:
-- On page hide (`visibilitychange` to hidden). web-vitals registers its own `visibilitychange` listeners during `initVitals()`, but it also defers final LCP / CLS / INP finalization through a `requestIdleCallback` / `setTimeout(0)` helper that runs after the SDK's flush. To avoid losing that last value, the SDK registers LCP / CLS / INP with `reportAllChanges: true` and keeps only the latest per `(name, page_url)` in the vitals array — the most recent known value always lands in the current flush.
-- On tab close or navigation away (`pagehide`, when not persisted by bfcache).
-- Every 30 seconds if the page is active.
-- On explicit `flush()`.
-- On SPA navigation (route change).
+All non-error, non-replay events (breadcrumbs, vitals, session metadata) are batched into one `events` payload. Flush triggers:
+- **Page hide** (`visibilitychange` to hidden) and **tab close / navigation away** (`pagehide`, when not bfcache-persisted) — best-effort via `sendBeacon`. web-vitals registers its own `visibilitychange` listeners during `initVitals()`, before the SDK's, and v4+'s `onHidden` reports synchronously — so the final LCP/CLS/INP lands in the buffer before this flush drains it.
+- **SPA navigation** (route change) — ships the outgoing route's vitals before the CLS baseline resets.
+- **Explicit `flush()`**.
+- **Every 30 seconds** while the page is active — carries the breadcrumb/session journey only (a no-op when `session.enabled` is off). Vitals are deliberately *excluded* from the periodic flush: under `reportAllChanges` their buffered value keeps rising, so draining it on a timer would ship the same metric repeatedly as separate, non-final samples. Vitals ride the navigation and page-hide flushes, where the value is final for the route.
 
 **Transport.** During a live session, events and replay chunks go via plain `fetch`. On `pagehide` / `visibilitychange → hidden`, a best-effort flush uses `navigator.sendBeacon`, which the browser delivers even as the page is unloading. Chromium caps both `sendBeacon` and `fetch({keepalive:true})` bodies at ~64 KB, so larger payloads are dropped on unload rather than attempted — the keepalive fallback Chrome would have rejected anyway. The lost payload is whatever accumulated since the last periodic flush: up to 5 s of replay events (often the trailing slice of a FullSnapshot-bearing chunk) or up to 30 s of breadcrumbs/vitals. Small payloads (the common case for events) fit under the cap and survive.
 
-The ingestion key is always a query parameter: `POST /ingest/browser?key=<key>`. `Content-Type: text/plain` (body is JSON, but `text/plain` avoids CORS preflight, critical for cross-origin collection). The backend parses as JSON regardless of Content-Type.
+The ingestion key is always a query parameter: `POST /ingest/browser?api_key=<key>` (errors go to `/ingest/browser/errors`, same param). Events use `Content-Type: text/plain` (body is JSON, but `text/plain` avoids a CORS preflight, critical for cross-origin collection); errors use `application/json`. The backend parses JSON regardless of Content-Type.
 
 **Retry.** Failed batches retry up to 3 times with exponential backoff and jitter. 5xx uses 1-second base (1s, 2s, 4s). 429 uses 5-second base (5s, 10s, 20s) to respect server capacity. Client errors (4xx other than 429) are not retried. If the browser goes offline mid-request, or all in-line retries are exhausted while the server is still failing, the payload goes into an in-memory retry queue bounded to 32 MB total. The queue drains on the next `online` event and on a 30 s periodic timer, so transient outages that don't trigger a network-state change (e.g. a server restart with an otherwise-healthy network) still recover. Eviction is FIFO: when a new payload would push the queue past 32 MB, the oldest entries drop until it fits. Single payloads above the 10 MB per-payload cap (matching the server's `DefaultBodyLimit`) are dropped before sending.
 
@@ -351,10 +347,10 @@ Only requests matching `tracePropagationTargets` get the header. Prevents leakin
 
 Two formats:
 
-- **UMD** (`browser.umd.js`): single file, ~100 KB gzipped. Includes everything. Load via `<script>`.
-- **ESM** (`esm/index.js`): ~20 KB gzipped core. `@rrweb/record` loads as a separate chunk (~80 KB gzipped) only when replay starts, so most page loads only pay the core.
+- **UMD** (`browser.umd.js`): single file, ~17 KB gzipped. Load via `<script>`.
+- **ESM** (`esm/index.js`): ~17 KB gzipped.
 
-The replay recorder accounts for most of the bundle. It is the recorder-only subset of rrweb; no replay player included.
+Replay is out of scope for v1 (the `replay` module is a stub), so rrweb is not bundled — the figures above are the full SDK. When replay returns it will load its recorder as a separate chunk so the core stays small.
 
 ### Tracking consent
 
