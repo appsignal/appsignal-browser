@@ -49,8 +49,9 @@ export interface BreadcrumbsConfig {
 export interface SessionConfig {
   /** Whether the session/journey stream is *sent* — the periodic `events`
    * payload's breadcrumbs (and, later, session replay). Web vitals always
-   * ship and errors (with their own breadcrumb trail via `/collect`) are
-   * unaffected; a `session_id` is still generated for those. Defaults to
+   * ship and errors (with their own breadcrumb trail via
+   * `/ingest/browser/errors`) are unaffected; a `session_id` is still
+   * generated for those. Defaults to
    * false: the processor currently ignores session + breadcrumbs on
    * `/ingest/browser` (v1 reads vitals only), so shipping them is wasted
    * bandwidth until the Sessions/Replay tier exists server-side. */
@@ -213,7 +214,7 @@ export interface BrowserError {
   context?: Record<string, unknown>;
 }
 
-/** Wire shape for errors POSTed to `/collect`. Aligned with AppSignal's
+/** Wire shape for errors POSTed to `/ingest/browser/errors`. Aligned with AppSignal's
  * Transaction schema. Kept separate from `BrowserError` because subscribers
  * (`onErrorReported`) still want the richer internal shape — only the
  * network format follows this. */
@@ -260,19 +261,16 @@ export interface TransactionBreadcrumb {
   metadata: Record<string, unknown>;
 }
 
-/** Wire shape for web vitals POSTed to `/metrics/webvitals` as a JSON array.
- * Aligned with the server's `WebVital` struct in
- * `appsignal-processor-rs/public_endpoint/http_flusher/src/metrics/web_vitals_mapper.rs`:
+/** Internal in-memory shape the vitals reporters collect (see `vitals.ts`),
+ * modelled on the `web-vitals` library's `Metric`. At send time `index.ts`
+ * maps each entry to an `EventVital` and ships it inside the `events` payload
+ * to `/ingest/browser` — `startTime` becomes the epoch-ms `timestamp` and the
+ * `id`/`label` collection fields are dropped.
  *
- *   - `id`, `label`, `name`, `startTime`, `value` are REQUIRED. Missing any of
- *     them makes serde drop the whole entry silently (HTTP 200, zero metrics).
- *   - `label="browser-web-vital"` is the discriminator that selects the
- *     `browser_webvital_*` metric naming (vs legacy `webvital_*` for the
- *     `@appsignal/javascript` SDK) and enables CLS×1000 scaling server-side.
- *   - `name` is the bare metric kind ("LCP", "CLS", ...). Server lowercases
- *     and prefixes → `browser_webvital_lcp`.
- *   - `rating`, `element`, `interaction_type` are server-ignored today (kept
- *     for future server-side features; payload cost is trivial).
+ *   - `name` is the bare metric kind ("LCP", "CLS", ...).
+ *   - `rating`, `element`, `interaction_type` are carried through to
+ *     `EventVital`; `element`/`interaction_type` are server-ignored today
+ *     (kept for future server-side features; payload cost is trivial).
  */
 export interface VitalEntry {
   id: string;

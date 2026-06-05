@@ -1,8 +1,8 @@
 // End-to-end error capture. Two paths through errors.ts:initErrors —
 // window.onerror (synchronous throws that escape the call stack) and
 // unhandledrejection (promise rejects with no .catch). Both must produce
-// a FrontendTransaction POST to /collect with the original message
-// intact and a session_id attached.
+// a FrontendTransaction POST to /ingest/browser/errors with the original
+// message intact and a session_id attached.
 
 import { test, expect } from "../fixtures.js";
 import { reset, ingestErrors, pollFor } from "../helpers.js";
