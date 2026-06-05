@@ -231,11 +231,8 @@ function flushEvents(useBeacon: boolean): void {
   const vitals: EventVital[] = drainVitals().map((v) => ({
     name: v.name,
     value: v.value,
-    rating: v.rating,
     page_url: v.page_url ?? session.page_url,
     timestamp: v.startTime,
-    element: v.element,
-    interaction_type: v.interaction_type,
   }));
 
   if (breadcrumbs.length === 0 && vitals.length === 0) return;

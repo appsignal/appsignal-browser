@@ -264,13 +264,11 @@ export interface TransactionBreadcrumb {
 /** Internal in-memory shape the vitals reporters collect (see `vitals.ts`),
  * modelled on the `web-vitals` library's `Metric`. At send time `index.ts`
  * maps each entry to an `EventVital` and ships it inside the `events` payload
- * to `/ingest/browser` — `startTime` becomes the epoch-ms `timestamp` and the
- * `id`/`label` collection fields are dropped.
- *
- *   - `name` is the bare metric kind ("LCP", "CLS", ...).
- *   - `rating`, `element`, `interaction_type` are carried through to
- *     `EventVital`; `element`/`interaction_type` are server-ignored today
- *     (kept for future server-side features; payload cost is trivial).
+ * to `/ingest/browser` — `startTime` becomes the epoch-ms `timestamp`, and the
+ * fields the server doesn't store (`id`, `label`, `rating`, `element`,
+ * `interaction_type`) are dropped. `name` is the bare metric kind ("LCP",
+ * "CLS", ...). `rating`/`element`/`interaction_type` are kept here only for
+ * local use (e.g. the per-route CLS rating recomputed in `vitals.ts`).
  */
 export interface VitalEntry {
   id: string;
@@ -288,8 +286,10 @@ export interface VitalEntry {
 }
 
 /** Web vital as sent inside an `events` payload to `/ingest/browser`. Matches
- * the processor's `VitalPayload` (browser/convert.rs): bare metric name, value,
- * epoch-ms timestamp, and the dimensions kept for query-time aggregation.
+ * the processor's `VitalPayload` (browser/convert.rs) exactly — bare metric
+ * name, value, route, and epoch-ms timestamp. Those four are the only fields
+ * the server deserializes; `rating` is derived from `value` at query time and
+ * `element`/`interaction_type` have no store yet, so none are sent here.
  *
  * `page_url` here is what the SDK decides to send: the current route template
  * if `setRouteTemplate` was called, otherwise the raw URL. The server runs
@@ -297,11 +297,8 @@ export interface VitalEntry {
 export interface EventVital {
   name: string;
   value: number;
-  rating?: string;
   page_url: string;
   timestamp: number;
-  element?: string;
-  interaction_type?: string;
 }
 
 export interface EventPayload {
