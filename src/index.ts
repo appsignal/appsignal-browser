@@ -62,7 +62,7 @@ export function endSession(): void {
   // The subsequent touchActivity keeps getSessionId() inside flushEvents
   // from rotating again mid-flush.
   touchActivity();
-  flushEvents(true);
+  flushEvents({ beacon: true });
   sessionEndSession();
 }
 
@@ -114,13 +114,13 @@ export function setRouteTemplate(template: string | null): void {
 }
 
 export function flush(): void {
-  flushEvents(false);
+  flushEvents();
 }
 
 /** Tear down the SDK. Flushes remaining data and stops all collection. */
 export function destroy(): void {
   if (!initialized) return;
-  flushEvents(true);
+  flushEvents({ beacon: true });
   stopCollection();
   destroySession();
   destroyTransport();
@@ -170,20 +170,20 @@ function startCollection(endpoint: string): void {
   // metric repeatedly as separate, non-final samples. Vitals ride the
   // navigation + page-hide flushes instead, where their value is final for the
   // route. (With session streaming off — the default — this becomes a no-op.)
-  flushTimer = setInterval(() => flushEvents(false, false), FLUSH_INTERVAL_MS);
+  flushTimer = setInterval(() => flushEvents({ includeVitals: false }), FLUSH_INTERVAL_MS);
 
   // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
   // listeners are registered first (in initVitals) so they fire before this
   // handler and populate collectedVitals before we flush.
   lifecycleUnsubscribers.push(
     onVisibilityChange((state) => {
-      if (state === "hidden") flushEvents(true);
+      if (state === "hidden") flushEvents({ beacon: true });
     }),
   );
   // Flush on tab close / navigation away
   lifecycleUnsubscribers.push(
     onPageHide((persisted) => {
-      if (!persisted && initialized) flushEvents(true);
+      if (!persisted && initialized) flushEvents({ beacon: true });
     }),
   );
 
@@ -197,7 +197,7 @@ function startCollection(endpoint: string): void {
   // before the baseline shifts. Subsequent CLS callbacks then report
   // deltas against the post-flush cumulative — i.e. per-route shifts.
   onAfterNavigation(() => {
-    flushEvents(false);
+    flushEvents();
     markVitalsNavigation();
   });
 }
@@ -220,7 +220,10 @@ function stopCollection(): void {
   destroyLifecycle();
 }
 
-function flushEvents(useBeacon: boolean, includeVitals = true): void {
+function flushEvents({
+  beacon = false,
+  includeVitals = true,
+}: { beacon?: boolean; includeVitals?: boolean } = {}): void {
   if (!initialized) return;
 
   // One POST per flush to /ingest/browser as an `events` payload. The session/
@@ -254,7 +257,7 @@ function flushEvents(useBeacon: boolean, includeVitals = true): void {
     vitals,
     app_version: clientConfig?.appVersion,
   };
-  if (useBeacon) {
+  if (beacon) {
     sendBeaconEvents(payload);
   } else {
     sendEvents(payload);
