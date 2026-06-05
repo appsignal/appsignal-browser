@@ -85,15 +85,10 @@ const server = createServer(async (req, res) => {
   // Routes the v1 SDK targets:
   //  - /ingest/browser         (events: breadcrumbs + vitals, replay later)
   //  - /ingest/browser/errors  (errors as FrontendTransaction)
-  // Legacy paths (/collect, /metrics/webvitals) are still captured for the
-  // old @appsignal/javascript SDK. All captured under kind="ingest"; helpers
-  // disambiguate by path.
+  // All captured under kind="ingest"; helpers disambiguate by path.
   if (
     req.method === "POST" &&
-    (pathname === "/ingest/browser" ||
-      pathname === "/ingest/browser/errors" ||
-      pathname === "/collect" ||
-      pathname === "/metrics/webvitals")
+    (pathname === "/ingest/browser" || pathname === "/ingest/browser/errors")
   ) {
     const body = await readBody(req);
     captured.push({
