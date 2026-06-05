@@ -261,28 +261,17 @@ export interface TransactionBreadcrumb {
   metadata: Record<string, unknown>;
 }
 
-/** Internal in-memory shape the vitals reporters collect (see `vitals.ts`),
- * modelled on the `web-vitals` library's `Metric`. At send time `index.ts`
- * maps each entry to an `EventVital` and ships it inside the `events` payload
- * to `/ingest/browser` — `startTime` becomes the epoch-ms `timestamp`, and the
- * fields the server doesn't store (`id`, `label`, `rating`, `element`,
- * `interaction_type`) are dropped. `name` is the bare metric kind ("LCP",
- * "CLS", ...). `rating`/`element`/`interaction_type` are kept here only for
- * local use (e.g. the per-route CLS rating recomputed in `vitals.ts`).
- */
+/** Internal in-memory shape the vitals reporters collect (see `vitals.ts`).
+ * Maps 1:1 to the wire `EventVital` at send time, where `startTime` becomes
+ * the epoch-ms `timestamp`. `name` is the bare metric kind ("LCP", "CLS", ...). */
 export interface VitalEntry {
-  id: string;
-  label: "browser-web-vital";
   name: string;
-  startTime: number;
   value: number;
+  startTime: number;
   /** Route identifier — either the template the host app set via
    * `setRouteTemplate("/users/:id")` or `location.href` (the server then
-   * auto-templates it). One field; one wire shape. */
+   * auto-templates it). */
   page_url?: string;
-  rating?: string;
-  element?: string;
-  interaction_type?: string;
 }
 
 /** Web vital as sent inside an `events` payload to `/ingest/browser`. Matches

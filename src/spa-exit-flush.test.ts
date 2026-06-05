@@ -5,7 +5,7 @@ const { handlers } = vi.hoisted(() => {
   const handlers: Record<string, (m: Record<string, unknown>) => void> = {};
   return { handlers };
 });
-vi.mock("web-vitals/attribution", () => {
+vi.mock("web-vitals", () => {
   const record = (name: string) => (cb: (m: Record<string, unknown>) => void) => {
     handlers[name] = cb;
   };
@@ -65,13 +65,7 @@ describe("SPA exit flush", () => {
     init({ key: "k" });
 
     // A web vital measured on the final route /c, not yet flushed.
-    handlers.lcp({
-      id: "v3-lcp-1",
-      name: "LCP",
-      value: 2000,
-      rating: "good",
-      attribution: { element: "h1" },
-    });
+    handlers.lcp({ name: "LCP", value: 2000 });
 
     // User leaves the page — no subsequent navigation to flush /c.
     window.dispatchEvent(new Event("pagehide"));

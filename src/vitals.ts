@@ -1,12 +1,7 @@
 import type { VitalEntry } from "./types.js";
 import { scrubUrl } from "./utils.js";
-import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals/attribution";
-import type {
-  LCPMetricWithAttribution,
-  CLSMetricWithAttribution,
-  INPMetricWithAttribution,
-  MetricWithAttribution,
-} from "web-vitals/attribution";
+import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals";
+import type { Metric } from "web-vitals";
 
 let collectedVitals: VitalEntry[] = [];
 let allowlist: string[] = [];
@@ -74,71 +69,46 @@ export function initVitals(queryParamsAllowlist: string[]): void {
   // lifetime as they update, and pushOrReplaceVital keeps only the latest
   // per (metric, page) so we don't pollute parquet with intermediate rows.
   // FCP and TTFB fire once early in the page, so they don't need this.
-  onLCP(
-    reporter<LCPMetricWithAttribution>(
-      (m) => ({ element: m.attribution.element || undefined }),
-      resolveLoadPageUrl,
-    ),
-    { reportAllChanges: true },
-  );
+  onLCP(reporter(resolveLoadPageUrl), { reportAllChanges: true });
 
   // CLS uses its own handler instead of `reporter` because the value
   // shipped to the server is the delta from the current page's baseline
-  // — not web-vitals' cumulative number. Rating is also re-computed
-  // against Google's CLS thresholds from the per-page value, otherwise
-  // a 0.02 shift on B would inherit "poor" if A had already accrued 0.4.
+  // — not web-vitals' cumulative number. Otherwise a 0.02 shift on B
+  // would carry A's accrued shift along with it.
   onCLS(
-    (metric: CLSMetricWithAttribution) => {
+    (metric: Metric) => {
       if (destroyed) return;
       lastReportedCls = metric.value;
       const pageValue = Math.max(0, metric.value - clsBaseline);
       pushOrReplaceVital({
-        id: metric.id,
-        label: "browser-web-vital",
         name: metric.name,
         startTime: Date.now(),
         value: pageValue,
         page_url: resolvePageUrl(),
-        rating: rateCls(pageValue),
-        element: metric.attribution.largestShiftTarget || undefined,
       });
     },
     { reportAllChanges: true },
   );
 
   // INP accrues per-route → current route (the default resolver).
-  onINP(
-    reporter<INPMetricWithAttribution>((m) => ({
-      element: m.attribution.interactionTarget || undefined,
-      interaction_type: m.attribution.interactionType,
-    })),
-    { reportAllChanges: true },
-  );
+  onINP(reporter(), { reportAllChanges: true });
 
-  // FCP/TTFB fire once each, with no per-target attribution to add. Both are
-  // load metrics → frozen to the initial route.
-  onFCP(reporter<MetricWithAttribution>(() => ({}), resolveLoadPageUrl));
-  onTTFB(reporter<MetricWithAttribution>(() => ({}), resolveLoadPageUrl));
+  // FCP/TTFB fire once each. Both are load metrics → frozen to the initial route.
+  onFCP(reporter(resolveLoadPageUrl));
+  onTTFB(reporter(resolveLoadPageUrl));
 }
 
-/** Build a web-vitals callback. The extractor adds metric-specific fields
- * (element, interaction_type) on top of the common shape required by the
- * server's WebVital struct. */
-function reporter<T extends MetricWithAttribution>(
-  extract: (m: T) => Partial<VitalEntry>,
-  resolveUrl: () => string = resolvePageUrl,
-): (metric: T) => void {
-  return (metric: T) => {
+/** Build a web-vitals callback that queues the metric for the next flush.
+ * `resolveUrl` decides the route the entry is attributed to (current route
+ * by default; the frozen load route for LCP/FCP/TTFB). */
+function reporter(resolveUrl: () => string = resolvePageUrl): (metric: Metric) => void {
+  return (metric: Metric) => {
     if (destroyed) return;
     pushOrReplaceVital({
-      id: metric.id,
-      label: "browser-web-vital",
       name: metric.name,
       startTime: Date.now(),
       value: metric.value,
       page_url: resolveUrl(),
-      rating: metric.rating,
-      ...extract(metric),
     });
   };
 }
@@ -189,15 +159,6 @@ export function setRouteTemplate(template: string | null): void {
  * URL so the new baseline only affects future reports. */
 export function markVitalsNavigation(): void {
   clsBaseline = lastReportedCls;
-}
-
-/** Re-rate a per-page CLS value against Google's official thresholds.
- * Used because the rating attached by web-vitals reflects the cumulative
- * (page-view-wide) value, not the per-page delta we emit. */
-function rateCls(value: number): "good" | "needs-improvement" | "poor" {
-  if (value <= 0.1) return "good";
-  if (value <= 0.25) return "needs-improvement";
-  return "poor";
 }
 
 export function drainVitals(): VitalEntry[] {

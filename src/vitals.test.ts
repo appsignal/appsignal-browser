@@ -8,7 +8,7 @@ const { handlers } = vi.hoisted(() => {
   return { handlers };
 });
 
-vi.mock("web-vitals/attribution", () => {
+vi.mock("web-vitals", () => {
   const record = (name: string) => (cb: (m: Record<string, unknown>) => void, opts?: { reportAllChanges?: boolean }) => {
     handlers[name] = { cb, opts };
   };
@@ -23,16 +23,15 @@ vi.mock("web-vitals/attribution", () => {
 
 import { initVitals, drainVitals, destroyVitals, setRouteTemplate, markVitalsNavigation } from "./vitals.js";
 
-// metric.id values match how the `web-vitals` library reports them — the same
-// id is reused across `reportAllChanges: true` updates for one observation.
+// The reporters read only name and value off the metric.
 function fakeLCP(value: number) {
-  return { id: "v3-lcp-1", name: "LCP", value, rating: "good", attribution: { element: "h1" } };
+  return { name: "LCP", value };
 }
 function fakeCLS(value: number) {
-  return { id: "v3-cls-1", name: "CLS", value, rating: "good", attribution: { largestShiftTarget: "div" } };
+  return { name: "CLS", value };
 }
 function fakeINP(value: number) {
-  return { id: "v3-inp-1", name: "INP", value, rating: "good", attribution: { interactionTarget: "button", interactionType: "pointer" } };
+  return { name: "INP", value };
 }
 
 function setLocation(href: string) {
@@ -153,23 +152,21 @@ describe("vitals", () => {
       expect(cls[0].page_url).toBe("https://example.com/b");
     });
 
-    it("re-rates the per-page CLS against Google's thresholds", async () => {
+    it("reports only the per-page delta even when the prior route accrued a large CLS", async () => {
       const { markVitalsNavigation } = await import("./vitals.js");
       initVitals([]);
 
-      // /a accrues a poor cumulative CLS (0.4).
+      // /a accrues a large cumulative CLS (0.4).
       setLocation("https://example.com/a");
       handlers.cls.cb(fakeCLS(0.4));
       drainVitals();
       markVitalsNavigation();
 
-      // A tiny shift on /b (0.02 delta) should rate as "good", not inherit
-      // /a's "poor" rating that web-vitals would attach to the cumulative.
+      // A tiny shift on /b (0.02 delta) reports as 0.02, not /a's cumulative.
       setLocation("https://example.com/b");
       handlers.cls.cb(fakeCLS(0.42));
       const cls = drainVitals().filter((v) => v.name === "CLS");
       expect(cls[0].value).toBeCloseTo(0.02, 5);
-      expect(cls[0].rating).toBe("good");
     });
 
     it("clamps to zero when cumulative briefly regresses (defensive)", async () => {
