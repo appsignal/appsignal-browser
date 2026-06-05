@@ -164,8 +164,13 @@ function startCollection(endpoint: string): void {
 
   initVitals(cfg.privacy.queryParamsAllowlist);
 
-  // Periodic flush
-  flushTimer = setInterval(() => flushEvents(false), FLUSH_INTERVAL_MS);
+  // Periodic flush — streams the breadcrumb/session journey only. Vitals are
+  // deliberately excluded: with reportAllChanges the buffer holds an ever-
+  // rising intermediate value, so draining it on a timer would ship the same
+  // metric repeatedly as separate, non-final samples. Vitals ride the
+  // navigation + page-hide flushes instead, where their value is final for the
+  // route. (With session streaming off — the default — this becomes a no-op.)
+  flushTimer = setInterval(() => flushEvents(false, false), FLUSH_INTERVAL_MS);
 
   // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
   // listeners are registered first (in initVitals) so they fire before this
@@ -215,24 +220,30 @@ function stopCollection(): void {
   destroyLifecycle();
 }
 
-function flushEvents(useBeacon: boolean): void {
+function flushEvents(useBeacon: boolean, includeVitals = true): void {
   if (!initialized) return;
 
-  // One POST per flush to /ingest/browser as an `events` payload. Web vitals
-  // always ride along; the session/journey stream (breadcrumbs, later replay)
-  // is included only when `session.enabled` (default false). With it off, only
-  // errors + web vitals leave the browser — breadcrumbs are still collected
-  // (for error-report context via /ingest/browser/errors and the nav hook that
-  // drives per-route vitals), just not shipped here.
+  // One POST per flush to /ingest/browser as an `events` payload. The session/
+  // journey stream (breadcrumbs, later replay) is included only when
+  // `session.enabled` (default false). With it off, only errors + web vitals
+  // leave the browser — breadcrumbs are still collected (for error-report
+  // context via /ingest/browser/errors and the nav hook that drives per-route
+  // vitals), just not shipped here.
+  //
+  // Vitals are drained only when `includeVitals` — i.e. at the boundaries where
+  // their value is final for a route (SPA navigation, visibility-hidden/
+  // pagehide, manual flush/destroy), never on the periodic timer.
   const sendSessionStream = resolved!.session.enabled;
   const breadcrumbs = sendSessionStream ? drainBreadcrumbs() : [];
   const session = getSessionContext();
-  const vitals: EventVital[] = drainVitals().map((v) => ({
-    name: v.name,
-    value: v.value,
-    page_url: v.page_url ?? session.page_url,
-    timestamp: v.timestamp,
-  }));
+  const vitals: EventVital[] = includeVitals
+    ? drainVitals().map((v) => ({
+        name: v.name,
+        value: v.value,
+        page_url: v.page_url ?? session.page_url,
+        timestamp: v.timestamp,
+      }))
+    : [];
 
   if (breadcrumbs.length === 0 && vitals.length === 0) return;
 
