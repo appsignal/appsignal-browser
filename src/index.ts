@@ -1,6 +1,6 @@
 import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
-import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
@@ -38,10 +38,10 @@ export function init(config: BrowserConfig): void {
   startCollection(endpoint);
 }
 
-/** Identify the current user. `id`, `email`, and `name` are conventional, but
- * any additional string attributes are accepted and become error tags too —
- * e.g. `setUser({ id: "u1", email: "a@b.com", plan: "pro" })`. Pass `{}` /
- * call `clearUser()` (via `endSession`) to drop identity. */
+/** Identify the current user (`id`, `email`, `name`). Rides the session/journey
+ * stream as user context. Does not tag errors — for error-filtering metadata
+ * (and to put user info on errors), use {@link setTags}. Call {@link clearUser}
+ * on logout to drop identity. */
 export function setUser(user: UserContext): void {
   if (!initialized) return;
   sessionSetUser(user);
@@ -50,6 +50,21 @@ export function setUser(user: UserContext): void {
 export function clearUser(): void {
   if (!initialized) return;
   sessionClearUser();
+}
+
+/** Attach arbitrary string tags to every subsequent error payload, for
+ * filtering/searching errors in the UI — e.g.
+ * `setTags({ plan: "pro", org_id: "acme" })`. Merges with any existing tags;
+ * pass an empty value to drop a key. Values are coerced to strings and the set
+ * is capped. Use {@link clearTags} to reset. */
+export function setTags(tags: Record<string, unknown>): void {
+  if (!initialized) return;
+  sessionSetTags(tags);
+}
+
+export function clearTags(): void {
+  if (!initialized) return;
+  sessionClearTags();
 }
 
 /** End the current browser session. Flushes pending events and replay chunks

@@ -92,7 +92,7 @@ export function ingestReplays(items: Captured[]): Array<Record<string, unknown>>
  *   - top-level `message`     ← `error.message`
  *   - top-level `error_class` ← `error.name`
  *   - top-level `stack`       ← `error.backtrace.join("\n")`
- *   - top-level `session`     ← `tags` (host-supplied setUser attributes only;
+ *   - top-level `session`     ← `tags` (host-supplied setTags values only;
  *                                SDK identity ids — session/tab/anonymous — are
  *                                never sent as tags)
  *   - top-level `breadcrumbs` ← `breadcrumbs` (passes through unchanged) */

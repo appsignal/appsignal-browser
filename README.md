@@ -106,15 +106,25 @@ All collection knobs are passed at `init()` time. There is no server-side config
 // Called once, early in the page lifecycle
 function init(config: BrowserConfig): void;
 
-// Set or update user context after authentication. `id`/`email`/`name` are
-// conventional; any additional string attributes are accepted too and become
-// error tags (e.g. `setUser({ id, email, plan: "pro" })`).
-function setUser(user: { id?: string; email?: string; name?: string; [key: string]: string | undefined }): void;
+// Identify the current user after authentication. Rides the session/journey
+// stream as user context (user_id / user_email / user_name). Does NOT tag
+// errors — use setTags for that.
+function setUser(user: { id?: string; email?: string; name?: string }): void;
 
-// Clear user context. Does not rotate the session — session identity is
+// Clear user identity. Does not rotate the session — session identity is
 // independent of user identity. Use endSession() on logout if you want a
 // fresh session_id for the next events.
 function clearUser(): void;
+
+// Attach arbitrary string tags to every subsequent error payload, for
+// filtering/searching errors (e.g. setTags({ plan: "pro", org_id: "acme" })).
+// Merges with existing tags; pass an empty value to drop a key. Values are
+// coerced to strings and the set is capped (32). To put user info on errors,
+// set it here explicitly.
+function setTags(tags: Record<string, string>): void;
+
+// Remove all error tags.
+function clearTags(): void;
 
 // End the current session. Flushes pending events and replay chunks under
 // the current session_id, then clears session and user state. The next
@@ -301,7 +311,7 @@ Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`.
 
 Stack traces are sent as raw strings. Source map processing is server-side (future phase); the plugin does not do client-side source map application.
 
-**Error tags.** The wire payload's `tags` map carries only the attributes the host set via `setUser()` — `id`, `email`, `name`, and any custom string fields — passed through verbatim (values coerced to strings, server-truncated to 256 bytes). The SDK injects no identity of its own: `session_id` / `tab_id` / `anonymous_id` are *not* sent as tags (they're high-cardinality and not in the server's metadata-distribution allowlist, so they'd be sample noise). They still ride the events/session stream's `SessionContext` and are available to `onErrorReported` subscribers.
+**Error tags.** The wire payload's `tags` map carries only what the host set via `setTags()` — arbitrary string key-values, coerced to strings (server-truncated to 256 bytes), capped at 32 keys. The SDK injects no identity of its own: `session_id` / `tab_id` / `anonymous_id` are *not* sent as tags (they're high-cardinality and not in the server's metadata-distribution allowlist, so they'd be sample noise) — they ride the events/session stream's `SessionContext` instead, and are available to `onErrorReported` subscribers. User identity from `setUser()` does **not** tag errors; to filter errors by user, pass the fields you want to `setTags()` explicitly.
 
 **beforeError hook.** If provided, called once per error at the entry point — *before* the error breadcrumb is added, *before* `lastErrorTimestamp` is updated, *before* deduplication. Returning `null` drops the error completely; none of those side effects fire. Mutating fields on the returned `IncomingError` propagates into the eventual payload. This is the single hook for both noise suppression and field redaction:
 

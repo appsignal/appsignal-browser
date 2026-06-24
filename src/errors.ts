@@ -6,7 +6,7 @@ import type {
   ResolvedConfig,
   TransactionBreadcrumb,
 } from "./types.js";
-import { getSessionContext, getUser } from "./session.js";
+import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 
@@ -213,26 +213,14 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
       backtrace: error.stack ? error.stack.split("\n") : [],
     },
     breadcrumbs: error.breadcrumbs.map(toTransactionBreadcrumb),
-    tags: userTags(),
+    // Error tags are exactly what the host set via setTags (already coerced and
+    // capped). The SDK injects no identity of its own — user identity rides the
+    // session stream, not error tags; a host that wants user on errors sets it
+    // explicitly via setTags.
+    tags: getTags(),
     environment: { url: location.href },
     user_agent: navigator.userAgent,
   };
-}
-
-// Error tags are exactly the attributes the host set via setUser (id, email,
-// name, and any custom fields), passed through verbatim. The SDK adds no
-// identity of its own: session/tab/anonymous ids aren't in the server's
-// metadata-distribution allowlist, so they'd just be high-cardinality sample
-// noise. Undefined/empty values are skipped; the rest are coerced to strings
-// (the server truncates each to 256 bytes).
-function userTags(): Record<string, string> {
-  const user = getUser();
-  if (!user) return {};
-  const tags: Record<string, string> = {};
-  for (const [key, value] of Object.entries(user)) {
-    if (value != null && value !== "") tags[key] = String(value);
-  }
-  return tags;
 }
 
 function toTransactionBreadcrumb(b: Breadcrumb): TransactionBreadcrumb {

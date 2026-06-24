@@ -169,44 +169,43 @@ test.describe("error filtering", () => {
   });
 });
 
-test.describe("user context", () => {
-  test("clearUser removes user fields from subsequent payloads", async ({ page, request }) => {
-    // setUser attributes ride every error payload's `tags` verbatim (the keys
-    // the host passed — `id`, `email`, plus any custom fields) until cleared.
-    // clearUser must remove the in-memory user AND the localStorage copy; the
-    // next error must ship with no user attributes on tags.
+test.describe("error tags", () => {
+  test("clearTags removes tags from subsequent error payloads", async ({ page, request }) => {
+    // setTags attributes ride every error payload's `tags` map until cleared.
+    // clearTags must remove the in-memory tags AND the localStorage copy; the
+    // next error must ship with no tags.
     await page.goto("/");
 
     await page.evaluate(() => {
       (window as unknown as {
-        AppsignalBrowser: { setUser(u: { id?: string; email?: string }): void };
-      }).AppsignalBrowser.setUser({ id: "test-user-1", email: "test@example.com" });
+        AppsignalBrowser: { setTags(t: Record<string, string>): void };
+      }).AppsignalBrowser.setTags({ plan: "pro", org_id: "acme" });
       (window as unknown as { throwWithMessage(msg: string): void })
-        .throwWithMessage("first error with user");
+        .throwWithMessage("first error with tags");
     });
 
     const firstError = await pollFor(request, (items) =>
-      ingestErrors(items).find((e) => (e.message as string)?.includes("first error with user")),
+      ingestErrors(items).find((e) => (e.message as string)?.includes("first error with tags")),
     );
     const firstTags = firstError.session as Record<string, unknown>;
-    expect(firstTags.id).toBe("test-user-1");
-    expect(firstTags.email).toBe("test@example.com");
+    expect(firstTags.plan).toBe("pro");
+    expect(firstTags.org_id).toBe("acme");
 
     await reset(request);
 
     await page.evaluate(() => {
-      (window as unknown as { AppsignalBrowser: { clearUser(): void } })
-        .AppsignalBrowser.clearUser();
+      (window as unknown as { AppsignalBrowser: { clearTags(): void } })
+        .AppsignalBrowser.clearTags();
       (window as unknown as { throwWithMessage(msg: string): void })
-        .throwWithMessage("second error without user");
+        .throwWithMessage("second error without tags");
     });
 
     const secondError = await pollFor(request, (items) =>
-      ingestErrors(items).find((e) => (e.message as string)?.includes("second error without user")),
+      ingestErrors(items).find((e) => (e.message as string)?.includes("second error without tags")),
     );
     const secondTags = secondError.session as Record<string, unknown>;
-    expect(secondTags.id).toBeUndefined();
-    expect(secondTags.email).toBeUndefined();
+    expect(secondTags.plan).toBeUndefined();
+    expect(secondTags.org_id).toBeUndefined();
   });
 });
 

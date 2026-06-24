@@ -1,4 +1,4 @@
-import type { SessionContext, UserContext } from "./types.js";
+import type { ErrorTags, SessionContext, UserContext } from "./types.js";
 import { storage, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
@@ -18,6 +18,7 @@ let tabChannelHandler: ((e: MessageEvent) => void) | null = null;
 
 let currentSessionId: string | null = null;
 let currentUser: UserContext | null = null;
+let currentTags: ErrorTags = {};
 let inactivityTimeoutMs = 1_800_000;
 let activityTimer: ReturnType<typeof setTimeout> | null = null;
 let lastActivityMs = 0;
@@ -32,6 +33,7 @@ export function initSession(timeoutMs: number, allowlist: string[] = []): void {
   ensureTabId();
   restoreOrCreateSession();
   restoreUser();
+  restoreTags();
   if (!activityTrackingStarted) {
     startActivityTracking();
     activityTrackingStarted = true;
@@ -135,6 +137,10 @@ export function getAnonymousId(): string {
 }
 
 const USER_KEY = "appsignal_user";
+const TAGS_KEY = "appsignal_tags";
+// Guard against a host accidentally spreading a large object into the tag set
+// (high-cardinality tags are sample noise server-side). Extra keys are dropped.
+const MAX_TAGS = 32;
 
 export function setUser(user: UserContext): void {
   currentUser = user;
@@ -146,9 +152,8 @@ export function clearUser(): void {
   storage.remove(localStorage, USER_KEY);
 }
 
-/** The user attributes set via `setUser` (restored from localStorage on init),
- * or `null` if none. Returned verbatim so callers can map every field —
- * including custom ones — onto the wire. */
+/** The identity set via `setUser` (restored from localStorage on init), or
+ * `null` if none. */
 export function getUser(): UserContext | null {
   return currentUser;
 }
@@ -159,14 +164,51 @@ function restoreUser(): void {
   if (stored) currentUser = stored;
 }
 
+/** Merge error tags into the current set. Values are coerced to strings; empty
+ * values are skipped (and remove an existing key); the set is capped at
+ * MAX_TAGS. Persisted so tags survive reloads within the session. */
+export function setTags(tags: Record<string, unknown>): void {
+  const merged: ErrorTags = { ...currentTags };
+  for (const [key, value] of Object.entries(tags)) {
+    if (value == null || value === "") delete merged[key];
+    else merged[key] = String(value);
+  }
+  currentTags = capTags(merged);
+  storage.setJSON(localStorage, TAGS_KEY, currentTags);
+}
+
+export function clearTags(): void {
+  currentTags = {};
+  storage.remove(localStorage, TAGS_KEY);
+}
+
+/** The error tags set via `setTags` (restored from localStorage on init), as a
+ * clean string map. Empty `{}` when none set. */
+export function getTags(): ErrorTags {
+  return currentTags;
+}
+
+function restoreTags(): void {
+  const stored = storage.getJSON<ErrorTags>(localStorage, TAGS_KEY);
+  currentTags = stored ? capTags(stored) : {};
+}
+
+function capTags(tags: ErrorTags): ErrorTags {
+  const entries = Object.entries(tags);
+  if (entries.length <= MAX_TAGS) return tags;
+  return Object.fromEntries(entries.slice(0, MAX_TAGS));
+}
+
 /** End the current session. Clears session storage so next init creates a fresh session. */
 export function endSession(): void {
   currentSessionId = null;
   currentUser = null;
+  currentTags = {};
   lastActivityMs = 0;
   storage.remove(localStorage, SESSION_KEY);
   storage.remove(localStorage, LAST_ACTIVITY_KEY);
   storage.remove(localStorage, USER_KEY);
+  storage.remove(localStorage, TAGS_KEY);
   if (activityTimer) {
     clearTimeout(activityTimer);
     activityTimer = null;
@@ -224,6 +266,12 @@ function startActivityTracking(): void {
     } else if (e.key === USER_KEY) {
       try {
         currentUser = e.newValue ? JSON.parse(e.newValue) : null;
+      } catch {
+        /* ignore */
+      }
+    } else if (e.key === TAGS_KEY) {
+      try {
+        currentTags = e.newValue ? capTags(JSON.parse(e.newValue)) : {};
       } catch {
         /* ignore */
       }

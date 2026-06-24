@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, getSessionContext, touchActivity, endSession, destroySession } from "./session.js";
+import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, setTags, clearTags, getTags, getSessionContext, touchActivity, endSession, destroySession } from "./session.js";
 
 describe("session", () => {
   beforeEach(() => {
@@ -50,6 +50,64 @@ describe("session", () => {
     // Session identity is independent of user identity — clearUser must
     // not split a single visit across multiple session_ids.
     expect(getSessionId()).toBe(firstId);
+  });
+
+  describe("error tags (setTags)", () => {
+    it("stores tags and returns them via getTags", () => {
+      initSession(1800000);
+      setTags({ plan: "pro", org_id: "acme" });
+      expect(getTags()).toEqual({ plan: "pro", org_id: "acme" });
+    });
+
+    it("merges successive calls rather than replacing", () => {
+      initSession(1800000);
+      setTags({ plan: "pro" });
+      setTags({ org_id: "acme" });
+      expect(getTags()).toEqual({ plan: "pro", org_id: "acme" });
+    });
+
+    it("coerces values to strings and drops empty/nullish keys", () => {
+      initSession(1800000);
+      setTags({
+        plan: 42,
+        active: true,
+        blank: "",
+        missing: null,
+        absent: undefined,
+      } as Record<string, unknown>);
+      expect(getTags()).toEqual({ plan: "42", active: "true" });
+    });
+
+    it("removes a key when set to an empty value", () => {
+      initSession(1800000);
+      setTags({ plan: "pro", org_id: "acme" });
+      setTags({ plan: "" });
+      expect(getTags()).toEqual({ org_id: "acme" });
+    });
+
+    it("caps the number of tags to guard against high cardinality", () => {
+      initSession(1800000);
+      const many: Record<string, string> = {};
+      for (let i = 0; i < 50; i++) many[`k${i}`] = `v${i}`;
+      setTags(many);
+      expect(Object.keys(getTags())).toHaveLength(32);
+    });
+
+    it("clearTags empties the set without rotating the session", () => {
+      initSession(1800000);
+      const firstId = getSessionId();
+      setTags({ plan: "pro" });
+      clearTags();
+      expect(getTags()).toEqual({});
+      expect(getSessionId()).toBe(firstId);
+    });
+
+    it("does not leak tags into the session context", () => {
+      initSession(1800000);
+      setTags({ plan: "pro" });
+      // Tags are error-only; SessionContext carries identity, not tags.
+      expect(getSessionContext()).not.toHaveProperty("plan");
+    });
   });
 
   it("caches stable fields across getSessionContext calls", () => {

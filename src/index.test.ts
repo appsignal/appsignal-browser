@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { init, destroy, endSession, setUser, clearUser, addBreadcrumb, captureError, flush } from "./index.js";
+import { init, destroy, endSession, setUser, clearUser, setTags, clearTags, addBreadcrumb, captureError, flush } from "./index.js";
 import { RingBuffer } from "./ring-buffer.js";
 
 // jsdom's Blob may lack .text(); polyfill via FileReader so the sendBeacon
@@ -291,9 +291,11 @@ describe("SDK integration", () => {
     expect(body.session.user_email).toBe("test@test.com");
   });
 
-  it("error tags are exactly the setUser attributes, passed through verbatim", () => {
+  it("error tags are exactly what setTags set; setUser does not tag errors", () => {
     init({ key: "test-key" });
-    setUser({ id: "u1", email: "test@test.com", plan: "pro" });
+    // setUser identifies the user (session stream) but must NOT appear on errors.
+    setUser({ id: "u1", email: "test@test.com" });
+    setTags({ plan: "pro", org_id: "acme" });
 
     captureError(new Error("tagged"));
 
@@ -303,8 +305,22 @@ describe("SDK integration", () => {
       .filter((b) => !!b);
     expect(errorPayloads.length).toBeGreaterThan(0);
 
-    // Exact match: every key the host set is present, and nothing else is
-    // (no SDK-injected identity).
-    expect(errorPayloads[0].tags).toEqual({ id: "u1", email: "test@test.com", plan: "pro" });
+    // Only setTags values — no SDK identity, no setUser fields.
+    expect(errorPayloads[0].tags).toEqual({ plan: "pro", org_id: "acme" });
+  });
+
+  it("clearTags drops error tags from subsequent payloads", () => {
+    init({ key: "test-key" });
+    setTags({ plan: "pro" });
+    clearTags();
+
+    captureError(new Error("after clear"));
+
+    const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => !!b);
+    expect(errorPayloads.length).toBeGreaterThan(0);
+    expect(errorPayloads[0].tags).toEqual({});
   });
 });
