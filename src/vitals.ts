@@ -1,9 +1,9 @@
-import type { VitalEntry } from "./types.js";
+import type { EventVital } from "./types.js";
 import { scrubUrl } from "./utils.js";
 import { onCLS, onFCP, onINP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
-let collectedVitals: VitalEntry[] = [];
+let collectedVitals: EventVital[] = [];
 let allowlist: string[] = [];
 
 // Route template the host app most recently declared via setRouteTemplate.
@@ -132,7 +132,7 @@ let destroyed = false;
  * page_url. Used with `reportAllChanges: true` callbacks so intermediate
  * metric updates don't produce duplicate rows — only the latest value for
  * each (metric, page) pair is queued for the next flush. */
-function pushOrReplaceVital(entry: VitalEntry): void {
+function pushOrReplaceVital(entry: EventVital): void {
   const idx = collectedVitals.findIndex(
     (v) => v.name === entry.name && v.page_url === entry.page_url,
   );
@@ -174,7 +174,7 @@ export function markVitalsNavigation(): void {
   clsBaseline = lastReportedCls;
 }
 
-export function drainVitals(): VitalEntry[] {
+export function drainVitals(): EventVital[] {
   const vitals = collectedVitals;
   collectedVitals = [];
   return vitals;

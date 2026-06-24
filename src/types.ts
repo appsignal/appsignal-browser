@@ -266,28 +266,18 @@ export interface TransactionBreadcrumb {
   metadata: Record<string, unknown>;
 }
 
-/** Internal in-memory shape the vitals reporters collect (see `vitals.ts`).
- * Maps 1:1 to the wire `EventVital`. `name` is the bare metric kind
- * ("LCP", "CLS", ...); `timestamp` is epoch-ms of when the metric occurred. */
-export interface VitalEntry {
-  name: string;
-  value: number;
-  timestamp: number;
-  /** Route identifier — either the template the host app set via
-   * `setRouteTemplate("/users/:id")` or `location.href` (the server then
-   * auto-templates it). */
-  page_url?: string;
-}
-
-/** Web vital as sent inside an `events` payload to `/ingest/browser`. Matches
- * the processor's `VitalPayload` (browser/convert.rs) exactly — bare metric
- * name, value, route, and epoch-ms timestamp. Those four are the only fields
- * the server deserializes; `rating` is derived from `value` at query time and
- * `element`/`interaction_type` have no store yet, so none are sent here.
+/** Web vital — both the in-memory shape the reporters collect (see `vitals.ts`)
+ * and the wire shape sent inside an `events` payload to `/ingest/browser`.
+ * Matches the processor's `VitalPayload` (browser/convert.rs) exactly: bare
+ * metric `name` ("LCP", "CLS", ...), `value`, route, and epoch-ms `timestamp`.
+ * Those four are the only fields the server deserializes; `rating` is derived
+ * from `value` at query time and `element`/`interaction_type` have no store
+ * yet, so none are sent here.
  *
- * `page_url` here is what the SDK decides to send: the current route template
- * if `setRouteTemplate` was called, otherwise the raw URL. The server runs
- * `auto_template` either way — idempotent on templates, helpful on raw URLs. */
+ * `page_url` is the route the SDK attributes the metric to: the template the
+ * host set via `setRouteTemplate` if any, otherwise the scrubbed raw URL. The
+ * server runs `auto_template` either way — idempotent on templates, helpful on
+ * raw URLs. */
 export interface EventVital {
   name: string;
   value: number;

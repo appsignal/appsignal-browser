@@ -1,4 +1,4 @@
-import type { BrowserConfig, EventPayload, EventVital, ResolvedConfig, UserContext } from "./types.js";
+import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
@@ -239,21 +239,13 @@ function flushEvents({
   // ship the same metric repeatedly as separate, non-final samples.
   const sendSessionStream = resolved!.session.enabled;
   const breadcrumbs = sendSessionStream ? drainBreadcrumbs() : [];
-  const session = getSessionContext();
-  const vitals: EventVital[] = includeVitals
-    ? drainVitals().map((v) => ({
-        name: v.name,
-        value: v.value,
-        page_url: v.page_url ?? session.page_url,
-        timestamp: v.timestamp,
-      }))
-    : [];
+  const vitals = includeVitals ? drainVitals() : [];
 
   if (breadcrumbs.length === 0 && vitals.length === 0) return;
 
   const payload: EventPayload = {
     type: "events",
-    session,
+    session: getSessionContext(),
     breadcrumbs,
     vitals,
     app_version: clientConfig?.appVersion,
