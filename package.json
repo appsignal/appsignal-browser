@@ -22,7 +22,7 @@
   },
   "scripts": {
     "build": "tsc && node build.mjs",
-    "prepare": "bun run build",
+    "prepare": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "bun run build && playwright test",
