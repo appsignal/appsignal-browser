@@ -265,23 +265,28 @@ Example network breadcrumb with resource timing:
 
 ### Web vitals
 
-Collect Core Web Vitals and supplementary metrics from the [web-vitals](https://github.com/GoogleChrome/web-vitals) library:
+Collect Core Web Vitals and supplementary metrics:
 
-| Metric | Description | Core Web Vital |
-|--------|-------------|----------------|
-| LCP | Largest Contentful Paint — loading performance | Yes |
-| CLS | Cumulative Layout Shift — visual stability | Yes |
-| INP | Interaction to Next Paint — responsiveness | Yes |
-| FCP | First Contentful Paint | No |
-| TTFB | Time to First Byte | No |
+| Metric | Description | Core Web Vital | Per route? |
+|--------|-------------|----------------|------------|
+| LCP | Largest Contentful Paint — loading performance | Yes | Load only |
+| CLS | Cumulative Layout Shift — visual stability | Yes | Yes |
+| INP | Interaction to Next Paint — responsiveness | Yes | Yes |
+| FCP | First Contentful Paint | No | Load only |
+| TTFB | Time to First Byte | No | Load only |
 
-Each metric is attributed to a route. **Load metrics** (LCP, FCP, TTFB) are anchored to the initial navigation and frozen to the route they loaded on — a late LCP that fires *after* a client-side navigation stays on the initial route, per the Core Web Vitals spec (its largest-contentful-paint stream is finalized by the interaction that starts the soft nav). **CLS and INP** accrue per route: CLS is reported as the delta since the last navigation, so each route gets only its own shifts; INP is only recorded after an interaction. Call `setRouteTemplate()` on each router navigation so the server aggregates by route shape (`/users/:id`) rather than raw URL.
+**Load metrics** (LCP, FCP, TTFB) come from the [web-vitals](https://github.com/GoogleChrome/web-vitals) library, which handles their bfcache/visibility edge cases. The browser measures them once, relative to the initial page load, and never re-fires them for SPA soft navigations — so they're attributed to the route the page loaded on and are *initial-load only*. This matches CrUX, Datadog, and Sentry: stable browsers can't measure LCP/FCP per soft navigation (it needs the experimental [Soft Navigations API](https://developer.chrome.com/docs/web-platform/soft-navigations)).
 
-LCP, CLS, and INP are registered with `reportAllChanges: true` so their values flow into the SDK as they update, not only at page-lifecycle end. This is what makes per-route attribution possible: without it `web-vitals` reports CLS/INP exactly once, at page-hide — by which point an SPA is on its final route, so a route's value could never be captured at the navigation that ends it. Each callback replaces any queued vital with the same `(name, page_url)` pair, holding only the latest value per (metric, page). FCP and TTFB fire once, early, and are registered without it.
+**CLS and INP** accrue over the page lifetime and *can* be attributed per route. `web-vitals` reports them as a single cumulative page-view value that can't be sliced per route, so the SDK observes the raw `layout-shift` and `event-timing` performance entries itself and buckets them into the active route, resetting at each navigation:
+
+- **CLS** runs the official session-window algorithm (shifts with `hadRecentInput` ignored; a window ends after a 1s gap or 5s span; the route's CLS is its largest window) — scoped to the current route rather than the whole page-view.
+- **INP** groups `event-timing` entries by `interactionId` (an interaction's latency is its longest event) and reports the route's worst interaction (the `floor(count/50)`-th worst above 50 interactions).
+
+Call `setRouteTemplate()` on each router navigation so CLS/INP attribute to the route they occurred on and the server aggregates by route shape (`/users/:id`) rather than raw URL. CLS/INP require the `layout-shift` / `event-timing` entry types (Chromium); where they're unavailable those two metrics are simply not emitted. Attribution is best-effort — a late-delivered buffered entry is bucketed into the route active when the observer delivers it.
 
 Per-sample attribution (which element caused a slow LCP, the INP interaction target) is **not** collected in v1: it's per-visit diagnostic data that belongs in a raw sample store, not the aggregated metrics pipeline this feeds.
 
-Vitals ride in the `vitals` array of the `events` payload. Each entry carries just `name`, `value`, `page_url`, and `timestamp` (the metric's occurrence time, derived from `performance.timeOrigin + entry.startTime`) — the four fields the server stores. `page_url` is the `setRouteTemplate()` template if set, otherwise the raw URL (the server auto-templates it); query params are filtered through `privacy.queryParamsAllowlist` first (all stripped by default).
+Vitals ride in the `vitals` array of the `events` payload. Each entry carries just `name`, `value`, `page_url`, and `timestamp` (the metric's occurrence time, derived from `performance.timeOrigin` + the entry's `startTime`) — the four fields the server stores. `page_url` is the `setRouteTemplate()` template if set, otherwise the raw URL (the server auto-templates it); query params are filtered through `privacy.queryParamsAllowlist` first (all stripped by default).
 
 Server-side the names become `browser_webvital_lcp` / `_cls` / `_inp` / `_fcp` / `_ttfb` and feed the metrics_v3 aggregation pipeline, which folds samples by `(name, page_url, app_version)` per minute into `metrics.browser_webvitals_minutely` with p90 / p95 percentiles. CLS is stored ×1000 so all five share an integer scale. Rating (good / needs-improvement / poor) is derived from `value` at query time against Google's thresholds — not stored.
 
@@ -320,10 +325,10 @@ Out of scope for v1. The `replay` module is a stub; rrweb is not bundled and nev
 ### Event batching and transport
 
 All non-error, non-replay events (breadcrumbs, vitals, session metadata) are batched into one `events` payload. Flush triggers:
-- **Page hide** (`visibilitychange` to hidden) and **tab close / navigation away** (`pagehide`, when not bfcache-persisted) — best-effort via `sendBeacon`. web-vitals registers its own `visibilitychange` listeners during `initVitals()`, before the SDK's, and v4+'s `onHidden` reports synchronously — so the final LCP/CLS/INP lands in the buffer before this flush drains it.
-- **SPA navigation** (route change) — ships the outgoing route's vitals before the CLS baseline resets.
+- **Page hide** (`visibilitychange` to hidden) and **tab close / navigation away** (`pagehide`, when not bfcache-persisted) — best-effort via `sendBeacon`. web-vitals registers its own `visibilitychange` listeners during `initVitals()`, before the SDK's, so the final LCP lands in the buffer before this flush drains it; the current route's CLS/INP are materialised from the observers at the same moment.
+- **SPA navigation** (route change) — finalises and ships the outgoing route's CLS/INP, then resets the observers so the new route measures from zero.
 - **Explicit `flush()`**.
-- **Every 30 seconds** while the page is active — carries the breadcrumb/session journey only (a no-op when `session.enabled` is off). Vitals are deliberately *excluded* from the periodic flush: under `reportAllChanges` their buffered value keeps rising, so draining it on a timer would ship the same metric repeatedly as separate, non-final samples. Vitals ride the navigation and page-hide flushes, where the value is final for the route.
+- **Every 30 seconds** while the page is active — carries the breadcrumb/session journey only (a no-op when `session.enabled` is off). Vitals are deliberately *excluded* from the periodic timer: they're meaningful only at a route or page boundary, so they ride the navigation and page-hide flushes instead.
 
 **Transport.** During a live session, events and replay chunks go via plain `fetch`. On `pagehide` / `visibilitychange → hidden`, a best-effort flush uses `navigator.sendBeacon`, which the browser delivers even as the page is unloading. Chromium caps both `sendBeacon` and `fetch({keepalive:true})` bodies at ~64 KB, so larger payloads are dropped on unload rather than attempted — the keepalive fallback Chrome would have rejected anyway. The lost payload is whatever accumulated since the last periodic flush: up to 5 s of replay events (often the trailing slice of a FullSnapshot-bearing chunk) or up to 30 s of breadcrumbs/vitals. Small payloads (the common case for events) fit under the cap and survive.
 

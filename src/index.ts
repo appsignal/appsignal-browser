@@ -3,7 +3,7 @@ import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
-import { initVitals, drainVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
+import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
@@ -192,10 +192,10 @@ function startCollection(endpoint: string): void {
   // the navigation breadcrumb (added by recordNav via onAfterNavigation)
   // lands in this flush, not the next one.
   //
-  // markVitalsNavigation runs *after* flushEvents so any CLS entries
-  // accumulated under the outgoing URL ship with their current values
-  // before the baseline shifts. Subsequent CLS callbacks then report
-  // deltas against the post-flush cumulative — i.e. per-route shifts.
+  // flushEvents finalises the outgoing route's CLS/INP (the host's
+  // setRouteTemplate for the new route runs later, in a router effect, so the
+  // template is still the outgoing route's here). markVitalsNavigation then
+  // resets the observers so the new route starts measuring from zero.
   onAfterNavigation(() => {
     flushEvents();
     markVitalsNavigation();
@@ -234,11 +234,13 @@ function flushEvents({
   // vitals), just not shipped here.
   //
   // Vitals drain only when `includeVitals` (SPA navigation, visibility-hidden/
-  // pagehide, manual flush/destroy) — never on the periodic timer. Under
-  // reportAllChanges the buffered value keeps rising, so a timed drain would
-  // ship the same metric repeatedly as separate, non-final samples.
+  // pagehide, manual flush/destroy) — never on the periodic timer. CLS/INP
+  // accumulate per route in the observers; finalizeRouteVitals materialises the
+  // current route's value just before we drain so the boundary that triggered
+  // this flush ships an up-to-date entry.
   const sendSessionStream = resolved!.session.enabled;
   const breadcrumbs = sendSessionStream ? drainBreadcrumbs() : [];
+  if (includeVitals) finalizeRouteVitals();
   const vitals = includeVitals ? drainVitals() : [];
 
   if (breadcrumbs.length === 0 && vitals.length === 0) return;

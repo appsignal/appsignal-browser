@@ -58,7 +58,7 @@ describe("vitals flush model", () => {
     // timer could ship is vitals.
     init({ key: "k" });
 
-    // A vital is collected (and would keep rising under reportAllChanges).
+    // A load metric (LCP) is collected but not yet flushed.
     handlers.lcp({ name: "LCP", value: 2000, entries: [{ startTime: 100 }] });
 
     // Periodic flush fires — vitals must be withheld (no events POST at all,
