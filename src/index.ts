@@ -1,4 +1,4 @@
-import type { BrowserConfig, EventPayload, EventVital, ResolvedConfig } from "./types.js";
+import type { BrowserConfig, EventPayload, EventVital, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
@@ -38,7 +38,11 @@ export function init(config: BrowserConfig): void {
   startCollection(endpoint);
 }
 
-export function setUser(user: { id?: string; email?: string; name?: string }): void {
+/** Identify the current user. `id`, `email`, and `name` are conventional, but
+ * any additional string attributes are accepted and become error tags too —
+ * e.g. `setUser({ id: "u1", email: "a@b.com", plan: "pro" })`. Pass `{}` /
+ * call `clearUser()` (via `endSession`) to drop identity. */
+export function setUser(user: UserContext): void {
   if (!initialized) return;
   sessionSetUser(user);
 }

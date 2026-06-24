@@ -92,10 +92,9 @@ export function ingestReplays(items: Captured[]): Array<Record<string, unknown>>
  *   - top-level `message`     ← `error.message`
  *   - top-level `error_class` ← `error.name`
  *   - top-level `stack`       ← `error.backtrace.join("\n")`
- *   - top-level `session`     ← `tags` (carries session_id / tab_id /
- *                                anonymous_id / optional user_id; we add the
- *                                user_email / user_name shims when present
- *                                on tags too)
+ *   - top-level `session`     ← `tags` (host-supplied setUser attributes only;
+ *                                SDK identity ids — session/tab/anonymous — are
+ *                                never sent as tags)
  *   - top-level `breadcrumbs` ← `breadcrumbs` (passes through unchanged) */
 export function ingestErrors(items: Captured[]): Array<Record<string, unknown>> {
   return jsonBodiesAtPath(items, "/ingest/browser/errors").map((b) => {

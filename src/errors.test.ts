@@ -7,6 +7,7 @@ import {
 } from "./errors.js";
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
+import * as session from "./session.js";
 import type { Breadcrumb, FrontendTransaction, IncomingError } from "./types.js";
 
 vi.mock("./transport.js", () => ({
@@ -33,11 +34,13 @@ vi.mock("./session.js", () => ({
     language: "en",
     timezone: "UTC",
   })),
+  getUser: vi.fn(() => null),
 }));
 
 const sendErrorMock = transport.sendError as ReturnType<typeof vi.fn>;
 const addBreadcrumbMock = breadcrumbs.addBreadcrumb as ReturnType<typeof vi.fn>;
 const getErrorBreadcrumbsMock = breadcrumbs.getErrorBreadcrumbs as ReturnType<typeof vi.fn>;
+const getUserMock = session.getUser as ReturnType<typeof vi.fn>;
 
 function fireError(message: string, stack?: string): void {
   const event = new ErrorEvent("error", {
@@ -58,6 +61,7 @@ describe("errors", () => {
     sendErrorMock.mockClear();
     addBreadcrumbMock.mockClear();
     getErrorBreadcrumbsMock.mockReturnValue([]);
+    getUserMock.mockReturnValue(null);
   });
 
   it("sends error events via transport", () => {
@@ -69,11 +73,49 @@ describe("errors", () => {
     expect(payload.namespace).toBe("browser");
     expect(payload.error.message).toBe("Test error");
     expect(payload.revision).toBe("v1.0");
-    expect(payload.tags.session_id).toBe("test-session");
-    expect(payload.tags.tab_id).toBe("test-tab");
-    expect(payload.tags.anonymous_id).toBe("test-anon");
+    // No user set → no tags. SDK identity (session/tab/anonymous ids) is never
+    // sent as tags; tags carry only host-supplied setUser attributes.
+    expect(payload.tags).toEqual({});
     expect(payload.environment.url).toBe(location.href);
     expect(payload.user_agent).toBe(navigator.userAgent);
+  });
+
+  it("passes setUser attributes through as tags (id, email, name, custom)", () => {
+    getUserMock.mockReturnValue({
+      id: "u1",
+      email: "a@b.com",
+      name: "Ann",
+      plan: "pro",
+      org_id: "acme",
+    });
+    initErrors({ enabled: true, sampleRate: 1.0 });
+    fireError("tagged error");
+
+    const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+    // Host attributes flow through verbatim — known and custom alike. No SDK
+    // identity tags are injected.
+    expect(payload.tags).toEqual({
+      id: "u1",
+      email: "a@b.com",
+      name: "Ann",
+      plan: "pro",
+      org_id: "acme",
+    });
+  });
+
+  it("skips undefined/empty user attributes and coerces values to strings", () => {
+    getUserMock.mockReturnValue({
+      id: "u1",
+      email: undefined,
+      name: "",
+      // numbers/bools can slip through at runtime despite the string type
+      count: 42 as unknown as string,
+    });
+    initErrors({ enabled: true, sampleRate: 1.0 });
+    fireError("coerce error");
+
+    const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+    expect(payload.tags).toEqual({ id: "u1", count: "42" });
   });
 
   it("captures error name from the Error constructor", () => {

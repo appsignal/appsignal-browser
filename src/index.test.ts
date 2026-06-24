@@ -145,7 +145,6 @@ describe("SDK integration", () => {
 
     const body = JSON.parse(errorPayloads[0].body);
     expect(body.error.message).toBe("manual error");
-    expect(body.tags.session_id).toBeTruthy();
   });
 
   it("endSession rotates session_id and clears user between flushes", () => {
@@ -179,31 +178,21 @@ describe("SDK integration", () => {
     expect(afterPayloads[0].session.user_id).toBeUndefined();
   });
 
-  it("attaches tab_id to event and error payloads", () => {
+  it("attaches tab_id to event payloads, distinct from session_id", () => {
     init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "tab id check" });
-    captureError(new Error("tab id error"));
     flush();
 
     const eventPayloads = sentPayloads
       .filter(p => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
       .map(p => { try { return JSON.parse(p.body) } catch { return null } })
       .filter(b => b?.type === "events");
-    const errorPayloads = sentPayloads
-      .filter(p => p.url.includes("/ingest/browser/errors"))
-      .map(p => { try { return JSON.parse(p.body) } catch { return null } })
-      .filter(b => !!b);
-
     expect(eventPayloads.length).toBeGreaterThan(0);
-    expect(errorPayloads.length).toBeGreaterThan(0);
 
-    // Events carry the full SessionContext; errors carry a flat tags map.
-    const eventTab = eventPayloads[0].session.tab_id;
-    const errorTab = errorPayloads[0].tags.tab_id;
-    expect(eventTab).toBeTruthy();
-    expect(eventTab).toBe(errorTab);
-    expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
+    const session = eventPayloads[0].session;
+    expect(session.tab_id).toBeTruthy();
+    expect(session.tab_id).not.toBe(session.session_id);
   });
 
   it("dropped noise errors leave a later real error's breadcrumb trail clean", () => {
@@ -300,5 +289,22 @@ describe("SDK integration", () => {
     const body = JSON.parse(eventPayloads[0].body);
     expect(body.session.user_id).toBe("u1");
     expect(body.session.user_email).toBe("test@test.com");
+  });
+
+  it("error tags are exactly the setUser attributes, passed through verbatim", () => {
+    init({ key: "test-key" });
+    setUser({ id: "u1", email: "test@test.com", plan: "pro" });
+
+    captureError(new Error("tagged"));
+
+    const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => !!b);
+    expect(errorPayloads.length).toBeGreaterThan(0);
+
+    // Exact match: every key the host set is present, and nothing else is
+    // (no SDK-injected identity).
+    expect(errorPayloads[0].tags).toEqual({ id: "u1", email: "test@test.com", plan: "pro" });
   });
 });

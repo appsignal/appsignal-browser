@@ -151,6 +151,11 @@ export interface UserContext {
   id?: string;
   email?: string;
   name?: string;
+  /** Arbitrary additional attributes — each is passed through verbatim as an
+   * error tag, so you can filter/search errors by them (e.g.
+   * `setUser({ email, plan: "pro", org_id: "acme" })`). Values are coerced to
+   * strings; the server truncates each tag value to 256 bytes. */
+  [key: string]: string | undefined;
 }
 
 export interface Breadcrumb {
@@ -233,12 +238,12 @@ export interface FrontendTransaction {
     backtrace: string[];
   };
   breadcrumbs: TransactionBreadcrumb[];
-  tags: {
-    session_id: string;
-    tab_id: string;
-    anonymous_id: string;
-    user_id?: string;
-  };
+  /** Host-supplied user attributes from `setUser` (id, email, name, and any
+   * custom fields), passed through verbatim. The SDK injects no identity of
+   * its own — session/tab/anonymous ids are deliberately not tags (they're
+   * high-cardinality and not in the server's metadata-distribution allowlist,
+   * so they'd be sample noise). Empty `{}` when no user has been set. */
+  tags: Record<string, string>;
   environment: {
     url: string;
   };

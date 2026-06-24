@@ -4,10 +4,9 @@ import type {
   FrontendTransaction,
   IncomingError,
   ResolvedConfig,
-  SessionContext,
   TransactionBreadcrumb,
 } from "./types.js";
-import { getSessionContext } from "./session.js";
+import { getSessionContext, getUser } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 
@@ -189,7 +188,7 @@ function handleError(
     ...effective,
   };
 
-  sendError(toFrontendTransaction(payload, session));
+  sendError(toFrontendTransaction(payload));
 
   for (const l of errorListeners) {
     try { l(payload); } catch { /* don't break the chain */ }
@@ -200,10 +199,7 @@ function handleError(
 // shape consumed by the processor's frontend_errors pipeline. `revision` is
 // the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
 // site_id + revision); without it stacks land unsymbolicated.
-function toFrontendTransaction(
-  error: BrowserError,
-  session: SessionContext,
-): FrontendTransaction {
+function toFrontendTransaction(error: BrowserError): FrontendTransaction {
   return {
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
@@ -217,15 +213,26 @@ function toFrontendTransaction(
       backtrace: error.stack ? error.stack.split("\n") : [],
     },
     breadcrumbs: error.breadcrumbs.map(toTransactionBreadcrumb),
-    tags: {
-      session_id: session.session_id,
-      tab_id: session.tab_id,
-      anonymous_id: session.anonymous_id,
-      ...(session.user_id ? { user_id: session.user_id } : {}),
-    },
+    tags: userTags(),
     environment: { url: location.href },
     user_agent: navigator.userAgent,
   };
+}
+
+// Error tags are exactly the attributes the host set via setUser (id, email,
+// name, and any custom fields), passed through verbatim. The SDK adds no
+// identity of its own: session/tab/anonymous ids aren't in the server's
+// metadata-distribution allowlist, so they'd just be high-cardinality sample
+// noise. Undefined/empty values are skipped; the rest are coerced to strings
+// (the server truncates each to 256 bytes).
+function userTags(): Record<string, string> {
+  const user = getUser();
+  if (!user) return {};
+  const tags: Record<string, string> = {};
+  for (const [key, value] of Object.entries(user)) {
+    if (value != null && value !== "") tags[key] = String(value);
+  }
+  return tags;
 }
 
 function toTransactionBreadcrumb(b: Breadcrumb): TransactionBreadcrumb {

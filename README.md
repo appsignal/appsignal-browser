@@ -106,8 +106,10 @@ All collection knobs are passed at `init()` time. There is no server-side config
 // Called once, early in the page lifecycle
 function init(config: BrowserConfig): void;
 
-// Set or update user context after authentication
-function setUser(user: { id?: string; email?: string; name?: string }): void;
+// Set or update user context after authentication. `id`/`email`/`name` are
+// conventional; any additional string attributes are accepted too and become
+// error tags (e.g. `setUser({ id, email, plan: "pro" })`).
+function setUser(user: { id?: string; email?: string; name?: string; [key: string]: string | undefined }): void;
 
 // Clear user context. Does not rotate the session — session identity is
 // independent of user identity. Use endSession() on logout if you want a
@@ -289,10 +291,12 @@ Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`.
 
 1. Capture: message, filename, line, column, stack trace (as a string).
 2. Attach current breadcrumbs (snapshot of the ring buffer).
-3. Attach session context.
+3. Attach session context (for `onErrorReported` subscribers).
 4. Send immediately (do not buffer).
 
 Stack traces are sent as raw strings. Source map processing is server-side (future phase); the plugin does not do client-side source map application.
+
+**Error tags.** The wire payload's `tags` map carries only the attributes the host set via `setUser()` — `id`, `email`, `name`, and any custom string fields — passed through verbatim (values coerced to strings, server-truncated to 256 bytes). The SDK injects no identity of its own: `session_id` / `tab_id` / `anonymous_id` are *not* sent as tags (they're high-cardinality and not in the server's metadata-distribution allowlist, so they'd be sample noise). They still ride the events/session stream's `SessionContext` and are available to `onErrorReported` subscribers.
 
 **beforeError hook.** If provided, called once per error at the entry point — *before* the error breadcrumb is added, *before* `lastErrorTimestamp` is updated, *before* deduplication. Returning `null` drops the error completely; none of those side effects fire. Mutating fields on the returned `IncomingError` propagates into the eventual payload. This is the single hook for both noise suppression and field redaction:
 

@@ -23,9 +23,6 @@ test("uncaught throw is captured via window.onerror", async ({ page, request }) 
 
   expect(err).toMatchObject({
     message: expect.stringContaining("e2e thrown error"),
-    // `session` here is the test-helper alias for the FrontendTransaction's
-    // `tags` map (see ingestErrors). session_id rides on tags.
-    session: expect.objectContaining({ session_id: expect.any(String) }),
   });
 });
 

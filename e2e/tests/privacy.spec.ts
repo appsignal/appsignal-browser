@@ -171,13 +171,10 @@ test.describe("error filtering", () => {
 
 test.describe("user context", () => {
   test("clearUser removes user fields from subsequent payloads", async ({ page, request }) => {
-    // setUser attaches the user_id to every error payload's `tags` until
-    // cleared. clearUser must remove the in-memory user AND the localStorage
-    // copy; the next error must ship without user_id on tags.
-    //
-    // The FrontendTransaction wire shape only carries user_id (not email /
-    // name) — those would need a separate test against the events stream
-    // where the full SessionContext travels.
+    // setUser attributes ride every error payload's `tags` verbatim (the keys
+    // the host passed — `id`, `email`, plus any custom fields) until cleared.
+    // clearUser must remove the in-memory user AND the localStorage copy; the
+    // next error must ship with no user attributes on tags.
     await page.goto("/");
 
     await page.evaluate(() => {
@@ -192,7 +189,8 @@ test.describe("user context", () => {
       ingestErrors(items).find((e) => (e.message as string)?.includes("first error with user")),
     );
     const firstTags = firstError.session as Record<string, unknown>;
-    expect(firstTags.user_id).toBe("test-user-1");
+    expect(firstTags.id).toBe("test-user-1");
+    expect(firstTags.email).toBe("test@example.com");
 
     await reset(request);
 
@@ -207,7 +205,8 @@ test.describe("user context", () => {
       ingestErrors(items).find((e) => (e.message as string)?.includes("second error without user")),
     );
     const secondTags = secondError.session as Record<string, unknown>;
-    expect(secondTags.user_id).toBeUndefined();
+    expect(secondTags.id).toBeUndefined();
+    expect(secondTags.email).toBeUndefined();
   });
 });
 

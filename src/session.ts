@@ -146,6 +146,13 @@ export function clearUser(): void {
   storage.remove(localStorage, USER_KEY);
 }
 
+/** The user attributes set via `setUser` (restored from localStorage on init),
+ * or `null` if none. Returned verbatim so callers can map every field —
+ * including custom ones — onto the wire. */
+export function getUser(): UserContext | null {
+  return currentUser;
+}
+
 function restoreUser(): void {
   if (currentUser) return;
   const stored = storage.getJSON<UserContext>(localStorage, USER_KEY);
