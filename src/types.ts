@@ -217,7 +217,11 @@ export interface BrowserError {
   colno?: number;
   stack?: string;
   breadcrumbs: Breadcrumb[];
-  session: SessionContext;
+  /** Full session context, attached only when an `onErrorReported` subscriber
+   * is registered to consume it (the error wire payload doesn't carry it, so
+   * it's not computed otherwise). Present whenever a subscriber receives the
+   * event. */
+  session?: SessionContext;
   app_version?: string;
   suppressed_count?: number;
   context?: Record<string, unknown>;

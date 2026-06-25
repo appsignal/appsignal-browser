@@ -176,22 +176,26 @@ function handleError(
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
   if (checkDedupe(dedupeKey, now)) return;
 
-  const session = getSessionContext();
   const payload: BrowserError = {
     type: "error",
     timestamp: now,
     // Already filtered (UX-only categories excluded) and capped to 25 by
     // the error-context ring buffer in breadcrumbs.ts.
     breadcrumbs: getErrorBreadcrumbs(),
-    session,
     app_version: appVersion,
     ...effective,
   };
 
   sendError(toFrontendTransaction(payload));
 
-  for (const l of errorListeners) {
-    try { l(payload); } catch { /* don't break the chain */ }
+  // Session context is only consumed by subscribers, not the wire payload —
+  // getSessionContext does real work (URL scrubbing, viewport/connection reads)
+  // so skip it entirely when nobody's listening.
+  if (errorListeners.length > 0) {
+    payload.session = getSessionContext();
+    for (const l of errorListeners) {
+      try { l(payload); } catch { /* don't break the chain */ }
+    }
   }
 }
 

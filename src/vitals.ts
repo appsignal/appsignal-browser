@@ -125,6 +125,7 @@ let clsSessionValue = 0; // sum of shifts in the current session window
 let clsSessionMax = 0; // largest session window seen for the current route
 let clsFirstShiftTs = 0;
 let clsLastShiftTs = 0;
+let clsEmitted = false; // CLS already shipped for this route-view (one per route)
 
 function observeLayoutShifts(): void {
   if (!supportsEntry("layout-shift")) return;
@@ -173,6 +174,7 @@ let firstInputObserver: PerformanceObserver | null = null;
 // sharing one interactionId; the interaction's latency is the longest of them.
 let interactions = new Map<number, number>();
 let inpLastTs = 0;
+let inpEmitted = false; // INP already shipped for this route-view (one per route)
 
 function observeInteractions(): void {
   if (!supportsEntry("event")) return;
@@ -229,22 +231,31 @@ function computeRouteInp(): number | null {
 export function finalizeRouteVitals(): void {
   if (destroyed) return;
   flushPendingLoad();
-  if (clsSessionMax > 0) {
+  // Emit each metric at most once per route-view. A route ends on navigation
+  // (markVitalsNavigation resets these flags); between then and now there can be
+  // several flushes — a manual flush(), then visibility-hidden, then pagehide on
+  // a normal tab close — and re-finalising the retained accumulator each time
+  // would ship the same CLS/INP repeatedly, double-counting the route server-side.
+  if (!clsEmitted && clsSessionMax > 0) {
     pushOrReplaceVital({
       name: "CLS",
       value: clsSessionMax,
       page_url: routePageUrl,
       timestamp: toEpoch(clsLastShiftTs),
     });
+    clsEmitted = true;
   }
-  const inp = computeRouteInp();
-  if (inp !== null) {
-    pushOrReplaceVital({
-      name: "INP",
-      value: inp,
-      page_url: routePageUrl,
-      timestamp: toEpoch(inpLastTs),
-    });
+  if (!inpEmitted) {
+    const inp = computeRouteInp();
+    if (inp !== null) {
+      pushOrReplaceVital({
+        name: "INP",
+        value: inp,
+        page_url: routePageUrl,
+        timestamp: toEpoch(inpLastTs),
+      });
+      inpEmitted = true;
+    }
   }
 }
 
@@ -261,8 +272,10 @@ function resetRouteVitals(): void {
   clsSessionMax = 0;
   clsFirstShiftTs = 0;
   clsLastShiftTs = 0;
+  clsEmitted = false;
   interactions = new Map();
   inpLastTs = 0;
+  inpEmitted = false;
   // Capture the route's page_url now (route start), so a flush after the URL
   // later advances still attributes this route's metrics to this route.
   routePageUrl = resolvePageUrl();

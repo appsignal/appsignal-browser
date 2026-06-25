@@ -5,7 +5,7 @@ import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcru
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
 
-import { initTransport, sendEvents, sendBeaconEvents, destroyTransport } from "./transport.js";
+import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
@@ -20,11 +20,10 @@ let initialized = false;
 // Lifecycle subscription teardowns
 let lifecycleUnsubscribers: (() => void)[] = [];
 
-// Internal SDK paths the network-breadcrumb collector must ignore so the
-// SDK's own POSTs don't end up in their own breadcrumb trail. Transport
-// owns the URL templates per kind; this list only exists for self-filtering.
-const EVENTS_PATH = "/ingest/browser";
-const ERROR_PATH = "/ingest/browser/errors";
+// EVENTS_PATH / ERROR_PATH are imported from transport (the owner of the wire
+// URLs) and reused here for network-breadcrumb self-filtering, so the SDK's own
+// POSTs don't end up in their own breadcrumb trail — and a future endpoint
+// change can't drift between the two files.
 const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
@@ -183,9 +182,14 @@ function startCollection(endpoint: string): void {
 
   initVitals(cfg.privacy.queryParamsAllowlist);
 
-  // Periodic flush: breadcrumb/session journey only (a no-op when session
-  // streaming is off, the default). Vitals are excluded — see flushEvents.
-  flushTimer = setInterval(() => flushEvents({ includeVitals: false }), FLUSH_INTERVAL_MS);
+  // Periodic flush: breadcrumb/session journey only — vitals are excluded (see
+  // flushEvents) and ship at route/page boundaries instead. The journey stream
+  // is the only thing this timer can carry, so don't even arm it when session
+  // streaming is off (the default) — otherwise it wakes twice a minute for an
+  // empty payload that early-returns, burning CPU/battery for nothing.
+  if (cfg.session.enabled) {
+    flushTimer = setInterval(() => flushEvents({ includeVitals: false }), FLUSH_INTERVAL_MS);
+  }
 
   // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
   // listeners are registered first (in initVitals) so they fire before this
@@ -216,11 +220,13 @@ function startCollection(endpoint: string): void {
     markVitalsNavigation();
   };
   onAfterNavigation(onNavigation);
-  // hashchange covers hash-router SPAs (e.g. HashRouter, `#/users/42`), which
-  // change the route without pushState/popstate. Trade-off: an in-page anchor
-  // jump (`#section`) also fires this and so finalises the route — acceptable,
-  // and consistent with how breadcrumbs already treats hashchange as a nav.
-  const onHashChange = () => onNavigation();
+  // hashchange covers hash-router SPAs (HashRouter, `#/users/42`), which change
+  // the route without pushState/popstate. Gate on the `#/` convention so an
+  // in-page anchor jump (`#section`) isn't mistaken for a route change — that
+  // would wrongly finalize and reset the current route's CLS/INP.
+  const onHashChange = () => {
+    if (location.hash.startsWith("#/")) onNavigation();
+  };
   window.addEventListener("hashchange", onHashChange);
   lifecycleUnsubscribers.push(() => window.removeEventListener("hashchange", onHashChange));
 }

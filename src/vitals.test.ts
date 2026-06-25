@@ -162,6 +162,23 @@ describe("vitals", () => {
       expect(drainVitals().find((v) => v.name === "CLS")).toBeUndefined();
     });
 
+    it("emits a route's CLS once across repeated flushes (no double-count)", () => {
+      // A normal tab close fires visibility-hidden then pagehide — both flush.
+      // The route's CLS must ship exactly once, not once per flush.
+      initVitals([]);
+      emitShifts([{ value: 0.05, startTime: 100 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().filter((v) => v.name === "CLS")).toHaveLength(1);
+      // Second flush for the same route (state retained, not reset) — no re-emit.
+      finalizeRouteVitals();
+      expect(drainVitals().filter((v) => v.name === "CLS")).toHaveLength(0);
+      // After a navigation the next route emits its own CLS again.
+      markVitalsNavigation();
+      emitShifts([{ value: 0.02, startTime: 200 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().filter((v) => v.name === "CLS")).toHaveLength(1);
+    });
+
     it("measures each route independently across a navigation", () => {
       initVitals([]);
       setRouteTemplate("/a");

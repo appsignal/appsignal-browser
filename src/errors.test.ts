@@ -273,7 +273,11 @@ describe("errors", () => {
     // Subscribers still receive the internal BrowserError shape — it has
     // breadcrumbs and full session context that the wire FrontendTransaction
     // drops. The wire format is an implementation detail of transport.
-    expect(subscriber.mock.calls[0][0].message).toBe("subscriber test");
+    const event = subscriber.mock.calls[0][0];
+    expect(event.message).toBe("subscriber test");
+    // Session context is computed lazily, but a registered subscriber must
+    // still receive it.
+    expect(event.session?.session_id).toBe("test-session");
   });
 
   it("does not notify subscribers when beforeError drops the error", () => {

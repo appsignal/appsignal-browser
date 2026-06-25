@@ -9,8 +9,8 @@ let ingestionKey = "";
 // to /ingest/browser as an `events` payload; the body is JSON but sent with
 // a text/plain content type so cross-origin sendBeacon doesn't trip a CORS
 // preflight (the server reads the raw bytes regardless).
-const EVENTS_PATH = "/ingest/browser";
-const ERROR_PATH = "/ingest/browser/errors";
+export const EVENTS_PATH = "/ingest/browser";
+export const ERROR_PATH = "/ingest/browser/errors";
 
 type Kind = "events" | "error";
 
