@@ -120,6 +120,20 @@ describe("session", () => {
       // Tags are error-only; SessionContext carries identity, not tags.
       expect(getSessionContext()).not.toHaveProperty("plan");
     });
+
+    it("ignores a corrupted (non-object) tags value in localStorage", () => {
+      // A foreign script or stale SDK version could leave a non-object here;
+      // it must not flow onto the error wire.
+      localStorage.setItem("appsignal_tags", JSON.stringify(["not", "an", "object"]));
+      initSession(1800000);
+      expect(getTags()).toEqual({});
+    });
+
+    it("restores and re-coerces a valid tags object from localStorage", () => {
+      localStorage.setItem("appsignal_tags", JSON.stringify({ plan: "pro", n: 7 }));
+      initSession(1800000);
+      expect(getTags()).toEqual({ plan: "pro", n: "7" });
+    });
   });
 
   it("caches stable fields across getSessionContext calls", () => {

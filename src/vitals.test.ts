@@ -119,6 +119,24 @@ describe("vitals", () => {
       expect(byName.get("LCP")).toBe("/landing");
     });
 
+    it("keeps a late LCP on the landing route when navigation happens first", () => {
+      // Fast SPA: navigate away before LCP finalizes. The load route must be
+      // frozen to the landing route at the navigation, not left to whatever
+      // route is active when the late LCP finally flushes.
+      setLocation("https://example.com/a");
+      initVitals([]);
+      // Navigate /a -> /b before any load metric is reported.
+      setLocation("https://example.com/b");
+      finalizeRouteVitals();
+      markVitalsNavigation();
+      // LCP finalizes now, on /b's clock.
+      handlers.lcp(fakeLoad("LCP", 2400));
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "LCP")?.page_url).toBe(
+        "https://example.com/a",
+      );
+    });
+
     it("falls back to the scrubbed URL when no template is set", () => {
       // Location is the loaded URL at init time — that's the load route.
       setLocation("https://example.com/users/42");
@@ -177,6 +195,19 @@ describe("vitals", () => {
       emitShifts([{ value: 0.02, startTime: 200 }]);
       finalizeRouteVitals();
       expect(drainVitals().filter((v) => v.name === "CLS")).toHaveLength(1);
+    });
+
+    it("re-emits the final CLS when it grows after an early flush (no under-report)", () => {
+      // Tab hidden early -> partial CLS flushed; user returns, more shifts; tab
+      // closed -> the larger final value must still ship.
+      initVitals([]);
+      emitShifts([{ value: 0.05, startTime: 100 }]);
+      finalizeRouteVitals(); // visibility-hidden
+      expect(drainVitals().find((v) => v.name === "CLS")?.value).toBeCloseTo(0.05, 5);
+
+      emitShifts([{ value: 0.06, startTime: 300 }]); // same window -> grows to 0.11
+      finalizeRouteVitals(); // pagehide
+      expect(drainVitals().find((v) => v.name === "CLS")?.value).toBeCloseTo(0.11, 5);
     });
 
     it("measures each route independently across a navigation", () => {

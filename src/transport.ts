@@ -16,10 +16,10 @@ type Kind = "events" | "error";
 
 // Chromium-enforced cap on `sendBeacon` bodies. `fetch({keepalive:true})`
 // shares the same cap, so there is no point falling back to keepalive for
-// larger payloads — the browser rejects both silently. Small payloads
-// survive unload via beacon. Larger ones are dropped: the lost data is
-// whatever accumulated since the last periodic flush (each flush drains
-// the buffer), so bound is ≤5 s of replay events or ≤30 s of breadcrumbs.
+// larger payloads — the browser rejects both silently. Small payloads survive
+// unload via beacon. Larger ones are dropped: on an unload flush the body is
+// the route's accumulated web vitals plus, when session streaming is on, the
+// breadcrumb journey since the last 30s periodic flush.
 const BEACON_MAX_BYTES = 64 * 1024;
 // Match the server's DefaultBodyLimit in crates/ingest/src/lib.rs. Replay
 // FullSnapshot chunks for rich DOMs routinely exceed 512 KB; dropping them
@@ -115,9 +115,9 @@ export function sendBeaconEvents(payload: EventPayload): void {
 
 /** Send a payload during page unload using sendBeacon. Bounded to
  * BEACON_MAX_BYTES: larger bodies are dropped because both sendBeacon and
- * fetch({keepalive:true}) silently reject them. The dropped payload is
- * whatever accumulated since the last periodic flush — bounded by the
- * flush cadence (5 s replay / 30 s events). */
+ * fetch({keepalive:true}) silently reject them. Oversize only happens with
+ * session streaming on (a large breadcrumb journey); the default errors+vitals
+ * payload is well under the cap. */
 function flushOnUnload(body: string, kind: Kind): void {
   if (!navigator.onLine) {
     enqueue(body, kind);

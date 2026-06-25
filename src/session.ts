@@ -152,12 +152,6 @@ export function clearUser(): void {
   storage.remove(localStorage, USER_KEY);
 }
 
-/** The identity set via `setUser` (restored from localStorage on init), or
- * `null` if none. */
-export function getUser(): UserContext | null {
-  return currentUser;
-}
-
 function restoreUser(): void {
   if (currentUser) return;
   const stored = storage.getJSON<UserContext>(localStorage, USER_KEY);
@@ -189,8 +183,18 @@ export function getTags(): ErrorTags {
 }
 
 function restoreTags(): void {
-  const stored = storage.getJSON<ErrorTags>(localStorage, TAGS_KEY);
-  currentTags = stored ? capTags(stored) : {};
+  const stored = storage.getJSON<unknown>(localStorage, TAGS_KEY);
+  // Guard against corrupted/foreign localStorage: only accept a plain object,
+  // and re-coerce values to strings so a malformed entry can't reach the wire.
+  if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+    const clean: ErrorTags = {};
+    for (const [key, value] of Object.entries(stored as Record<string, unknown>)) {
+      if (value != null && value !== "") clean[key] = String(value);
+    }
+    currentTags = capTags(clean);
+  } else {
+    currentTags = {};
+  }
 }
 
 function capTags(tags: ErrorTags): ErrorTags {
