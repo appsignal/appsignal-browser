@@ -196,7 +196,9 @@ function restoreTags(): void {
 function capTags(tags: ErrorTags): ErrorTags {
   const entries = Object.entries(tags);
   if (entries.length <= MAX_TAGS) return tags;
-  return Object.fromEntries(entries.slice(0, MAX_TAGS));
+  // Keep the most recently inserted keys — a just-set tag must survive the cap,
+  // dropping older ones instead (object key order is insertion order).
+  return Object.fromEntries(entries.slice(-MAX_TAGS));
 }
 
 /** End the current session. Clears session storage so next init creates a fresh session. */

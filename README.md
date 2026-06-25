@@ -296,6 +296,11 @@ Call `setRouteTemplate()` on each router navigation so CLS/INP attribute to the 
 
 Per-sample attribution (which element caused a slow LCP, the INP interaction target) is **not** collected in v1: it's per-visit diagnostic data that belongs in a raw sample store, not the aggregated metrics pipeline this feeds.
 
+**Known limitations (by design).**
+- **Abrupt termination loses the page's vitals.** Vitals flush at route/page boundaries (`visibilitychange→hidden`, `pagehide`, SPA navigation), never on the periodic timer — so a page killed by a crash, OOM, or force-quit before any of those fire records no vitals for that view. This is the standard `web-vitals` tradeoff (reporting on `visibilitychange` is the reliable signal); the lost slice is the hard-crash tail and doesn't bias aggregate percentiles.
+- **CLS/INP per-route attribution is best-effort.** A buffered `layout-shift`/`event-timing` entry delivered just after a navigation can be bucketed into the wrong route. Late-delivered entries are rare and the effect is occasional, not systematic.
+- **Hash-router navigations are treated as boundaries via `hashchange`.** This correctly segments `#/route` SPAs, but an in-page anchor jump (`#section`) also counts as a boundary and finalizes the current route's CLS/INP.
+
 Vitals ride in the `vitals` array of the `events` payload. Each entry carries just `name`, `value`, `page_url`, and `timestamp` (the metric's occurrence time, derived from `performance.timeOrigin` + the entry's `startTime`) — the four fields the server stores. `page_url` is the `setRouteTemplate()` template if set, otherwise the raw URL (the server auto-templates it); query params are filtered through `privacy.queryParamsAllowlist` first (all stripped by default).
 
 Server-side the names become `browser_webvital_lcp` / `_cls` / `_inp` / `_fcp` / `_ttfb` and feed the metrics_v3 aggregation pipeline, which folds samples by `(name, page_url, app_version)` per minute into `metrics.browser_webvitals_minutely` with p90 / p95 percentiles. CLS is stored ×1000 so all five share an integer scale. Rating (good / needs-improvement / poor) is derived from `value` at query time against Google's thresholds — not stored.

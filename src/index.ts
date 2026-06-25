@@ -211,10 +211,18 @@ function startCollection(endpoint: string): void {
   // setRouteTemplate for the new route runs later, in a router effect, so the
   // template is still the outgoing route's here). markVitalsNavigation then
   // resets the observers so the new route starts measuring from zero.
-  onAfterNavigation(() => {
+  const onNavigation = () => {
     flushEvents();
     markVitalsNavigation();
-  });
+  };
+  onAfterNavigation(onNavigation);
+  // hashchange covers hash-router SPAs (e.g. HashRouter, `#/users/42`), which
+  // change the route without pushState/popstate. Trade-off: an in-page anchor
+  // jump (`#section`) also fires this and so finalises the route — acceptable,
+  // and consistent with how breadcrumbs already treats hashchange as a nav.
+  const onHashChange = () => onNavigation();
+  window.addEventListener("hashchange", onHashChange);
+  lifecycleUnsubscribers.push(() => window.removeEventListener("hashchange", onHashChange));
 }
 
 function stopCollection(): void {

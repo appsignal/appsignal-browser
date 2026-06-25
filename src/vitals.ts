@@ -32,9 +32,25 @@ let destroyed = false;
 // `scrubUrl(location.href)` and let the server auto-template it.
 let currentRouteTemplate = "";
 
-// Route the load metrics (LCP/FCP/TTFB) are attributed to, frozen on first use
-// so all three share one value (page-load route). Cleared on init.
+// Resolved page_url for the *currently active* route — captured when the route
+// begins (init / navigation) and refreshed when the host sets a template, NOT
+// re-resolved at flush time. This matters because the SPA-navigation flush runs
+// in onAfterNavigation, after `location.href` has already advanced to the new
+// route: resolving live there would stamp the outgoing route's CLS/INP with the
+// incoming URL.
+let routePageUrl = "";
+
+// Route the load metrics (LCP/FCP/TTFB) are attributed to. Frozen the first
+// time pending load metrics are flushed at a boundary — by which point the host
+// has had a chance to set the landing route's template (its router effect runs
+// after first paint, whereas TTFB finalises almost immediately). Cleared on
+// init.
 let loadRoute: string | null = null;
+
+// web-vitals' onLCP/onFCP/onTTFB register page-lifetime observers that can't be
+// unregistered. Register them exactly once per page so a destroy()/init() cycle
+// doesn't stack duplicate reporters.
+let loadMetricsRegistered = false;
 
 export function initVitals(queryParamsAllowlist: string[]): void {
   collectedVitals = [];
@@ -42,14 +58,17 @@ export function initVitals(queryParamsAllowlist: string[]): void {
   allowlist = queryParamsAllowlist;
   currentRouteTemplate = "";
   loadRoute = null;
+  pendingLoad = [];
   resetRouteVitals();
 
-  // Load metrics: fire once when final, attributed to the load route. No
-  // `reportAllChanges` — that's a debug-only mode the web-vitals docs advise
-  // against in production.
-  onLCP(reportLoadMetric);
-  onFCP(reportLoadMetric);
-  onTTFB(reportLoadMetric);
+  // Load metrics: fire once when final. No `reportAllChanges` — that's a
+  // debug-only mode the web-vitals docs advise against in production.
+  if (!loadMetricsRegistered) {
+    onLCP(reportLoadMetric);
+    onFCP(reportLoadMetric);
+    onTTFB(reportLoadMetric);
+    loadMetricsRegistered = true;
+  }
 
   // CLS / INP: observe the raw entries and bucket per route ourselves.
   observeLayoutShifts();
@@ -58,14 +77,28 @@ export function initVitals(queryParamsAllowlist: string[]): void {
 
 // --- Load metrics (LCP/FCP/TTFB) -------------------------------------------
 
+// Load metrics finalise at different times (TTFB ~immediately, LCP possibly at
+// page-hide) but all belong to the page-load route. We buffer their values and
+// stamp page_url only at the next boundary flush, when the load route is known
+// — otherwise an early TTFB would freeze the route to the raw URL before the
+// host's setRouteTemplate effect runs.
+let pendingLoad: Array<Omit<EventVital, "page_url">> = [];
+
 function reportLoadMetric(metric: Metric): void {
   if (destroyed) return;
-  pushOrReplaceVital({
-    name: metric.name,
-    value: metric.value,
-    page_url: resolveLoadRoute(),
-    timestamp: occurredAt(metric),
-  });
+  const entry = { name: metric.name, value: metric.value, timestamp: occurredAt(metric) };
+  const idx = pendingLoad.findIndex((m) => m.name === entry.name);
+  if (idx >= 0) pendingLoad[idx] = entry;
+  else pendingLoad.push(entry);
+}
+
+function flushPendingLoad(): void {
+  if (pendingLoad.length === 0) return;
+  // Freeze the load route on first flush — routePageUrl is still the landing
+  // route here (the navigation that ends it flushes before resetting it).
+  if (loadRoute === null) loadRoute = routePageUrl;
+  for (const m of pendingLoad) pushOrReplaceVital({ ...m, page_url: loadRoute });
+  pendingLoad = [];
 }
 
 /** Wall-clock epoch-ms of when a load metric occurred. web-vitals reports the
@@ -79,11 +112,6 @@ function occurredAt(metric: Metric): number {
   return toEpoch(last ? last.startTime : performance.now());
 }
 
-function resolveLoadRoute(): string {
-  if (loadRoute === null) loadRoute = resolvePageUrl();
-  return loadRoute;
-}
-
 // --- CLS (per route, official session-window algorithm) --------------------
 
 interface LayoutShiftEntry extends PerformanceEntry {
@@ -92,6 +120,7 @@ interface LayoutShiftEntry extends PerformanceEntry {
 }
 
 let clsObserver: PerformanceObserver | null = null;
+let clsWindowOpen = false; // whether a session window is currently accumulating
 let clsSessionValue = 0; // sum of shifts in the current session window
 let clsSessionMax = 0; // largest session window seen for the current route
 let clsFirstShiftTs = 0;
@@ -107,15 +136,20 @@ function observeLayoutShifts(): void {
       // A session window ends after a 1s gap between shifts or once it has been
       // open for 5s; whichever comes first starts a new window. CLS is the
       // largest window — here, the largest window within the current route.
+      // Track window-open as a flag, not `sessionValue !== 0`, so a leading
+      // zero-value shift still anchors the window start correctly.
       if (
-        clsSessionValue !== 0 &&
+        clsWindowOpen &&
         (entry.startTime - clsLastShiftTs > 1000 ||
           entry.startTime - clsFirstShiftTs > 5000)
       ) {
         clsSessionValue = entry.value;
         clsFirstShiftTs = entry.startTime;
       } else {
-        if (clsSessionValue === 0) clsFirstShiftTs = entry.startTime;
+        if (!clsWindowOpen) {
+          clsFirstShiftTs = entry.startTime;
+          clsWindowOpen = true;
+        }
         clsSessionValue += entry.value;
       }
       clsLastShiftTs = entry.startTime;
@@ -153,14 +187,17 @@ function observeInteractions(): void {
     }
   });
   inpObserver.observe({ type: "event", buffered: true, durationThreshold: 40 } as PerformanceObserverInit);
-  // first-input is reported under its own entry type and may precede the first
-  // `event`; it has no interactionId, so bucket it under a sentinel key that
-  // can't collide with a real one.
+  // first-input catches a fast first interaction the `event` observer's 40ms
+  // threshold would miss. In modern Chromium the first interaction is delivered
+  // as BOTH a `first-input` and an `event` entry sharing one interactionId —
+  // so key it by that id (recordInteraction takes the max, no double count) and
+  // only fall back to a sentinel when no interactionId is present.
   if (supportsEntry("first-input")) {
     firstInputObserver = new PerformanceObserver((list) => {
       if (destroyed) return;
       for (const entry of list.getEntries() as InteractionEntry[]) {
-        recordInteraction(-1, entry.duration, entry.startTime);
+        const id = entry.interactionId ?? 0;
+        recordInteraction(id !== 0 ? id : -1, entry.duration, entry.startTime);
       }
     });
     firstInputObserver.observe({ type: "first-input", buffered: true });
@@ -191,12 +228,12 @@ function computeRouteInp(): number | null {
  * on (name, page_url), so finalising twice updates rather than duplicates. */
 export function finalizeRouteVitals(): void {
   if (destroyed) return;
-  const page_url = resolvePageUrl();
+  flushPendingLoad();
   if (clsSessionMax > 0) {
     pushOrReplaceVital({
       name: "CLS",
       value: clsSessionMax,
-      page_url,
+      page_url: routePageUrl,
       timestamp: toEpoch(clsLastShiftTs),
     });
   }
@@ -205,7 +242,7 @@ export function finalizeRouteVitals(): void {
     pushOrReplaceVital({
       name: "INP",
       value: inp,
-      page_url,
+      page_url: routePageUrl,
       timestamp: toEpoch(inpLastTs),
     });
   }
@@ -219,12 +256,16 @@ export function markVitalsNavigation(): void {
 }
 
 function resetRouteVitals(): void {
+  clsWindowOpen = false;
   clsSessionValue = 0;
   clsSessionMax = 0;
   clsFirstShiftTs = 0;
   clsLastShiftTs = 0;
   interactions = new Map();
   inpLastTs = 0;
+  // Capture the route's page_url now (route start), so a flush after the URL
+  // later advances still attributes this route's metrics to this route.
+  routePageUrl = resolvePageUrl();
 }
 
 /** Set the route template the host app considers current — e.g. `/users/:id`
@@ -245,6 +286,9 @@ function resetRouteVitals(): void {
  * useEffect(() => appsignal.setRouteTemplate(usePathname()), [pathname]); */
 export function setRouteTemplate(template: string | null): void {
   currentRouteTemplate = template ?? "";
+  // Refresh the active route's page_url so metrics accruing on this route (and
+  // the load metrics, if not yet flushed) pick up the template.
+  routePageUrl = resolvePageUrl();
 }
 
 export function drainVitals(): EventVital[] {
@@ -258,6 +302,7 @@ export function destroyVitals(): void {
   collectedVitals = [];
   currentRouteTemplate = "";
   loadRoute = null;
+  pendingLoad = [];
   resetRouteVitals();
   clsObserver?.disconnect();
   inpObserver?.disconnect();

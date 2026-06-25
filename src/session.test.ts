@@ -93,6 +93,18 @@ describe("session", () => {
       expect(Object.keys(getTags())).toHaveLength(32);
     });
 
+    it("keeps a just-set tag when over the cap, dropping older ones", () => {
+      initSession(1800000);
+      const many: Record<string, string> = {};
+      for (let i = 0; i < 32; i++) many[`k${i}`] = `v${i}`;
+      setTags(many); // at the cap
+      setTags({ release: "v2" }); // critical new tag must survive
+      const tags = getTags();
+      expect(Object.keys(tags)).toHaveLength(32);
+      expect(tags.release).toBe("v2");
+      expect(tags.k0).toBeUndefined(); // oldest dropped instead
+    });
+
     it("clearTags empties the set without rotating the session", () => {
       initSession(1800000);
       const firstId = getSessionId();

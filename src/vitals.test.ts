@@ -52,6 +52,9 @@ function emitShifts(entries: Array<{ value: number; startTime: number; hadRecent
 function emitInteractions(entries: Array<{ interactionId: number; duration: number; startTime: number }>) {
   observers["event"]?.(entries.map((e) => ({ entryType: "event", ...e })));
 }
+function emitFirstInput(entries: Array<{ interactionId?: number; duration: number; startTime: number }>) {
+  observers["first-input"]?.(entries.map((e) => ({ entryType: "first-input", ...e })));
+}
 
 function fakeLoad(name: string, value: number, startTime?: number) {
   return { name, value, entries: startTime == null ? [] : [{ startTime }] };
@@ -63,7 +66,10 @@ function setLocation(href: string) {
 
 describe("vitals", () => {
   beforeEach(() => {
-    for (const k of Object.keys(handlers)) delete handlers[k];
+    // web-vitals' onLCP/onFCP/onTTFB are registered once per page (the SDK
+    // guards re-registration), so don't clear `handlers` between tests — the
+    // first initVitals populates them and they stay valid. Observers, by
+    // contrast, are recreated on every init, so reset those.
     for (const k of Object.keys(observers)) delete observers[k];
     vi.stubGlobal("PerformanceObserver", MockPerformanceObserver);
     setLocation("https://example.com/");
@@ -87,20 +93,26 @@ describe("vitals", () => {
     it("stamps the metric with its occurrence time, not the report time", () => {
       initVitals([]);
       handlers.lcp(fakeLoad("LCP", 2400, 1500));
+      // Load metrics are buffered until a boundary flush stamps their page_url.
+      finalizeRouteVitals();
       const lcp = drainVitals().find((v) => v.name === "LCP");
       expect(lcp?.timestamp).toBe(Math.round(performance.timeOrigin + 1500));
     });
 
     it("attributes all three load metrics to one frozen load route", () => {
-      // The load route freezes on first use and is shared, so a late metric
-      // can't diverge from an early one even across a navigation.
+      // The load route freezes at the first boundary flush and is shared, so a
+      // late metric can't diverge from an early one even across a navigation.
       initVitals([]);
       setRouteTemplate("/landing");
       handlers.ttfb(fakeLoad("TTFB", 100));
-      // navigate away before LCP finalises
-      setRouteTemplate("/next");
+      // Navigate away. In production flushEvents() finalises (freezing the load
+      // route to /landing) before markVitalsNavigation resets — mirror that.
+      finalizeRouteVitals();
       markVitalsNavigation();
+      setRouteTemplate("/next");
+      // A late LCP that finalises after the navigation still belongs to /landing.
       handlers.lcp(fakeLoad("LCP", 2400));
+      finalizeRouteVitals();
 
       const byName = new Map(drainVitals().map((v) => [v.name, v.page_url]));
       expect(byName.get("TTFB")).toBe("/landing");
@@ -108,9 +120,11 @@ describe("vitals", () => {
     });
 
     it("falls back to the scrubbed URL when no template is set", () => {
-      initVitals([]);
+      // Location is the loaded URL at init time — that's the load route.
       setLocation("https://example.com/users/42");
+      initVitals([]);
       handlers.lcp(fakeLoad("LCP", 1800));
+      finalizeRouteVitals();
       expect(drainVitals().find((v) => v.name === "LCP")?.page_url).toBe(
         "https://example.com/users/42",
       );
@@ -176,6 +190,21 @@ describe("vitals", () => {
         Math.round(performance.timeOrigin + 800),
       );
     });
+
+    it("attributes the outgoing route to its own URL when location already advanced (no template)", () => {
+      // Regression: the SPA-navigation flush runs after location.href has moved
+      // to the new route. Without a template, the outgoing route's CLS must
+      // still be attributed to the route it occurred on, not the incoming URL.
+      setLocation("https://example.com/a");
+      initVitals([]);
+      emitShifts([{ value: 0.1, startTime: 100 }]);
+      // pushState has advanced the URL before onAfterNavigation flushes.
+      setLocation("https://example.com/b");
+      finalizeRouteVitals();
+      markVitalsNavigation();
+      const cls = drainVitals().find((v) => v.name === "CLS");
+      expect(cls?.page_url).toBe("https://example.com/a");
+    });
   });
 
   describe("INP (per route, worst interaction)", () => {
@@ -218,6 +247,25 @@ describe("vitals", () => {
       expect(b?.page_url).toBe("/b");
     });
 
+    it("merges a first-input sharing an interactionId with its event entry", () => {
+      // Chromium delivers the first interaction as both a first-input and an
+      // event entry with the same interactionId. Keying first-input by that id
+      // (not a sentinel) means it merges instead of double-counting.
+      initVitals([]);
+      emitFirstInput([{ interactionId: 1, duration: 250, startTime: 50 }]);
+      emitInteractions([{ interactionId: 1, duration: 250, startTime: 50 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "INP")?.value).toBe(250);
+    });
+
+    it("counts a fast first-input that the event observer's threshold would miss", () => {
+      // first-input has no interactionId here → falls back to the sentinel key.
+      initVitals([]);
+      emitFirstInput([{ duration: 30, startTime: 10 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "INP")?.value).toBe(30);
+    });
+
     it("does not emit INP when there were no interactions", () => {
       initVitals([]);
       finalizeRouteVitals();
@@ -247,10 +295,10 @@ describe("vitals", () => {
     });
 
     it("falls back to location.href when cleared with null", () => {
-      initVitals([]);
-      setRouteTemplate("/checkout");
-      setRouteTemplate(null);
       setLocation("https://example.com/orders/99");
+      initVitals([]);
+      setRouteTemplate("/orders/:id");
+      setRouteTemplate(null); // clearing re-resolves to the current location
       emitInteractions([{ interactionId: 1, duration: 180, startTime: 100 }]);
       finalizeRouteVitals();
       expect(drainVitals().find((v) => v.name === "INP")?.page_url).toBe(
@@ -263,9 +311,10 @@ describe("vitals", () => {
       setRouteTemplate("/users/:id");
       destroyVitals();
 
-      initVitals([]);
       setLocation("https://example.com/users/42");
+      initVitals([]);
       handlers.lcp(fakeLoad("LCP", 1500));
+      finalizeRouteVitals();
       // Fresh init must not leak the previous template.
       expect(drainVitals().find((v) => v.name === "LCP")?.page_url).toBe(
         "https://example.com/users/42",
