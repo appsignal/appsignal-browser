@@ -18,7 +18,7 @@ vi.mock("web-vitals", () => {
   };
 });
 
-import { init, destroy, flush } from "./index.js";
+import { init, destroy, flush, addBreadcrumb } from "./index.js";
 
 function eventsPayloads(sent: { body: string }[]) {
   return sent
@@ -53,23 +53,27 @@ describe("vitals flush model", () => {
     vi.restoreAllMocks();
   });
 
-  it("does not ship vitals on the periodic timer, but ships them on an explicit flush", () => {
-    // session streaming is off by default, so the only thing the periodic
-    // timer could ship is vitals.
-    init({ key: "k" });
+  it("excludes vitals from the periodic timer but ships them on an explicit flush", () => {
+    // Enable session streaming so the periodic timer is actually armed (it's a
+    // no-op and unarmed by default). The timer ships the breadcrumb journey but
+    // must never carry vitals — those leave only at route/page boundaries.
+    init({ key: "k", session: { enabled: true } });
 
-    // A load metric (LCP) is collected but not yet flushed.
     handlers.lcp({ name: "LCP", value: 2000, entries: [{ startTime: 100 }] });
+    addBreadcrumb({ category: "test", message: "tick" });
 
-    // Periodic flush fires — vitals must be withheld (no events POST at all,
-    // since breadcrumbs are off too).
     vi.advanceTimersByTime(30_000);
-    expect(eventsPayloads(sent)).toHaveLength(0);
+    const periodic = eventsPayloads(sent);
+    // The periodic flush shipped the journey...
+    expect(periodic.length).toBeGreaterThan(0);
+    // ...but withheld vitals entirely.
+    expect(periodic.every((e) => (e.vitals ?? []).length === 0)).toBe(true);
 
     // An explicit flush (stands in for navigation / page-hide) ships the vital.
     flush();
-    const events = eventsPayloads(sent);
-    expect(events).toHaveLength(1);
-    expect(events[0].vitals.find((v: { name: string }) => v.name === "LCP")?.value).toBe(2000);
+    const lcp = eventsPayloads(sent)
+      .flatMap((e) => e.vitals ?? [])
+      .find((v: { name: string }) => v.name === "LCP");
+    expect(lcp?.value).toBe(2000);
   });
 });

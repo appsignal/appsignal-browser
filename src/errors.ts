@@ -208,7 +208,9 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
-    // No router integration yet; fall back to the raw pathname.
+    // Raw pathname for now. setRouteTemplate currently scopes only web-vitals
+    // attribution; wiring it into the error `action` so errors group by route
+    // template (/users/:id) instead of raw path is a deliberate follow-up.
     action: location.pathname,
     revision: error.app_version,
     error: {

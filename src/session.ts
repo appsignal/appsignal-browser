@@ -183,18 +183,21 @@ export function getTags(): ErrorTags {
 }
 
 function restoreTags(): void {
-  const stored = storage.getJSON<unknown>(localStorage, TAGS_KEY);
-  // Guard against corrupted/foreign localStorage: only accept a plain object,
-  // and re-coerce values to strings so a malformed entry can't reach the wire.
-  if (stored && typeof stored === "object" && !Array.isArray(stored)) {
-    const clean: ErrorTags = {};
-    for (const [key, value] of Object.entries(stored as Record<string, unknown>)) {
-      if (value != null && value !== "") clean[key] = String(value);
-    }
-    currentTags = capTags(clean);
-  } else {
-    currentTags = {};
+  currentTags = sanitizeTags(storage.getJSON<unknown>(localStorage, TAGS_KEY));
+}
+
+/** Coerce an untrusted value (from localStorage, or a cross-tab storage event)
+ * into a clean, capped string-keyed tag map. Guards the error wire against
+ * corrupted/foreign data: anything that isn't a plain object becomes `{}`, and
+ * values are coerced to strings with empties dropped — the same contract
+ * setTags enforces. */
+function sanitizeTags(value: unknown): ErrorTags {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const clean: ErrorTags = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v != null && v !== "") clean[key] = String(v);
   }
+  return capTags(clean);
 }
 
 function capTags(tags: ErrorTags): ErrorTags {
@@ -277,7 +280,7 @@ function startActivityTracking(): void {
       }
     } else if (e.key === TAGS_KEY) {
       try {
-        currentTags = e.newValue ? capTags(JSON.parse(e.newValue)) : {};
+        currentTags = e.newValue ? sanitizeTags(JSON.parse(e.newValue)) : {};
       } catch {
         /* ignore */
       }

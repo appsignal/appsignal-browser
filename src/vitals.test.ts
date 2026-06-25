@@ -34,20 +34,37 @@ import {
 // --- PerformanceObserver mock: route entries to whoever observed the type ---
 const observers: Record<string, (entries: unknown[]) => void> = {};
 
+// Entries staged as "buffered but not yet delivered to the callback"; returned
+// by takeRecords() to simulate the page-exit drain.
+const buffered: Record<string, unknown[]> = {};
+
 class MockPerformanceObserver {
   static supportedEntryTypes = ["layout-shift", "event", "first-input", "largest-contentful-paint"];
   private cb: (list: { getEntries: () => unknown[] }) => void;
+  private type = "";
   constructor(cb: (list: { getEntries: () => unknown[] }) => void) {
     this.cb = cb;
   }
   observe(opts: { type: string }) {
+    this.type = opts.type;
     observers[opts.type] = (entries: unknown[]) => this.cb({ getEntries: () => entries });
+  }
+  takeRecords(): unknown[] {
+    const pending = buffered[this.type] ?? [];
+    buffered[this.type] = [];
+    return pending;
   }
   disconnect() {}
 }
 
 function emitShifts(entries: Array<{ value: number; startTime: number; hadRecentInput?: boolean }>) {
   observers["layout-shift"]?.(entries.map((e) => ({ hadRecentInput: false, ...e })));
+}
+// Stage a layout-shift entry as buffered-but-undelivered (pulled via takeRecords).
+function bufferShifts(entries: Array<{ value: number; startTime: number; hadRecentInput?: boolean }>) {
+  buffered["layout-shift"] = (buffered["layout-shift"] ?? []).concat(
+    entries.map((e) => ({ hadRecentInput: false, ...e })),
+  );
 }
 function emitInteractions(entries: Array<{ interactionId: number; duration: number; startTime: number }>) {
   observers["event"]?.(entries.map((e) => ({ entryType: "event", ...e })));
@@ -71,6 +88,7 @@ describe("vitals", () => {
     // first initVitals populates them and they stay valid. Observers, by
     // contrast, are recreated on every init, so reset those.
     for (const k of Object.keys(observers)) delete observers[k];
+    for (const k of Object.keys(buffered)) delete buffered[k];
     vi.stubGlobal("PerformanceObserver", MockPerformanceObserver);
     setLocation("https://example.com/");
   });
@@ -195,6 +213,17 @@ describe("vitals", () => {
       emitShifts([{ value: 0.02, startTime: 200 }]);
       finalizeRouteVitals();
       expect(drainVitals().filter((v) => v.name === "CLS")).toHaveLength(1);
+    });
+
+    it("drains layout-shift entries still buffered at flush time (page-exit accuracy)", () => {
+      // The last shifts before unload may sit in the observer's buffer, never
+      // delivered to the async callback. finalizeRouteVitals must pull them via
+      // takeRecords() or they're lost.
+      initVitals([]);
+      emitShifts([{ value: 0.03, startTime: 100 }]);
+      bufferShifts([{ value: 0.04, startTime: 200 }]); // not yet delivered
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "CLS")?.value).toBeCloseTo(0.07, 5);
     });
 
     it("re-emits the final CLS when it grows after an early flush (no under-report)", () => {

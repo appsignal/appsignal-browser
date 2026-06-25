@@ -137,35 +137,37 @@ let clsEmittedValue = -1; // last CLS value shipped for this route-view (-1 = no
 
 function observeLayoutShifts(): void {
   if (!supportsEntry("layout-shift")) return;
-  clsObserver = new PerformanceObserver((list) => {
-    if (destroyed) return;
-    for (const entry of list.getEntries() as LayoutShiftEntry[]) {
-      // Shifts within 500ms of user input don't count toward CLS.
-      if (entry.hadRecentInput) continue;
-      // A session window ends after a 1s gap between shifts or once it has been
-      // open for 5s; whichever comes first starts a new window. CLS is the
-      // largest window — here, the largest window within the current route.
-      // Track window-open as a flag, not `sessionValue !== 0`, so a leading
-      // zero-value shift still anchors the window start correctly.
-      if (
-        clsWindowOpen &&
-        (entry.startTime - clsLastShiftTs > 1000 ||
-          entry.startTime - clsFirstShiftTs > 5000)
-      ) {
-        clsSessionValue = entry.value;
-        clsFirstShiftTs = entry.startTime;
-      } else {
-        if (!clsWindowOpen) {
-          clsFirstShiftTs = entry.startTime;
-          clsWindowOpen = true;
-        }
-        clsSessionValue += entry.value;
-      }
-      clsLastShiftTs = entry.startTime;
-      if (clsSessionValue > clsSessionMax) clsSessionMax = clsSessionValue;
-    }
-  });
+  clsObserver = new PerformanceObserver((list) => processShiftEntries(list.getEntries() as LayoutShiftEntry[]));
   clsObserver.observe({ type: "layout-shift", buffered: true });
+}
+
+function processShiftEntries(entries: LayoutShiftEntry[]): void {
+  if (destroyed) return;
+  for (const entry of entries) {
+    // Shifts within 500ms of user input don't count toward CLS.
+    if (entry.hadRecentInput) continue;
+    // A session window ends after a 1s gap between shifts or once it has been
+    // open for 5s; whichever comes first starts a new window. CLS is the
+    // largest window — here, the largest window within the current route.
+    // Track window-open as a flag, not `sessionValue !== 0`, so a leading
+    // zero-value shift still anchors the window start correctly.
+    if (
+      clsWindowOpen &&
+      (entry.startTime - clsLastShiftTs > 1000 ||
+        entry.startTime - clsFirstShiftTs > 5000)
+    ) {
+      clsSessionValue = entry.value;
+      clsFirstShiftTs = entry.startTime;
+    } else {
+      if (!clsWindowOpen) {
+        clsFirstShiftTs = entry.startTime;
+        clsWindowOpen = true;
+      }
+      clsSessionValue += entry.value;
+    }
+    clsLastShiftTs = entry.startTime;
+    if (clsSessionValue > clsSessionMax) clsSessionMax = clsSessionValue;
+  }
 }
 
 // --- INP (per route, worst-interaction percentile) -------------------------
@@ -186,16 +188,7 @@ let inpEmittedValue = -1; // last INP value shipped for this route-view (-1 = no
 
 function observeInteractions(): void {
   if (!supportsEntry("event")) return;
-  inpObserver = new PerformanceObserver((list) => {
-    if (destroyed) return;
-    for (const entry of list.getEntries() as InteractionEntry[]) {
-      // interactionId 0 means the event isn't part of a discrete interaction
-      // (e.g. a continuous scroll event) — it doesn't count toward INP.
-      const id = entry.interactionId ?? 0;
-      if (id === 0) continue;
-      recordInteraction(id, entry.duration, entry.startTime);
-    }
-  });
+  inpObserver = new PerformanceObserver((list) => processEventEntries(list.getEntries() as InteractionEntry[]));
   inpObserver.observe({ type: "event", buffered: true, durationThreshold: 40 } as PerformanceObserverInit);
   // first-input catches a fast first interaction the `event` observer's 40ms
   // threshold would miss. In modern Chromium the first interaction is delivered
@@ -203,15 +196,38 @@ function observeInteractions(): void {
   // so key it by that id (recordInteraction takes the max, no double count) and
   // only fall back to a sentinel when no interactionId is present.
   if (supportsEntry("first-input")) {
-    firstInputObserver = new PerformanceObserver((list) => {
-      if (destroyed) return;
-      for (const entry of list.getEntries() as InteractionEntry[]) {
-        const id = entry.interactionId ?? 0;
-        recordInteraction(id !== 0 ? id : -1, entry.duration, entry.startTime);
-      }
-    });
+    firstInputObserver = new PerformanceObserver((list) => processFirstInputEntries(list.getEntries() as InteractionEntry[]));
     firstInputObserver.observe({ type: "first-input", buffered: true });
   }
+}
+
+function processEventEntries(entries: InteractionEntry[]): void {
+  if (destroyed) return;
+  for (const entry of entries) {
+    // interactionId 0 means the event isn't part of a discrete interaction
+    // (e.g. a continuous scroll event) — it doesn't count toward INP.
+    const id = entry.interactionId ?? 0;
+    if (id === 0) continue;
+    recordInteraction(id, entry.duration, entry.startTime);
+  }
+}
+
+function processFirstInputEntries(entries: InteractionEntry[]): void {
+  if (destroyed) return;
+  for (const entry of entries) {
+    const id = entry.interactionId ?? 0;
+    recordInteraction(id !== 0 ? id : -1, entry.duration, entry.startTime);
+  }
+}
+
+// Pull entries the observers have buffered but not yet delivered to their async
+// callbacks. At an unload flush (visibility-hidden/pagehide) the callback won't
+// run again before the page goes away, so without this the final shifts and
+// interactions before exit are dropped and CLS/INP under-report.
+function drainObserverBuffers(): void {
+  if (clsObserver) processShiftEntries(clsObserver.takeRecords() as LayoutShiftEntry[]);
+  if (inpObserver) processEventEntries(inpObserver.takeRecords() as InteractionEntry[]);
+  if (firstInputObserver) processFirstInputEntries(firstInputObserver.takeRecords() as InteractionEntry[]);
 }
 
 function recordInteraction(key: number, duration: number, startTime: number): void {
@@ -238,6 +254,9 @@ function computeRouteInp(): number | null {
  * on (name, page_url), so finalising twice updates rather than duplicates. */
 export function finalizeRouteVitals(): void {
   if (destroyed) return;
+  // Materialise any entries still buffered in the observers before reading the
+  // accumulators, so a last-moment shift/interaction at page exit isn't lost.
+  drainObserverBuffers();
   flushPendingLoad();
   // Emit only when the value has changed since this route last shipped it.
   // Between a route's start and its navigation reset there can be several

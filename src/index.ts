@@ -220,12 +220,13 @@ function startCollection(endpoint: string): void {
     markVitalsNavigation();
   };
   onAfterNavigation(onNavigation);
-  // hashchange covers hash-router SPAs (HashRouter, `#/users/42`), which change
-  // the route without pushState/popstate. Gate on the `#/` convention so an
+  // hashchange covers hash-router SPAs, which change the route without
+  // pushState/popstate. Gate on the `#/` and `#!/` (shebang) conventions so an
   // in-page anchor jump (`#section`) isn't mistaken for a route change — that
-  // would wrongly finalize and reset the current route's CLS/INP.
+  // would wrongly finalize and reset the current route's CLS/INP. Bare
+  // `#route` hash routers are indistinguishable from anchors and aren't covered.
   const onHashChange = () => {
-    if (location.hash.startsWith("#/")) onNavigation();
+    if (location.hash.startsWith("#/") || location.hash.startsWith("#!/")) onNavigation();
   };
   window.addEventListener("hashchange", onHashChange);
   lifecycleUnsubscribers.push(() => window.removeEventListener("hashchange", onHashChange));
