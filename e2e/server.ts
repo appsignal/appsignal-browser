@@ -116,6 +116,10 @@ const server = createServer(async (req, res) => {
       headers: {
         traceparent: req.headers.traceparent as string | undefined,
         "content-type": req.headers["content-type"] as string | undefined,
+        // Captured so the resilience spec can assert the network hook doesn't
+        // strip headers carried on a Request input (auth/custom).
+        authorization: req.headers.authorization as string | undefined,
+        "x-custom": req.headers["x-custom"] as string | undefined,
       },
       body,
       receivedAt: Date.now(),

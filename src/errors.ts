@@ -9,6 +9,8 @@ import type {
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
+import { getRouteTemplate } from "./vitals.js";
+import { scrubUrl } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -27,6 +29,11 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
+// Query-param allowlist for scrubbing URLs that ride the error payload. The
+// errors module captures `location.href` for `environment.url`; without this it
+// would ship raw query params (tokens, emails, OAuth fragments) — bypassing the
+// privacy gate every other capture path goes through.
+let allowlist: string[] = [];
 
 // Error click tracking — exported so breadcrumbs can check for recent errors
 let lastErrorTimestamp = 0;
@@ -44,17 +51,40 @@ let dedupeWindow: DedupeEntry[] = [];
 const DEDUPE_MAX_COUNT = 5;
 const DEDUPE_WINDOW_MS = 10_000;
 
+// Global rate limit, independent of dedupe. Dedupe only caps *identical*
+// errors (5 per key); a loop emitting errors with ever-changing messages
+// (counters, ids, timestamps in the text) bypasses it entirely and would
+// otherwise fire one network POST per error and grow dedupeWindow without
+// bound. The global cap bounds total errors entering the pipeline per window
+// regardless of key — 100 / 10s is far above any sane app's real error rate
+// but stops a runaway loop from making the SDK the source of the problem.
+const RATE_LIMIT_MAX = 100;
+const RATE_LIMIT_WINDOW_MS = 10_000;
+let rateWindowStart = 0;
+let rateWindowCount = 0;
+
+function rateLimited(now: number): boolean {
+  if (now - rateWindowStart >= RATE_LIMIT_WINDOW_MS) {
+    rateWindowStart = now;
+    rateWindowCount = 0;
+  }
+  rateWindowCount++;
+  return rateWindowCount > RATE_LIMIT_MAX;
+}
+
 let errorHandler: ((event: ErrorEvent) => void) | null = null;
 let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
 
 export function initErrors(
   resolved: ResolvedConfig["errors"],
+  queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
 ): void {
   destroyErrors();
 
   config = resolved;
+  allowlist = queryParamsAllowlist;
   appVersion = version;
   beforeErrorHook = beforeError;
 
@@ -74,7 +104,7 @@ export function initErrors(
   rejectionHandler = (event: PromiseRejectionEvent) => {
     const reason = event.reason;
     const message =
-      reason instanceof Error ? reason.message : String(reason);
+      reason instanceof Error ? reason.message : stringifyReason(reason);
     const stack = reason instanceof Error ? reason.stack : undefined;
     const errorClass = reason instanceof Error ? reason.name : undefined;
     handleError(message, undefined, undefined, undefined, stack, undefined, errorClass);
@@ -92,6 +122,8 @@ export function destroyErrors(): void {
     rejectionHandler = null;
   }
   dedupeWindow = [];
+  rateWindowStart = 0;
+  rateWindowCount = 0;
   lastErrorTimestamp = 0;
   errorListeners.length = 0;
 }
@@ -126,8 +158,20 @@ function handleError(
   // Self-protection: ignore errors from our own SDK to prevent feedback loops
   if (isOwnError(filename, stack)) return;
 
+  // Cross-origin script errors surface as an opaque "Script error." with no
+  // stack and no usable location — the browser withholds the detail unless the
+  // script is served with `crossorigin="anonymous"` + CORS headers. These can't
+  // be symbolicated and carry zero actionable information, so drop them rather
+  // than flood the stream with indistinguishable noise.
+  if (message === "Script error." && !stack) return;
+
   // Sample rate check
   if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return;
+
+  // Global rate limit — checked before the beforeError hook, the error
+  // breadcrumb, the O(n) dedupe scan, and the network send, so a storm caps
+  // the per-error work too, not just the wire volume.
+  if (rateLimited(Date.now())) return;
 
   // beforeError hook — early-pipeline. Runs before any side effect (error
   // breadcrumb, lastErrorTimestamp, dedupe slot, payload construction,
@@ -208,10 +252,10 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
-    // Raw pathname for now. setRouteTemplate currently scopes only web-vitals
-    // attribution; wiring it into the error `action` so errors group by route
-    // template (/users/:id) instead of raw path is a deliberate follow-up.
-    action: location.pathname,
+    // Group by the host's route template (e.g. "/users/:id") when set via
+    // setRouteTemplate, so ID-heavy routes don't fragment into one error group
+    // per id. Falls back to the raw pathname when no template is declared.
+    action: getRouteTemplate() || location.pathname,
     revision: error.app_version,
     error: {
       name: error.error_class || "Error",
@@ -224,7 +268,9 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // session stream, not error tags; a host that wants user on errors sets it
     // explicitly via setTags.
     tags: getTags(),
-    environment: { url: location.href },
+    // Scrubbed through the query-param allowlist, same as every other captured
+    // URL — the raw href would otherwise leak tokens / OAuth fragments here.
+    environment: { url: scrubUrl(location.href, allowlist) },
     user_agent: navigator.userAgent,
   };
 }
@@ -276,6 +322,20 @@ const SDK_MARKERS = ["@appsignal/browser", "browser.umd.js", "browser.esm.js"];
 function isOwnError(filename?: string, stack?: string): boolean {
   const haystack = (filename || "") + (stack || "");
   return SDK_MARKERS.some((marker) => haystack.includes(marker));
+}
+
+// Non-Error promise rejections (`Promise.reject({ code: 500, detail: "…" })`)
+// would collapse to "[object Object]" under String() — losing all detail and
+// making every distinct object rejection dedupe to the same key. JSON-stringify
+// objects so the payload survives; fall back to String() for primitives and for
+// values JSON can't handle (circular refs, BigInt).
+function stringifyReason(reason: unknown): string {
+  if (reason === null || typeof reason !== "object") return String(reason);
+  try {
+    return JSON.stringify(reason);
+  } catch {
+    return String(reason);
+  }
 }
 
 function dedupeKeyFor(message: string, stack?: string): string {

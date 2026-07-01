@@ -34,6 +34,13 @@ interface BrowserConfig {
   key: string;           // Public ingestion key (safe to expose in frontend code)
   endpoint?: string;     // Override /ingest/browser URL (default: auto-detected from script src or window location)
 
+  // Master switch. Default: active. Set false to make init() a complete no-op
+  // — nothing patched, no timers, no network. Gate on your build environment
+  // to keep dev/test/CI from sending data:
+  //   active: import.meta.env.PROD        // Vite
+  //   active: process.env.NODE_ENV === "production"
+  active?: boolean;
+
   // App version or deploy identifier (optional but recommended)
   // Set to your release tag, commit SHA, or deploy ID so sessions and errors
   // can be correlated with specific deployments.
@@ -79,7 +86,6 @@ interface BrowserConfig {
     clicks?: boolean;              // default: true
     longTasks?: boolean;           // default: true
     scrollDepth?: boolean;         // default: true
-    capacity?: number;             // ring buffer size, default: 100
   };
   session?: {
     enabled?: boolean;             // default: false — ship the breadcrumb/session journey stream
@@ -126,8 +132,8 @@ function setTags(tags: Record<string, string>): void;
 // Remove all error tags.
 function clearTags(): void;
 
-// End the current session. Flushes pending events and replay chunks under
-// the current session_id, then clears session and user state. The next
+// End the current session. Flushes pending events under the current
+// session_id (via beacon), then clears session and user state. The next
 // captured event starts a fresh session. Typical use: call on logout.
 function endSession(): void;
 
@@ -154,6 +160,8 @@ function destroy(): void;
 
 `init(config)` merges the caller's `BrowserConfig` with built-in defaults once, synchronously, then starts every collector with the resolved config. There is no server-side config fetch, no fallback-then-real-config dance, and no remote kill switch — every knob lives in the JS call and is locked for the lifetime of the SDK instance. To change a knob, call `destroy()` and `init()` again with a new config, or redeploy with the new value.
 
+The `key` and `endpoint` are meant to be hardcoded in your frontend bundle — the ingestion key is public and write-only by design. To stop dev/test/CI builds from sending real data, use the `active` master switch rather than swapping keys: `active: false` makes `init()` a complete no-op (no fetch/XHR patching, no timers, no network). Public methods (`setUser`, `addBreadcrumb`, `captureError`, …) already no-op while inactive, so application code can call them unconditionally. Gate it on the build environment — `active: import.meta.env.PROD` (Vite) or `active: process.env.NODE_ENV === "production"` — and the SDK stays dormant everywhere but production. `active: false` does not latch: a later `init()` with `active` unset (or true) still initializes normally.
+
 Defaults are tuned to collect by default and lean on the privacy hooks to scope what ships:
 
 - `errors.sampleRate: 1.0`; `errors.enabled: true`.
@@ -169,7 +177,7 @@ Per-category breadcrumb toggles (`breadcrumbs.network`, `clicks`, `console`, etc
 
 A session is a continuous period of user activity on a website.
 
-**Session start:** First page load, or a page load after the inactivity timeout (`session.inactivity_timeout`, default 30 minutes). Each session gets a `session_id` (UUIDv4 via `crypto.randomUUID()`) generated client-side. The server should treat it as an opaque string — it is not lexicographically sortable by creation time. If a future server design wants time-sorted IDs (e.g. for a B-tree primary-key index), use the event timestamp or switch to v7 here; do not assume `session_id` order.
+**Session start:** First page load, or a page load after the inactivity timeout (`session.inactivity_timeout`, default 30 minutes). Each session gets a `session_id` (UUIDv7) generated client-side. The server should treat it as an opaque string. UUIDv7's 48-bit timestamp prefix makes it lexicographically sortable by creation time, so a time-ordered primary-key index (e.g. a B-tree) works without a separate timestamp column.
 
 **Session continuation:** Activity resets the inactivity timer. Activity = click, keyboard input, scroll, navigation, or XHR/fetch completion. Every activity touch checks the gap since the previous activity. If it exceeds the timeout (e.g. laptop asleep for hours), a new session is created before recording. This is the primary expiry mechanism, regardless of timer or visibility event ordering.
 
@@ -179,9 +187,9 @@ A session is a continuous period of user activity on a website.
 
 **Cross-tab sync:** Two tabs on the same origin share one `session_id`. The SDK listens for `storage` events on `appsignal_session_id`, `appsignal_last_activity`, and `appsignal_user`, mirroring changes from other tabs into in-memory state. `getSessionId()` also re-reads `last_activity` from `localStorage` before its timeout check, so a tab that stays visible but idle still picks up activity in another tab and doesn't drift onto a separate session. The visibility handler covers the hidden→visible transition; the storage events and the re-read cover concurrently-visible tabs.
 
-**Per-tab id:** Each tab gets a `tab_id` (UUIDv4) minted once per tab in `sessionStorage`. It survives in-tab reloads, dies with the tab. Every payload includes both `session_id` and `tab_id` in the session block, so the server can group concurrent activity from multiple tabs under one session and reconstruct the per-tab journey. Replay chunks are uniquely keyed by `(session_id, tab_id, chunk_index)` — two tabs of one session can record in parallel without colliding on `chunk_index`. The chunk counter lives in `sessionStorage` keyed by `appsignal_replay_chunk_index_<session_id>_<tab_id>` and is naturally tab-scoped.
+**Per-tab id:** Each tab gets a `tab_id` (UUIDv7) minted once per tab in `sessionStorage`. It survives in-tab reloads, dies with the tab. Every payload includes both `session_id` and `tab_id` in the session block, so the server can group concurrent activity from multiple tabs under one session and reconstruct the per-tab journey. Replay chunks are uniquely keyed by `(session_id, tab_id, chunk_index)` — two tabs of one session can record in parallel without colliding on `chunk_index`. The chunk counter lives in `sessionStorage` keyed by `appsignal_replay_chunk_index_<session_id>_<tab_id>` and is naturally tab-scoped.
 
-**Explicit session end:** `endSession()` flushes pending events and replay chunks under the current `session_id`, then clears session and user state so the next event starts a fresh session. Call on logout. `clearUser()` only clears user identity — it does not rotate the session. `destroy()` tears down the SDK entirely and clears all session storage.
+**Explicit session end:** `endSession()` flushes pending events under the current `session_id` (via beacon), then clears session and user state so the next event starts a fresh session. Call on logout. `clearUser()` only clears user identity — it does not rotate the session. `destroy()` tears down the SDK entirely and clears all session storage.
 
 **Session data on all events:** Every event includes `session_id`, `tab_id`, `anonymous_id`, `page_url`, `referrer`, `user_agent`, `screen_width`, `screen_height`, `viewport_width`, `viewport_height`, `language` (`navigator.language`), `timezone` (`Intl.DateTimeFormat().resolvedOptions().timeZone`), and where supported: `connection_type` (`navigator.connection.effectiveType` — `"4g"`, `"3g"`, `"2g"`, `"slow-2g"`), `device_memory` (`navigator.deviceMemory`, approximate GB). User fields `user_id`, `user_email`, `user_name` are included only if set via `setUser()`.
 
@@ -189,7 +197,9 @@ A session is a continuous period of user activity on a website.
 
 ### Breadcrumbs
 
-Ordered timeline of events during a session. Snapshotted into error payloads, and (when `session.enabled`) drained into the periodic events flush. Individual categories and ring buffer capacity are set via the `breadcrumbs.*` config at `init()`.
+Ordered timeline of events during a session. Snapshotted into error payloads, and (when `session.enabled`) drained into the periodic events flush. Individual categories are toggled via the `breadcrumbs.*` config at `init()`; buffer capacities are fixed (see *Breadcrumb capacity* below), not configurable.
+
+The SDK keeps **two** buffers. The **session buffer** (last 100 breadcrumbs) feeds the periodic events flush. A separate, smaller **error buffer** (last 25) is what error payloads snapshot, and it is filtered to a fixed category allowlist — `navigation`, `click`, `network`, `console`, `error`, `long_task`, `visibility`. Derived UX categories (`rage_click`, `dead_click`, `error_click`, `scroll_depth`, `tab`) are deliberately excluded from error context, so an error's attached breadcrumbs are the last 25 *core* events, not the last 100 of everything.
 
 **Click breadcrumbs.** On every `click`, record a breadcrumb with a human-readable label. Label resolution priority:
 
@@ -271,7 +281,7 @@ Example network breadcrumb with resource timing:
 
 **Error breadcrumbs.** When an error is captured, it is also added to the ring buffer (category `"error"`, message truncated to 200 chars). If error B fires after error A, error A appears in B's breadcrumb trail.
 
-**Breadcrumb capacity.** Ring buffer of last 100 breadcrumbs per session. Older ones are dropped.
+**Breadcrumb capacity.** Two fixed-size ring buffers (not configurable): the session buffer holds the last 100 breadcrumbs (drained into the periodic flush); the error buffer holds the last 25 *core-category* breadcrumbs (snapshotted into error payloads — see *Breadcrumbs* above for the category allowlist). Older entries are dropped from each.
 
 ### Web vitals
 
@@ -290,7 +300,7 @@ Collect Core Web Vitals and supplementary metrics:
 **CLS and INP** accrue over the page lifetime and *can* be attributed per route. `web-vitals` reports them as a single cumulative page-view value that can't be sliced per route, so the SDK observes the raw `layout-shift` and `event-timing` performance entries itself and buckets them into the active route, resetting at each navigation:
 
 - **CLS** runs the official session-window algorithm (shifts with `hadRecentInput` ignored; a window ends after a 1s gap or 5s span; the route's CLS is its largest window) — scoped to the current route rather than the whole page-view.
-- **INP** groups `event-timing` entries by `interactionId` (an interaction's latency is its longest event) and reports the route's worst interaction (the `floor(count/50)`-th worst above 50 interactions).
+- **INP** groups `event-timing` entries by `interactionId` (an interaction's latency is its longest event) and reports the route's near-worst interaction: interactions are sorted descending and the SDK reports the one at 0-based index `min(count-1, floor(count/50))`. Below 50 interactions that's index 0 (the single worst); the index advances by one per additional 50 interactions, discounting the extreme tail — the same rule the `web-vitals` library uses.
 
 Call `setRouteTemplate()` on each router navigation so CLS/INP attribute to the route they occurred on and the server aggregates by route shape (`/users/:id`) rather than raw URL. CLS/INP require the `layout-shift` / `event-timing` entry types (Chromium); where they're unavailable those two metrics are simply not emitted. Attribution is best-effort — a late-delivered buffered entry is bucketed into the route active when the observer delivers it.
 
@@ -299,9 +309,9 @@ Per-sample attribution (which element caused a slow LCP, the INP interaction tar
 **Known limitations (by design).**
 - **Abrupt termination loses the page's vitals.** Vitals flush at route/page boundaries (`visibilitychange→hidden`, `pagehide`, SPA navigation), never on the periodic timer — so a page killed by a crash, OOM, or force-quit before any of those fire records no vitals for that view. This is the standard `web-vitals` tradeoff (reporting on `visibilitychange` is the reliable signal); the lost slice is the hard-crash tail and doesn't bias aggregate percentiles.
 - **CLS/INP per-route attribution is best-effort.** A buffered `layout-shift`/`event-timing` entry delivered just after a navigation can be bucketed into the wrong route. Late-delivered entries are rare and the effect is occasional, not systematic.
-- **Hash-router navigations are treated as boundaries via `hashchange`.** This correctly segments `#/route` SPAs, but an in-page anchor jump (`#section`) also counts as a boundary and finalizes the current route's CLS/INP.
+- **Hash-router navigations are treated as boundaries via `hashchange`**, but only when the new hash looks like a route — it must start with `#/` or `#!/`. This segments `#/route` SPAs while in-page anchor jumps (`#section`) are *not* treated as boundaries and do not finalize the route's CLS/INP. The tradeoff: bare-word hash routers (`#dashboard`, no leading slash) are not segmented and fold into the surrounding route.
 
-Vitals ride in the `vitals` array of the `events` payload. Each entry carries just `name`, `value`, `page_url`, and `timestamp` (the metric's occurrence time, derived from `performance.timeOrigin` + the entry's `startTime`) — the four fields the server stores. `page_url` is the `setRouteTemplate()` template if set, otherwise the raw URL (the server auto-templates it); query params are filtered through `privacy.queryParamsAllowlist` first (all stripped by default).
+Vitals ride in the `vitals` array of the `events` payload. Each entry carries just `name`, `value`, `page_url`, and `timestamp` (the metric's occurrence time, derived from `performance.timeOrigin` + the entry's `startTime`, falling back to `performance.now()` when a metric arrives with no backing entry) — the four fields the server stores. `page_url` is the `setRouteTemplate()` template if set, otherwise the raw URL (the server auto-templates it); query params are filtered through `privacy.queryParamsAllowlist` first (all stripped by default).
 
 Server-side the names become `browser_webvital_lcp` / `_cls` / `_inp` / `_fcp` / `_ttfb` and feed the metrics_v3 aggregation pipeline, which folds samples by `(name, page_url, app_version)` per minute into `metrics.browser_webvitals_minutely` with p90 / p95 percentiles. CLS is stored ×1000 so all five share an integer scale. Rating (good / needs-improvement / poor) is derived from `value` at query time against Google's thresholds — not stored.
 
@@ -315,6 +325,14 @@ Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`.
 4. Send immediately (do not buffer).
 
 Stack traces are sent as raw strings. Source map processing is server-side (future phase); the plugin does not do client-side source map application.
+
+**Cross-origin scripts.** When a script from another origin throws, the browser collapses it to an opaque `"Script error."` with no stack and no location, unless that script is served with `crossorigin="anonymous"` **and** an `Access-Control-Allow-Origin` header. The SDK drops these opaque, unsymbolicatable `"Script error."` entries rather than fill the stream with indistinguishable noise. To capture real errors from third-party/CDN-hosted scripts, add `crossorigin="anonymous"` to those `<script>` tags and ensure the host serves the matching CORS header.
+
+**Non-`Error` rejections.** A `Promise.reject` whose reason isn't an `Error` (e.g. `reject({ code: 500 })`) is JSON-stringified so the detail survives in `message`, falling back to `String()` for primitives and non-serialisable values (circular refs, `BigInt`). Without this, object reasons would collapse to `"[object Object]"`.
+
+**URL privacy.** The error payload's `environment.url` is scrubbed through `privacy.queryParamsAllowlist`, identically to every other captured URL — raw query params and OAuth fragments never ride along.
+
+**Error grouping (`action`).** Errors group server-side by `action`, which is the `setRouteTemplate()` template (e.g. `/users/:id`) when set, otherwise the raw `location.pathname`. Declaring a template keeps ID-heavy routes from fragmenting into one error group per id — the same route key vitals attribution uses.
 
 **Error tags.** The wire payload's `tags` map carries only what the host set via `setTags()` — arbitrary string key-values, coerced to strings (server-truncated to 256 bytes), capped at 32 keys. The SDK injects no identity of its own: `session_id` / `tab_id` / `anonymous_id` are *not* sent as tags (they're high-cardinality and not in the server's metadata-distribution allowlist, so they'd be sample noise) — they ride the events/session stream's `SessionContext` instead, and are available to `onErrorReported` subscribers. User identity from `setUser()` does **not** tag errors; to filter errors by user, pass the fields you want to `setTags()` explicitly.
 
@@ -333,9 +351,13 @@ beforeError: (e) => {
 
 **Error deduplication.** Within one session, if the same error (same message + same stack top frame) fires more than 5 times in 10 seconds, the 6th+ are silently dropped. First 5 are sent normally. Prevents error storms from overwhelming ingestion.
 
+**Global error rate limit.** Independent of per-error dedup, the module caps total error sends at 100 per 10-second window across all distinct errors. Once the cap is hit, further errors in that window are dropped until it rolls over. Backstops a page emitting many *different* errors (which dedup, keyed per message+frame, wouldn't catch).
+
+**Top-window scope (by design).** Instrumentation is attached to the top-level `window` only. Same-origin `<iframe>`s have their own `window` (and their own `fetch` / `XMLHttpRequest`), so errors thrown and network calls made *inside* a same-origin iframe are not captured. Cross-origin iframes are inaccessible regardless (same-origin policy). To monitor an embedded same-origin frame, initialize a separate SDK instance inside it.
+
 ### Session replay
 
-Out of scope for v1. The `replay` module is a stub; rrweb is not bundled and never loaded at runtime. Replay will return as a future major version once the storage path is in place.
+Out of scope for v1. The `replay` module (`src/replay.ts`) is in fact fully implemented — it dynamically imports `@rrweb/record` and records — but `index.ts` never imports it, so it is tree-shaken out of the shipped bundle and rrweb is never loaded at runtime. (`@rrweb/record` remains a declared dependency for when replay is wired in.) Replay will return as a future major version once the storage path is in place.
 
 ### Event batching and transport
 
@@ -374,7 +396,7 @@ Two formats:
 - **UMD** (`browser.umd.js`): single file, ~17 KB gzipped. Load via `<script>`.
 - **ESM** (`esm/index.js`): ~17 KB gzipped.
 
-Replay is out of scope for v1 (the `replay` module is a stub), so rrweb is not bundled — the figures above are the full SDK. When replay returns it will load its recorder as a separate chunk so the core stays small.
+Replay is out of scope for v1 — `index.ts` doesn't import the `replay` module, so rrweb is tree-shaken out and not bundled. The figures above are the full SDK. When replay is wired in it will load its recorder as a separate chunk so the core stays small.
 
 ### Tracking consent
 
@@ -395,7 +417,7 @@ privacy: {
 }
 ```
 
-**`privacy.queryParamsAllowlist`** — applied wherever a URL is captured: network breadcrumb URLs, SPA navigation breadcrumbs (`data.from`, `data.to`), `session_context.page_url`, `session_context.referrer`, and `web_vitals.page_url`. Entries are glob-matched (`utm_*` keeps every UTM param). Default empty: every query param is stripped. Fragments are handled by a heuristic: hash routes (`#/checkout`) and opaque anchors (`#section-1`) are preserved verbatim; query-like fragments (`#access_token=…&token_type=bearer`) are scrubbed by the same allowlist. This defends against OAuth implicit-flow leaks without breaking apps that use hash-based routing.
+**`privacy.queryParamsAllowlist`** — applied wherever a URL is captured: network breadcrumb URLs, SPA navigation breadcrumbs (`data.from`, `data.to`), `session_context.page_url`, `session_context.referrer`, `web_vitals.page_url`, and the error payload's `environment.url`. Entries are glob-matched (`utm_*` keeps every UTM param). Default empty: every query param is stripped. Fragments are handled by a heuristic: hash routes (`#/checkout`) and opaque anchors (`#section-1`) are preserved verbatim; query-like fragments (`#access_token=…&token_type=bearer`) are scrubbed by the same allowlist. This defends against OAuth implicit-flow leaks without breaking apps that use hash-based routing.
 
 **`privacy.networkBlocklist`** — glob URL patterns that should never be recorded. Matched against host + pathname (`*` matches one segment, `**` across segments). Default empty. Today this suppresses the network breadcrumb entirely; when replay returns it will also gate replay's network capture. The request itself still happens — only its capture in SDK data is suppressed.
 
@@ -421,7 +443,7 @@ Other defaults that round out the privacy posture:
 
 Separate packages bridging framework-specific error handling into the core SDK via `captureError`. Small (<1 KB) with the core SDK as a peer dependency.
 
-### React (`@appsignal/browser-react`)
+### React (`@appsignal/browser/react`)
 
 An `ErrorBoundary` class component that catches React render errors via `componentDidCatch` and reports them through the core SDK's error pipeline. React does not expose error boundary functionality as hooks, so a class component is required.
 
@@ -436,7 +458,7 @@ An `ErrorBoundary` class component that catches React render errors via `compone
 
 ```tsx
 import { captureError } from "@appsignal/browser";
-import { ErrorBoundary, withErrorBoundary } from "@appsignal/browser-react";
+import { ErrorBoundary, withErrorBoundary } from "@appsignal/browser/react";
 
 // Direct usage
 <ErrorBoundary captureError={captureError} fallback={<p>Something went wrong</p>}>

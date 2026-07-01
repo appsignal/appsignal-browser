@@ -3,6 +3,14 @@
 export interface BrowserConfig {
   key: string;
   endpoint?: string;
+  /** Master switch. Defaults to active. Set `false` to make `init()` a complete
+   * no-op — nothing is patched (fetch/XHR), no timers start, and no network
+   * request ever fires. Every public method (`setUser`, `addBreadcrumb`,
+   * `reportError`, …) already no-ops while the SDK is inactive, so app code can
+   * call them unconditionally. Gate this on your build environment to keep
+   * dev/test/CI from sending data, e.g. `active: import.meta.env.PROD` or
+   * `active: process.env.NODE_ENV === "production"`. */
+  active?: boolean;
   appVersion?: string;
   user?: UserContext;
   /** Inspect or modify each error at the entry point, before the SDK adds an

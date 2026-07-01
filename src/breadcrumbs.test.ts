@@ -634,6 +634,28 @@ describe("breadcrumbs", () => {
       );
       expect(consoleBreadcrumbs[0].message.length).toBeLessThanOrEqual(200);
     });
+
+    it("does not throw into host code on a circular argument", () => {
+      // JSON.stringify throws on circular structures (DOM nodes, React
+      // elements, anything with a back-reference). The patched console.error
+      // must never let that escape into the host's console.error call — and
+      // should still capture a degraded breadcrumb rather than drop it.
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+
+      expect(() => console.error("boom", circular)).not.toThrow();
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs.length).toBeGreaterThanOrEqual(1);
+      // The string arg survives via the String() fallback for the circular one.
+      expect(consoleBreadcrumbs[0].message).toContain("boom");
+    });
   });
 
   describe("scroll depth breadcrumbs", () => {

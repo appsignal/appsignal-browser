@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AppSignal Browser SDK — resilience</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 1.5rem; max-width: 40rem; }
+      button { display: block; margin: 0.5rem 0; padding: 0.5rem 1rem; }
+      pre { background: #f3f3f3; padding: 0.75rem; font-size: 0.85rem; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Resilience harness</h1>
+    <p>Drives the e2e resilience spec: the SDK must never become a source of
+       problems for the host page. Initialised with <strong>default</strong>
+       config (no <code>tracePropagationTargets</code>) so the network hook's
+       default, listener-free path is exercised — that's where header stripping
+       would bite.</p>
+
+    <button id="fetch-request-headers">fetch(new Request, {headers})</button>
+    <button id="console-circular">console.error(circular)</button>
+    <button id="error-storm">throw 130 distinct errors</button>
+    <pre id="status">SDK loading…</pre>
+
+    <script src="/dist/browser.umd.js"></script>
+    <script>
+      AppsignalBrowser.init({
+        key: "your-app-key",
+        endpoint: location.origin,
+        // breadcrumbs ship so the spec can confirm the console breadcrumb was
+        // still captured after a circular argument.
+        session: { enabled: true },
+        ...(window.__appsignalConfig || {}),
+      });
+      document.getElementById("status").textContent = "SDK initialised";
+
+      // --- Header preservation -------------------------------------------------
+      // The hot path that the wrapper used to break: headers carried on a
+      // Request object, with no init. Returns the promise so tests can await.
+      window.__fetchWithRequestHeaders = function () {
+        return fetch(
+          new Request("/api/echo", {
+            headers: { authorization: "Bearer SECRET", "x-custom": "1" },
+          }),
+        );
+      };
+
+      // --- Console circular safety ---------------------------------------------
+      // console.error with a circular argument must not throw out of the
+      // patched console method. Records whether it threw so the test can assert.
+      window.__consoleCircular = function () {
+        const circular = {};
+        circular.self = circular;
+        try {
+          console.error("circular boom", circular);
+          window.__circularThrew = false;
+        } catch (e) {
+          window.__circularThrew = true;
+        }
+        return window.__circularThrew;
+      };
+
+      // --- Error storm ---------------------------------------------------------
+      // Fire N uncaught errors with distinct messages (so dedupe can't catch
+      // them) and let window.onerror pick them up. The SDK's global rate limit
+      // must cap how many reach the wire.
+      window.__errorStorm = function (n) {
+        for (let i = 0; i < n; i++) {
+          setTimeout(
+            (function (j) {
+              return function () {
+                throw new Error("storm error " + j + " " + Math.random());
+              };
+            })(i),
+            0,
+          );
+        }
+      };
+
+      document
+        .getElementById("fetch-request-headers")
+        .addEventListener("click", window.__fetchWithRequestHeaders);
+      document
+        .getElementById("console-circular")
+        .addEventListener("click", window.__consoleCircular);
+      document
+        .getElementById("error-storm")
+        .addEventListener("click", function () {
+          window.__errorStorm(130);
+        });
+    </script>
+  </body>
+</html>

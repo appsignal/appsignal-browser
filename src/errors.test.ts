@@ -19,6 +19,14 @@ vi.mock("./breadcrumbs.js", () => ({
   getErrorBreadcrumbs: vi.fn(() => []),
 }));
 
+// getRouteTemplate is the only thing errors.ts pulls from vitals; mock it so
+// the route-template grouping is controllable per test without driving the
+// real vitals observers.
+const vitalsMock = vi.hoisted(() => ({ routeTemplate: "" }));
+vi.mock("./vitals.js", () => ({
+  getRouteTemplate: () => vitalsMock.routeTemplate,
+}));
+
 vi.mock("./session.js", () => ({
   getSessionContext: vi.fn(() => ({
     session_id: "test-session",
@@ -53,6 +61,17 @@ function fireError(message: string, stack?: string): void {
   window.dispatchEvent(event);
 }
 
+function fireRejection(reason: unknown): void {
+  const event = new Event("unhandledrejection") as PromiseRejectionEvent;
+  Object.defineProperty(event, "reason", { value: reason, configurable: true });
+  window.dispatchEvent(event);
+}
+
+const originalLocation = window.location;
+function setLocation(href: string): void {
+  Object.defineProperty(window, "location", { value: new URL(href), configurable: true });
+}
+
 describe("errors", () => {
   beforeEach(() => {
     // initErrors is idempotent — but explicitly tear down + clear mocks so
@@ -62,10 +81,12 @@ describe("errors", () => {
     addBreadcrumbMock.mockClear();
     getErrorBreadcrumbsMock.mockReturnValue([]);
     getTagsMock.mockReturnValue({});
+    vitalsMock.routeTemplate = "";
+    Object.defineProperty(window, "location", { value: originalLocation, configurable: true });
   });
 
   it("sends error events via transport", () => {
-    initErrors({ enabled: true, sampleRate: 1.0 }, "v1.0");
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], "v1.0");
     fireError("Test error");
 
     expect(sendErrorMock).toHaveBeenCalledTimes(1);
@@ -84,7 +105,7 @@ describe("errors", () => {
     // setTags' coercion/cap happens in the session layer; errors carry the
     // resulting map verbatim.
     getTagsMock.mockReturnValue({ plan: "pro", org_id: "acme" });
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     fireError("tagged error");
 
     const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
@@ -92,7 +113,7 @@ describe("errors", () => {
   });
 
   it("captures error name from the Error constructor", () => {
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     const err = new TypeError("Cannot read property 'name' of undefined");
     const event = new ErrorEvent("error", {
       message: err.message,
@@ -109,7 +130,7 @@ describe("errors", () => {
   });
 
   it("splits stack into backtrace lines, empty when no stack", () => {
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     fireError("no stack here");
 
     const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
@@ -126,7 +147,7 @@ describe("errors", () => {
   });
 
   it("uses location.pathname for action and seconds-since-epoch for timestamp", () => {
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     const before = Math.floor(Date.now() / 1000);
     fireError("shape check");
     const after = Math.floor(Date.now() / 1000);
@@ -138,7 +159,7 @@ describe("errors", () => {
   });
 
   it("does not send when disabled", () => {
-    initErrors({ enabled: false, sampleRate: 1.0 });
+    initErrors({ enabled: false, sampleRate: 1.0 }, []);
     fireError("Test error");
 
     expect(sendErrorMock).not.toHaveBeenCalled();
@@ -147,9 +168,9 @@ describe("errors", () => {
   it("repeated init does not stack listeners", () => {
     // Regression: a second initErrors used to leave the previous listener
     // attached, so a single dispatched error fired the pipeline twice.
-    initErrors({ enabled: true, sampleRate: 1.0 });
-    initErrors({ enabled: true, sampleRate: 1.0 });
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     fireError("only once");
 
     expect(sendErrorMock).toHaveBeenCalledTimes(1);
@@ -161,7 +182,7 @@ describe("errors", () => {
         event.message = "redacted";
         return event;
       });
-      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, hook);
       fireError("sensitive data");
 
       const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
@@ -170,7 +191,7 @@ describe("errors", () => {
 
     it("can drop the event by returning null", () => {
       const hook = vi.fn(() => null);
-      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, hook);
       fireError("drop me");
 
       expect(hook).toHaveBeenCalled();
@@ -181,7 +202,7 @@ describe("errors", () => {
       // The defining property of beforeError vs the old late-pipeline
       // beforeSend: a dropped error must not pollute the breadcrumb buffer
       // with its own error breadcrumb.
-      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, () => null);
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, () => null);
       fireError("never seen");
 
       const errorCrumbs = addBreadcrumbMock.mock.calls.filter(
@@ -191,7 +212,7 @@ describe("errors", () => {
     });
 
     it("dropping skips the lastErrorTimestamp update (early-pipeline)", () => {
-      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, () => null);
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, () => null);
       const before = getLastErrorTimestamp();
       fireError("never seen");
       expect(getLastErrorTimestamp()).toBe(before);
@@ -200,7 +221,7 @@ describe("errors", () => {
     it("supports common one-liner drop patterns (former ignoreErrors)", () => {
       const hook = (e: IncomingError): IncomingError | null =>
         /ResizeObserver/.test(e.message) ? null : e;
-      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, hook);
 
       fireError("ResizeObserver loop limit exceeded");
       expect(sendErrorMock).not.toHaveBeenCalled();
@@ -217,7 +238,7 @@ describe("errors", () => {
       const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const hook = vi.fn((event: IncomingError) => Promise.resolve(event)) as unknown as
         (event: IncomingError) => IncomingError | null;
-      initErrors({ enabled: true, sampleRate: 1.0 }, undefined, hook);
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, hook);
 
       fireError("async hook");
 
@@ -231,7 +252,7 @@ describe("errors", () => {
 
   describe("deduplication", () => {
     it("suppresses repeated identical errors after 5 occurrences", () => {
-      initErrors({ enabled: true, sampleRate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
 
       for (let i = 0; i < 10; i++) {
         fireError("dedup test error");
@@ -242,9 +263,36 @@ describe("errors", () => {
     });
   });
 
+  describe("global rate limit", () => {
+    it("caps total errors per window even when every message is distinct", () => {
+      // Distinct messages bypass dedupe entirely (different keys), so without
+      // a global cap a loop would fire one send per error. 120 distinct
+      // errors in one window must be capped at the 100 limit.
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+
+      for (let i = 0; i < 120; i++) {
+        fireError(`distinct error ${i}`);
+      }
+
+      expect(sendErrorMock).toHaveBeenCalledTimes(100);
+    });
+
+    it("does not run the pipeline for rate-limited errors", () => {
+      // The cap is checked before the error breadcrumb is added, so suppressed
+      // errors cost no per-error work downstream.
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+
+      for (let i = 0; i < 120; i++) {
+        fireError(`distinct error ${i}`);
+      }
+
+      expect(addBreadcrumbMock).toHaveBeenCalledTimes(100);
+    });
+  });
+
   describe("sample rate", () => {
     it("drops errors when sampleRate is 0", () => {
-      initErrors({ enabled: true, sampleRate: 0 });
+      initErrors({ enabled: true, sampleRate: 0 }, []);
       fireError("should be dropped");
 
       expect(sendErrorMock).not.toHaveBeenCalled();
@@ -253,7 +301,7 @@ describe("errors", () => {
 
   it("updates lastErrorTimestamp", () => {
     const before = Date.now();
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     fireError("timestamp test");
     const after = Date.now();
 
@@ -263,7 +311,7 @@ describe("errors", () => {
   });
 
   it("notifies onErrorReported subscribers after the error has shipped", () => {
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     const subscriber = vi.fn();
     onErrorReported(subscriber);
 
@@ -283,6 +331,7 @@ describe("errors", () => {
   it("does not notify subscribers when beforeError drops the error", () => {
     initErrors(
       { enabled: true, sampleRate: 1.0 },
+      [],
       undefined,
       () => null,
     );
@@ -296,7 +345,7 @@ describe("errors", () => {
   });
 
   it("adds error breadcrumb", () => {
-    initErrors({ enabled: true, sampleRate: 1.0 });
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
     fireError("breadcrumb test error");
 
     const errorBreadcrumb = addBreadcrumbMock.mock.calls.find(
@@ -313,7 +362,7 @@ describe("errors", () => {
 
     it("ships an empty breadcrumbs array when the buffer is empty", () => {
       getErrorBreadcrumbsMock.mockReturnValue([]);
-      initErrors({ enabled: true, sampleRate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("empty buffer");
 
       const sent = captureSentBreadcrumbs();
@@ -328,7 +377,7 @@ describe("errors", () => {
         data: { method: "POST", url: "https://api.example.com/cart/items", status: 500, duration_ms: 230 },
       };
       getErrorBreadcrumbsMock.mockReturnValue([crumb]);
-      initErrors({ enabled: true, sampleRate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("with network crumb");
 
       const sent = captureSentBreadcrumbs();
@@ -365,7 +414,7 @@ describe("errors", () => {
         },
       ];
       getErrorBreadcrumbsMock.mockReturnValue(crumbs);
-      initErrors({ enabled: true, sampleRate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("derive actions");
 
       const sent = captureSentBreadcrumbs();
@@ -383,7 +432,7 @@ describe("errors", () => {
         message: "Test error",
       };
       getErrorBreadcrumbsMock.mockReturnValue([crumb]);
-      initErrors({ enabled: true, sampleRate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("metadata default");
 
       const sent = captureSentBreadcrumbs();
@@ -397,10 +446,97 @@ describe("errors", () => {
       getErrorBreadcrumbsMock.mockReturnValue([
         { timestamp: 1747756799_500, category: "click", message: "x", data: { selector: "a" } },
       ]);
-      initErrors({ enabled: true, sampleRate: 1.0 });
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("timestamp");
 
       expect(captureSentBreadcrumbs()[0].timestamp).toBe(1747756799);
+    });
+  });
+
+  describe("environment.url scrubbing", () => {
+    it("strips query params not on the allowlist", () => {
+      setLocation("https://app.example.com/checkout?token=secret&utm_source=ad");
+      initErrors({ enabled: true, sampleRate: 1.0 }, ["utm_*"]);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      // Allowlisted utm_* survives; the token is stripped — same gate every
+      // other captured URL goes through.
+      expect(payload.environment.url).toBe("https://app.example.com/checkout?utm_source=ad");
+    });
+
+    it("strips all query params when the allowlist is empty", () => {
+      setLocation("https://app.example.com/p?token=secret");
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.environment.url).toBe("https://app.example.com/p");
+    });
+  });
+
+  describe("error action grouping", () => {
+    it("groups by the route template when set", () => {
+      setLocation("https://app.example.com/users/12345");
+      vitalsMock.routeTemplate = "/users/:id";
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.action).toBe("/users/:id");
+    });
+
+    it("falls back to the raw pathname when no template is set", () => {
+      setLocation("https://app.example.com/users/12345");
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.action).toBe("/users/12345");
+    });
+  });
+
+  describe("opaque cross-origin script errors", () => {
+    it("drops 'Script error.' with no stack", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("Script error.");
+
+      expect(sendErrorMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps a 'Script error.' that carries a real stack", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("Script error.", "Error: Script error.\n  at app.js:1:1");
+
+      expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("non-Error promise rejections", () => {
+    it("JSON-stringifies an object reason so detail survives", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireRejection({ code: 500, detail: "upstream down" });
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe('{"code":500,"detail":"upstream down"}');
+    });
+
+    it("uses String() for a primitive reason", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireRejection("plain string reason");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("plain string reason");
+    });
+
+    it("falls back to String() for a non-serialisable object (circular ref)", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      fireRejection(circular);
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("[object Object]");
     });
   });
 });

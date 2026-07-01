@@ -75,6 +75,34 @@ describe("SDK integration", () => {
     expect(sentPayloads).toHaveLength(0);
   });
 
+  it("active:false makes init a complete no-op — nothing patched, nothing sent", () => {
+    init({ key: "test-key", endpoint: "https://example.com", session: { enabled: true }, active: false });
+
+    // Every collection path: manual API, captured error, and a real
+    // window 'error' event (proves the global error handler wasn't installed).
+    addBreadcrumb({ category: "test", message: "inactive" });
+    setUser({ id: "u1" });
+    captureError(new Error("inactive error"));
+    window.dispatchEvent(new ErrorEvent("error", { message: "uncaught", filename: "a.js", lineno: 1 }));
+    flush();
+
+    expect(sentPayloads).toHaveLength(0);
+  });
+
+  it("active:false leaves the SDK uninitialized, so a later active init still works", () => {
+    init({ key: "k1", active: false });
+    // The off-switch must not latch `initialized` — otherwise a real init
+    // after an env-gated no-op would be silently swallowed.
+    init({ key: "k2", session: { enabled: true } });
+
+    addBreadcrumb({ category: "test", message: "now active" });
+    flush();
+
+    const eventPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser"));
+    expect(eventPayloads.length).toBeGreaterThan(0);
+    expect(eventPayloads[0].url).toContain("api_key=k2");
+  });
+
   it("sends events to the correct endpoint with ingestion key", () => {
     init({ key: "my-key", endpoint: "https://example.com", session: { enabled: true } });
 

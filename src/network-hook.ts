@@ -90,15 +90,30 @@ function patchFetch(): void {
     const method =
       (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
     const startTime = Date.now();
-    const headers = new Headers(init?.headers);
 
-    const ctx: RequestContext = { url, method, headers };
-    for (const l of beforeListeners) {
-      try { l(ctx); } catch { /* never let one listener break the chain */ }
+    // Default path: no before-listeners (tracing is the only one, and only
+    // when tracePropagationTargets is configured). Pass `init` straight
+    // through so headers carried on a `Request` input — Authorization,
+    // Content-Type, custom — survive. Rebuilding init with a fresh
+    // `new Headers(init?.headers)` would be empty for a `fetch(request)` call
+    // and silently drop every header the caller set on the Request.
+    let finalInit = init;
+    if (beforeListeners.length > 0) {
+      // Seed from the *effective* request headers (Request headers first,
+      // then init headers override — the platform's own precedence) so a
+      // listener that adds a header doesn't clobber the caller's.
+      const headers = new Headers(input instanceof Request ? input.headers : undefined);
+      if (init?.headers) new Headers(init.headers).forEach((v, k) => headers.set(k, v));
+
+      const ctx: RequestContext = { url, method, headers };
+      for (const l of beforeListeners) {
+        try { l(ctx); } catch { /* never let one listener break the chain */ }
+      }
+      finalInit = { ...init, headers };
     }
 
     try {
-      const response = await origFetch(input, { ...init, headers: ctx.headers });
+      const response = await origFetch(input, finalInit);
       const result: RequestResult = {
         url,
         method,

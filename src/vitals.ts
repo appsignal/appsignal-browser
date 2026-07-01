@@ -328,6 +328,13 @@ function resetRouteVitals(): void {
  * @example
  * // Next.js App Router
  * useEffect(() => appsignal.setRouteTemplate(usePathname()), [pathname]); */
+/** The host's most recently declared route template (e.g. "/users/:id"), or ""
+ * if none is set. Shared with the errors module so error grouping uses the same
+ * route key as vitals attribution. */
+export function getRouteTemplate(): string {
+  return currentRouteTemplate;
+}
+
 export function setRouteTemplate(template: string | null): void {
   currentRouteTemplate = template ?? "";
   // Refresh the active route's page_url so metrics accruing on this route (and

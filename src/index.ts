@@ -28,6 +28,11 @@ const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
   if (initialized) return;
+  // Master off-switch: `active: false` makes init a complete no-op — nothing
+  // patched, no timers, no network. Consumers gate this on their build env
+  // (e.g. `active: import.meta.env.PROD`) so dev/test/CI never sends data.
+  // Public methods already guard on `initialized`, so they stay safe no-ops.
+  if (config.active === false) return;
   initialized = true;
   clientConfig = config;
   resolved = resolveConfig(config);
@@ -172,6 +177,7 @@ function startCollection(endpoint: string): void {
   );
   initErrors(
     cfg.errors,
+    cfg.privacy.queryParamsAllowlist,
     clientConfig?.appVersion,
     clientConfig?.beforeError,
   );
