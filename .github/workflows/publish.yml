@@ -1,0 +1,40 @@
+name: Publish
+
+# Publishes the package to GitHub Packages (private, org-scoped). Fires when a
+# version tag is pushed; also runnable manually to publish the current default
+# branch (e.g. to release an already-created tag).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.x
+
+      # Writes ~/.npmrc pointing the @appsignal scope at GitHub Packages and
+      # wires NODE_AUTH_TOKEN into it, so `npm publish` authenticates.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: "@appsignal"
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build
+
+      # dist/ is built above; --ignore-scripts skips the `prepare` rebuild.
+      # `files` still ships dist/. Publishes the version in package.json.
+      - run: npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
