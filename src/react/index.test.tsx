@@ -3,6 +3,7 @@ import { render, screen, cleanup } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import React from "react";
 import { ErrorBoundary, withErrorBoundary } from "./index.js";
+import { init as sdkInit, destroy as sdkDestroy, captureError as sdkCaptureError } from "../index.js";
 
 function ThrowingComponent({ message }: { message: string }) {
   throw new Error(message);
@@ -169,5 +170,54 @@ describe("withErrorBoundary", () => {
     const captureError = vi.fn();
     const Wrapped = withErrorBoundary(GoodComponent, { captureError });
     expect(Wrapped.displayName).toBe("withErrorBoundary(GoodComponent)");
+  });
+});
+
+// Real SDK + real ErrorBoundary + real React: does a boundary-caught render
+// error double-report once errors.console is on? We don't stub console.error
+// here — init() patches it, so React's own logging is escalated like any app
+// console.error. fetch is mocked to count what reaches /ingest/browser/errors.
+describe("ErrorBoundary × errors.console (double-report probe)", () => {
+  let sent: { url: string; body: string }[] = [];
+  const silentError = vi.fn(); // React's noisy logging goes here (post-escalation)
+  const realConsoleError = console.error;
+
+  beforeEach(() => {
+    sent = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, opts) => {
+      const u = typeof url === "string" ? url : url instanceof URL ? url.href : (url as Request).url;
+      sent.push({ url: u, body: (opts?.body as string) || "" });
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    // Set a silent original BEFORE init so init captures it as origConsoleError:
+    // React's logging is escalated by the SDK patch, then swallowed silently.
+    console.error = silentError;
+    sdkInit({ key: "k", endpoint: "https://example.com" });
+  });
+
+  afterEach(() => {
+    sdkDestroy();
+    cleanup();
+    vi.restoreAllMocks();
+    console.error = realConsoleError; // don't leave console.error stubbed
+  });
+
+  it("double-reports a boundary-caught render error (boundary + React's own console.error)", () => {
+    render(
+      <ErrorBoundary captureError={sdkCaptureError} fallback={<p>boom</p>}>
+        <ThrowingComponent message="double-report" />
+      </ErrorBoundary>,
+    );
+
+    const messages = sent
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body).error.message; } catch { return null; } });
+
+    // Two reports for one error: (1) the boundary's captureError, and (2) React
+    // logs the caught error via console.error, which errors.console escalates.
+    // They are NOT deduped — the dedupe window allows up to 5 identical per key
+    // before dropping. This is the behaviour the README's beforeError recipe
+    // (filter on context.source === "console") exists to let hosts suppress.
+    expect(messages.filter((m) => m === "double-report")).toHaveLength(2);
   });
 });
