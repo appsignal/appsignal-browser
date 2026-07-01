@@ -221,7 +221,16 @@ function startCollection(endpoint: string): void {
   // setRouteTemplate for the new route runs later, in a router effect, so the
   // template is still the outgoing route's here). markVitalsNavigation then
   // resets the observers so the new route starts measuring from zero.
+  //
+  // Gate on an actual route change (pathname+hash) so same-path updates (the
+  // router's initial URL normalization, query-only changes) aren't treated as a
+  // route boundary.
+  const routeKey = () => location.pathname + location.hash;
+  let lastRouteKey = routeKey();
   const onNavigation = () => {
+    const key = routeKey();
+    if (key === lastRouteKey) return;
+    lastRouteKey = key;
     flushEvents();
     markVitalsNavigation();
   };
