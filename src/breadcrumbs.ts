@@ -760,24 +760,32 @@ function initConsole(): void {
 
   console.warn = function (...args: unknown[]) {
     if (config.console) {
-      addBreadcrumb({
-        timestamp: Date.now(),
-        category: "console",
-        message: formatConsoleArgs(args).slice(0, 200),
-        data: { level: "warn" },
-      });
+      // Never let breadcrumb capture throw out of the patched console method:
+      // it would propagate into host code *and* skip the real console call
+      // below. formatConsoleArgs already serialises defensively; this is
+      // belt-and-braces for any other surprise (e.g. a hostile toJSON).
+      try {
+        addBreadcrumb({
+          timestamp: Date.now(),
+          category: "console",
+          message: formatConsoleArgs(args).slice(0, 200),
+          data: { level: "warn" },
+        });
+      } catch { /* swallow — the host's console call must still run */ }
     }
     origConsoleWarn(...args);
   };
 
   console.error = function (...args: unknown[]) {
     if (config.console) {
-      addBreadcrumb({
-        timestamp: Date.now(),
-        category: "console",
-        message: formatConsoleArgs(args).slice(0, 200),
-        data: { level: "error" },
-      });
+      try {
+        addBreadcrumb({
+          timestamp: Date.now(),
+          category: "console",
+          message: formatConsoleArgs(args).slice(0, 200),
+          data: { level: "error" },
+        });
+      } catch { /* swallow — the host's console call must still run */ }
     }
     origConsoleError(...args);
   };
@@ -789,7 +797,21 @@ function initConsole(): void {
 }
 
 function formatConsoleArgs(args: unknown[]): string {
-  return args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+  return args.map(safeStringifyArg).join(" ");
+}
+
+// JSON.stringify throws on circular structures (DOM nodes, React elements,
+// any object with a back-reference) and on BigInt — all common console
+// arguments. A throw here would escape the patched console method into host
+// code, so fall back to String() rather than propagate. JSON.stringify also
+// returns undefined for functions/undefined; coerce those too.
+function safeStringifyArg(a: unknown): string {
+  if (typeof a === "string") return a;
+  try {
+    return JSON.stringify(a) ?? String(a);
+  } catch {
+    return String(a);
+  }
 }
 
 // --- Long task tracking ---

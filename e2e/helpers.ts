@@ -87,18 +87,17 @@ export function ingestReplays(items: Captured[]): Array<Record<string, unknown>>
   return jsonBodiesAtPath(items, "/ingest/browser").filter((b) => b.type === "replay");
 }
 
-/** Errors POST to /collect as FrontendTransaction objects. Flatten the
+/** Errors POST to /ingest/browser/errors as FrontendTransaction objects. Flatten the
  * wire shape into a test-friendly view so existing assertions keep working:
  *   - top-level `message`     ← `error.message`
  *   - top-level `error_class` ← `error.name`
  *   - top-level `stack`       ← `error.backtrace.join("\n")`
- *   - top-level `session`     ← `tags` (carries session_id / tab_id /
- *                                anonymous_id / optional user_id; we add the
- *                                user_email / user_name shims when present
- *                                on tags too)
+ *   - top-level `session`     ← `tags` (host-supplied setTags values only;
+ *                                SDK identity ids — session/tab/anonymous — are
+ *                                never sent as tags)
  *   - top-level `breadcrumbs` ← `breadcrumbs` (passes through unchanged) */
 export function ingestErrors(items: Captured[]): Array<Record<string, unknown>> {
-  return jsonBodiesAtPath(items, "/collect").map((b) => {
+  return jsonBodiesAtPath(items, "/ingest/browser/errors").map((b) => {
     const err = (b.error ?? {}) as Record<string, unknown>;
     const tags = (b.tags ?? {}) as Record<string, unknown>;
     return {
@@ -112,15 +111,11 @@ export function ingestErrors(items: Captured[]): Array<Record<string, unknown>> 
 }
 
 export function ingestVitals(items: Captured[]): Array<Record<string, unknown>> {
-  // Vitals POST as a bare JSON array; flatten so callers get a flat list.
-  return items
-    .filter((i): i is CapturedIngest => i.kind === "ingest" && i.path === "/metrics/webvitals")
-    .flatMap((i) => {
-      try {
-        const arr = JSON.parse(i.body) as unknown;
-        return Array.isArray(arr) ? (arr as Array<Record<string, unknown>>) : [];
-      } catch { return []; }
-    });
+  // Vitals ride inside the `events` payload on /ingest/browser; flatten the
+  // per-event `vitals` arrays into a flat list.
+  return ingestEvents(items).flatMap(
+    (e) => (e.vitals as Array<Record<string, unknown>>) ?? [],
+  );
 }
 
 export function networkBreadcrumbs(items: Captured[]): Array<Record<string, unknown>> {

@@ -1,25 +1,25 @@
-import type { EventPayload, FrontendTransaction, ReplayChunk, VitalEntry } from "./types.js";
+import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
 
-// Each kind has its own URL + key param + content type:
-// - events/replay: ${base}/ingest/browser?key=… text/plain (legacy ingest)
-// - errors: ${base}/collect?api_key=… application/json
-// - vitals: ${base}/metrics/webvitals?api_key=… application/json,
-//   shipped as a JSON array (the server accepts arrays).
-const EVENTS_PATH = "/ingest/browser";
-const ERROR_PATH = "/collect";
-const VITALS_PATH = "/metrics/webvitals";
+// Errors POST as FrontendTransaction JSON to /ingest/browser/errors and
+// route through the processor's frontend_errors pipeline (sourcemap
+// resolution + incidents). Periodic events (breadcrumbs + web vitals) POST
+// to /ingest/browser as an `events` payload; the body is JSON but sent with
+// a text/plain content type so cross-origin sendBeacon doesn't trip a CORS
+// preflight (the server reads the raw bytes regardless).
+export const EVENTS_PATH = "/ingest/browser";
+export const ERROR_PATH = "/ingest/browser/errors";
 
-type Kind = "events" | "error" | "vitals";
+type Kind = "events" | "error";
 
 // Chromium-enforced cap on `sendBeacon` bodies. `fetch({keepalive:true})`
 // shares the same cap, so there is no point falling back to keepalive for
-// larger payloads — the browser rejects both silently. Small payloads
-// survive unload via beacon. Larger ones are dropped: the lost data is
-// whatever accumulated since the last periodic flush (each flush drains
-// the buffer), so bound is ≤5 s of replay events or ≤30 s of breadcrumbs.
+// larger payloads — the browser rejects both silently. Small payloads survive
+// unload via beacon. Larger ones are dropped: on an unload flush the body is
+// the route's accumulated web vitals plus, when session streaming is on, the
+// breadcrumb journey since the last 30s periodic flush.
 const BEACON_MAX_BYTES = 64 * 1024;
 // Match the server's DefaultBodyLimit in crates/ingest/src/lib.rs. Replay
 // FullSnapshot chunks for rich DOMs routinely exceed 512 KB; dropping them
@@ -72,18 +72,14 @@ export function destroyTransport(): void {
 }
 
 function urlFor(kind: Kind): string {
-  const path =
-    kind === "error" ? ERROR_PATH :
-    kind === "vitals" ? VITALS_PATH :
-    EVENTS_PATH;
-  // Legacy events ingest uses `key=`; the new /collect and /metrics/webvitals
-  // routes expect `api_key=`.
-  const param = kind === "events" ? "key" : "api_key";
-  return `${baseEndpoint}${path}?${param}=${encodeURIComponent(ingestionKey)}`;
+  const path = kind === "error" ? ERROR_PATH : EVENTS_PATH;
+  return `${baseEndpoint}${path}?api_key=${encodeURIComponent(ingestionKey)}`;
 }
 
 function contentTypeFor(kind: Kind): string {
-  return kind === "events" ? "text/plain" : "application/json";
+  // Errors go through the legacy frontend_errors pipeline which parses the
+  // body as JSON; events ride a CORS-preflight-free text/plain channel.
+  return kind === "error" ? "application/json" : "text/plain";
 }
 
 export function sendError(payload: FrontendTransaction): void {
@@ -99,19 +95,6 @@ export function sendError(payload: FrontendTransaction): void {
 
 export function sendEvents(payload: EventPayload): void {
   send(JSON.stringify(payload), "events");
-}
-
-/** POST the drained web vitals as a JSON array. No-op on empty arrays.
- * Uses sendBeacon when the document is already hidden so a flush from a
- * visibility-hidden or pagehide handler survives unload. */
-export function sendVitals(payload: VitalEntry[]): void {
-  if (payload.length === 0) return;
-  const body = JSON.stringify(payload);
-  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-    flushOnUnload(body, "vitals");
-    return;
-  }
-  send(body, "vitals");
 }
 
 export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
@@ -132,9 +115,9 @@ export function sendBeaconEvents(payload: EventPayload): void {
 
 /** Send a payload during page unload using sendBeacon. Bounded to
  * BEACON_MAX_BYTES: larger bodies are dropped because both sendBeacon and
- * fetch({keepalive:true}) silently reject them. The dropped payload is
- * whatever accumulated since the last periodic flush — bounded by the
- * flush cadence (5 s replay / 30 s events). */
+ * fetch({keepalive:true}) silently reject them. Oversize only happens with
+ * session streaming on (a large breadcrumb journey); the default errors+vitals
+ * payload is well under the cap. */
 function flushOnUnload(body: string, kind: Kind): void {
   if (!navigator.onLine) {
     enqueue(body, kind);
@@ -145,8 +128,8 @@ function flushOnUnload(body: string, kind: Kind): void {
   if (body.length > BEACON_MAX_BYTES) return;
 
   // application/json triggers a CORS preflight in cross-origin sendBeacon
-  // calls, which the spec disallows — for same-origin /collect this works
-  // because no preflight is needed. The server accepts application/json
+  // calls, which the spec disallows — for same-origin /ingest/browser this
+  // works because no preflight is needed. The server accepts application/json
   // on both fetch and beacon paths.
   const blob = new Blob([body], { type: contentTypeFor(kind) });
   navigator.sendBeacon(urlFor(kind), blob);

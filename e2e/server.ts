@@ -82,16 +82,13 @@ const server = createServer(async (req, res) => {
   }
 
   // ── SDK ingest (mock) ──────────────────────────────────────────────────
-  // Three routes the v1 SDK targets:
-  //  - /ingest/browser  (events/breadcrumbs, replay when it returns)
-  //  - /collect         (errors as FrontendTransaction)
-  //  - /metrics/webvitals (vitals array)
-  // All three captured under kind="ingest"; helpers disambiguate by path.
+  // Routes the v1 SDK targets:
+  //  - /ingest/browser         (events: breadcrumbs + vitals, replay later)
+  //  - /ingest/browser/errors  (errors as FrontendTransaction)
+  // All captured under kind="ingest"; helpers disambiguate by path.
   if (
     req.method === "POST" &&
-    (pathname === "/ingest/browser" ||
-      pathname === "/collect" ||
-      pathname === "/metrics/webvitals")
+    (pathname === "/ingest/browser" || pathname === "/ingest/browser/errors")
   ) {
     const body = await readBody(req);
     captured.push({
@@ -119,6 +116,10 @@ const server = createServer(async (req, res) => {
       headers: {
         traceparent: req.headers.traceparent as string | undefined,
         "content-type": req.headers["content-type"] as string | undefined,
+        // Captured so the resilience spec can assert the network hook doesn't
+        // strip headers carried on a Request input (auth/custom).
+        authorization: req.headers.authorization as string | undefined,
+        "x-custom": req.headers["x-custom"] as string | undefined,
       },
       body,
       receivedAt: Date.now(),

@@ -29,6 +29,7 @@
       AppsignalBrowser.init({
         key: "your-app-key",
         endpoint: location.origin,
+        session: { enabled: true },
         // Only requests matching these globs get the traceparent header.
         // Prevents leaking trace context to third-party APIs (analytics,
         // CDNs, etc.) while still connecting frontend to your own backend.

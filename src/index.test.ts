@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { init, destroy, endSession, setUser, clearUser, addBreadcrumb, captureError, flush } from "./index.js";
+import { init, destroy, endSession, setUser, clearUser, setTags, clearTags, addBreadcrumb, captureError, flush } from "./index.js";
 import { RingBuffer } from "./ring-buffer.js";
 
 // jsdom's Blob may lack .text(); polyfill via FileReader so the sendBeacon
@@ -46,7 +46,7 @@ describe("SDK integration", () => {
   });
 
   it("initializes, collects breadcrumbs, and flushes them", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "hello" });
     flush();
@@ -62,9 +62,8 @@ describe("SDK integration", () => {
     const testCrumb = body.breadcrumbs.find((b: { category: string }) => b.category === "test");
     expect(testCrumb).toBeDefined();
     expect(testCrumb.message).toBe("hello");
-    // Vitals POST to /metrics/webvitals on their own; they should not
-    // ride inside the events payload.
-    expect(body.vitals).toBeUndefined();
+    // Web vitals ride inside the events payload (empty here — none collected).
+    expect(body.vitals).toEqual([]);
   });
 
   it("does not send before init", () => {
@@ -76,8 +75,36 @@ describe("SDK integration", () => {
     expect(sentPayloads).toHaveLength(0);
   });
 
+  it("active:false makes init a complete no-op — nothing patched, nothing sent", () => {
+    init({ key: "test-key", endpoint: "https://example.com", session: { enabled: true }, active: false });
+
+    // Every collection path: manual API, captured error, and a real
+    // window 'error' event (proves the global error handler wasn't installed).
+    addBreadcrumb({ category: "test", message: "inactive" });
+    setUser({ id: "u1" });
+    captureError(new Error("inactive error"));
+    window.dispatchEvent(new ErrorEvent("error", { message: "uncaught", filename: "a.js", lineno: 1 }));
+    flush();
+
+    expect(sentPayloads).toHaveLength(0);
+  });
+
+  it("active:false leaves the SDK uninitialized, so a later active init still works", () => {
+    init({ key: "k1", active: false });
+    // The off-switch must not latch `initialized` — otherwise a real init
+    // after an env-gated no-op would be silently swallowed.
+    init({ key: "k2", session: { enabled: true } });
+
+    addBreadcrumb({ category: "test", message: "now active" });
+    flush();
+
+    const eventPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser"));
+    expect(eventPayloads.length).toBeGreaterThan(0);
+    expect(eventPayloads[0].url).toContain("api_key=k2");
+  });
+
   it("sends events to the correct endpoint with ingestion key", () => {
-    init({ key: "my-key", endpoint: "https://example.com" });
+    init({ key: "my-key", endpoint: "https://example.com", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "check url" });
     flush();
@@ -98,27 +125,26 @@ describe("SDK integration", () => {
     });
     window.dispatchEvent(error);
 
-    const errorPayloads = sentPayloads.filter(p => {
-      try { return JSON.parse(p.body).type === "error"; } catch { return false; }
-    });
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser/errors"));
     expect(errorPayloads).toHaveLength(0);
   });
 
   it("second init call is ignored", () => {
-    init({ key: "key-1" });
+    init({ key: "key-1", session: { enabled: true } });
     init({ key: "key-2" });
 
     addBreadcrumb({ category: "test", message: "only one init" });
     flush();
 
-    const eventPayloads = sentPayloads.filter(p => p.url.includes("ingest/browser?key="));
+    const eventPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser"));
+    expect(eventPayloads.length).toBeGreaterThan(0);
     for (const p of eventPayloads) {
-      expect(p.url).toContain("key=key-1");
+      expect(p.url).toContain("api_key=key-1");
     }
   });
 
   it("destroy stops collection and cleans up", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "before", message: "before destroy" });
     flush();
@@ -136,24 +162,24 @@ describe("SDK integration", () => {
   });
 
   it("captureError sends error payload", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     captureError(new Error("manual error"));
 
-    // Errors POST to /collect; events go to /ingest/browser.
-    const errorPayloads = sentPayloads.filter(p => p.url.includes("/collect"));
+    // Errors POST to /ingest/browser/errors as FrontendTransaction; events
+    // POST to /ingest/browser. Distinguish by URL path.
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser/errors"));
     expect(errorPayloads.length).toBeGreaterThan(0);
 
     const body = JSON.parse(errorPayloads[0].body);
     expect(body.error.message).toBe("manual error");
-    expect(body.tags.session_id).toBeTruthy();
   });
 
   it("endSession rotates session_id and clears user between flushes", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is
     // cleared in the process.
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
     setUser({ id: "u1", email: "one@test.com" });
 
     addBreadcrumb({ category: "before", message: "before logout" });
@@ -180,31 +206,21 @@ describe("SDK integration", () => {
     expect(afterPayloads[0].session.user_id).toBeUndefined();
   });
 
-  it("attaches tab_id to event and error payloads", () => {
-    init({ key: "test-key" });
+  it("attaches tab_id to event payloads, distinct from session_id", () => {
+    init({ key: "test-key", session: { enabled: true } });
 
     addBreadcrumb({ category: "test", message: "tab id check" });
-    captureError(new Error("tab id error"));
     flush();
 
     const eventPayloads = sentPayloads
-      .filter(p => p.url.includes("/ingest/browser"))
+      .filter(p => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
       .map(p => { try { return JSON.parse(p.body) } catch { return null } })
       .filter(b => b?.type === "events");
-    const errorPayloads = sentPayloads
-      .filter(p => p.url.includes("/collect"))
-      .map(p => { try { return JSON.parse(p.body) } catch { return null } })
-      .filter(b => !!b);
-
     expect(eventPayloads.length).toBeGreaterThan(0);
-    expect(errorPayloads.length).toBeGreaterThan(0);
 
-    // Events carry the full SessionContext; errors carry a flat tags map.
-    const eventTab = eventPayloads[0].session.tab_id;
-    const errorTab = errorPayloads[0].tags.tab_id;
-    expect(eventTab).toBeTruthy();
-    expect(eventTab).toBe(errorTab);
-    expect(eventTab).not.toBe(eventPayloads[0].session.session_id);
+    const session = eventPayloads[0].session;
+    expect(session.tab_id).toBeTruthy();
+    expect(session.tab_id).not.toBe(session.session_id);
   });
 
   it("dropped noise errors leave a later real error's breadcrumb trail clean", () => {
@@ -216,6 +232,7 @@ describe("SDK integration", () => {
     init({
       key: "test-key",
       beforeError: (e) => /ResizeObserver/.test(e.message) ? null : e,
+      session: { enabled: true },
     });
 
     for (let i = 0; i < 8; i++) {
@@ -225,7 +242,7 @@ describe("SDK integration", () => {
     flush();
 
     const errorPayloads = sentPayloads
-      .filter((p) => p.url.includes("/collect"))
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
       .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
       .filter((b) => !!b);
 
@@ -233,13 +250,37 @@ describe("SDK integration", () => {
     expect(errorPayloads[0].error.message).toBe("real diagnostic error after noise");
 
     const eventBodies = sentPayloads
-      .filter((p) => p.url.includes("/ingest/browser"))
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
       .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
       .filter((b) => b?.type === "events");
     const noisyErrorCrumbs = eventBodies
       .flatMap((b) => (b.breadcrumbs ?? []) as Array<{ category: string; message: string }>)
       .filter((b) => b.category === "error" && b.message.includes("ResizeObserver"));
     expect(noisyErrorCrumbs).toHaveLength(0);
+  });
+
+  it("session.enabled=false (default) ships only errors, no journey events", () => {
+    // With the session/journey stream disabled (the default), breadcrumb
+    // activity alone must not produce an events payload — only errors leave
+    // the browser (web vitals would still ride an events payload, but none are
+    // emitted in jsdom).
+    init({ key: "test-key", session: { enabled: false } });
+
+    addBreadcrumb({ category: "test", message: "should not ship" });
+    captureError(new Error("real error"));
+    flush();
+
+    const eventPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events");
+    const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => !!b);
+
+    expect(eventPayloads).toHaveLength(0);
+    expect(errorPayloads.length).toBeGreaterThan(0);
   });
 
   it("destroy fully unwinds the fetch patch chain when tracing is enabled", async () => {
@@ -261,7 +302,7 @@ describe("SDK integration", () => {
   });
 
   it("setUser attaches user context to payloads", () => {
-    init({ key: "test-key" });
+    init({ key: "test-key", session: { enabled: true } });
 
     setUser({ id: "u1", email: "test@test.com", name: "Test User" });
 
@@ -276,5 +317,38 @@ describe("SDK integration", () => {
     const body = JSON.parse(eventPayloads[0].body);
     expect(body.session.user_id).toBe("u1");
     expect(body.session.user_email).toBe("test@test.com");
+  });
+
+  it("error tags are exactly what setTags set; setUser does not tag errors", () => {
+    init({ key: "test-key" });
+    // setUser identifies the user (session stream) but must NOT appear on errors.
+    setUser({ id: "u1", email: "test@test.com" });
+    setTags({ plan: "pro", org_id: "acme" });
+
+    captureError(new Error("tagged"));
+
+    const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => !!b);
+    expect(errorPayloads.length).toBeGreaterThan(0);
+
+    // Only setTags values — no SDK identity, no setUser fields.
+    expect(errorPayloads[0].tags).toEqual({ plan: "pro", org_id: "acme" });
+  });
+
+  it("clearTags drops error tags from subsequent payloads", () => {
+    init({ key: "test-key" });
+    setTags({ plan: "pro" });
+    clearTags();
+
+    captureError(new Error("after clear"));
+
+    const errorPayloads = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => !!b);
+    expect(errorPayloads.length).toBeGreaterThan(0);
+    expect(errorPayloads[0].tags).toEqual({});
   });
 });

@@ -3,6 +3,14 @@
 export interface BrowserConfig {
   key: string;
   endpoint?: string;
+  /** Master switch. Defaults to active. Set `false` to make `init()` a complete
+   * no-op — nothing is patched (fetch/XHR), no timers start, and no network
+   * request ever fires. Every public method (`setUser`, `addBreadcrumb`,
+   * `reportError`, …) already no-ops while the SDK is inactive, so app code can
+   * call them unconditionally. Gate this on your build environment to keep
+   * dev/test/CI from sending data, e.g. `active: import.meta.env.PROD` or
+   * `active: process.env.NODE_ENV === "production"`. */
+  active?: boolean;
   appVersion?: string;
   user?: UserContext;
   /** Inspect or modify each error at the entry point, before the SDK adds an
@@ -47,6 +55,15 @@ export interface BreadcrumbsConfig {
 }
 
 export interface SessionConfig {
+  /** Whether the session/journey stream is *sent* — the periodic `events`
+   * payload's breadcrumbs (and, later, session replay). Web vitals always
+   * ship and errors (with their own breadcrumb trail via
+   * `/ingest/browser/errors`) are unaffected; a `session_id` is still
+   * generated for those. Defaults to
+   * false: the processor currently ignores session + breadcrumbs on
+   * `/ingest/browser` (v1 reads vitals only), so shipping them is wasted
+   * bandwidth until the Sessions/Replay tier exists server-side. */
+  enabled?: boolean;
   inactivityTimeoutMs?: number;
 }
 
@@ -111,7 +128,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
     longTasks: true,
     scrollDepth: true,
   },
-  session: { inactivityTimeoutMs: 1_800_000 },
+  session: { enabled: false, inactivityTimeoutMs: 1_800_000 },
   privacy: {
     queryParamsAllowlist: [],
     networkBlocklist: [],
@@ -138,11 +155,20 @@ export function resolveConfig(input: BrowserConfig): ResolvedConfig {
   };
 }
 
+/** Identity of the current user, set via `setUser`. Rides the session/journey
+ * stream as `SessionContext.user_id`/`user_email`/`user_name`. For arbitrary
+ * error-filtering metadata (plan, org, …) use `setTags` instead. */
 export interface UserContext {
   id?: string;
   email?: string;
   name?: string;
 }
+
+/** Arbitrary string key-value annotations attached to error payloads, set via
+ * `setTags`. These are the error `tags` map — filter/search errors by them in
+ * the UI. The SDK skips empty values, coerces values to strings, and caps the
+ * number of tags; the server truncates each value to 256 bytes. */
+export type ErrorTags = Record<string, string>;
 
 export interface Breadcrumb {
   timestamp: number;
@@ -199,13 +225,17 @@ export interface BrowserError {
   colno?: number;
   stack?: string;
   breadcrumbs: Breadcrumb[];
-  session: SessionContext;
+  /** Full session context, attached only when an `onErrorReported` subscriber
+   * is registered to consume it (the error wire payload doesn't carry it, so
+   * it's not computed otherwise). Present whenever a subscriber receives the
+   * event. */
+  session?: SessionContext;
   app_version?: string;
   suppressed_count?: number;
   context?: Record<string, unknown>;
 }
 
-/** Wire shape for errors POSTed to `/collect`. Aligned with AppSignal's
+/** Wire shape for errors POSTed to `/ingest/browser/errors`. Aligned with AppSignal's
  * Transaction schema. Kept separate from `BrowserError` because subscribers
  * (`onErrorReported`) still want the richer internal shape — only the
  * network format follows this. */
@@ -224,12 +254,11 @@ export interface FrontendTransaction {
     backtrace: string[];
   };
   breadcrumbs: TransactionBreadcrumb[];
-  tags: {
-    session_id: string;
-    tab_id: string;
-    anonymous_id: string;
-    user_id?: string;
-  };
+  /** Host-supplied error tags from `setTags` (see `ErrorTags`). The SDK injects
+   * no identity of its own — user identity rides the session stream, and
+   * session/tab/anonymous ids aren't tags (high-cardinality, not in the
+   * server's metadata-distribution allowlist). Empty `{}` when none set. */
+  tags: ErrorTags;
   environment: {
     url: string;
   };
@@ -252,36 +281,30 @@ export interface TransactionBreadcrumb {
   metadata: Record<string, unknown>;
 }
 
-/** Wire shape for web vitals POSTed to `/metrics/webvitals` as a JSON array.
- * Aligned with the server's `WebVital` struct in
- * `appsignal-processor-rs/public_endpoint/http_flusher/src/metrics/web_vitals_mapper.rs`:
+/** Web vital — both the in-memory shape the reporters collect (see `vitals.ts`)
+ * and the wire shape sent inside an `events` payload to `/ingest/browser`.
+ * Matches the processor's `VitalPayload` (browser/convert.rs) exactly: bare
+ * metric `name` ("LCP", "CLS", ...), `value`, route, and epoch-ms `timestamp`.
+ * Those four are the only fields the server deserializes; `rating` is derived
+ * from `value` at query time and `element`/`interaction_type` have no store
+ * yet, so none are sent here.
  *
- *   - `id`, `label`, `name`, `startTime`, `value` are REQUIRED. Missing any of
- *     them makes serde drop the whole entry silently (HTTP 200, zero metrics).
- *   - `label="browser-web-vital"` is the discriminator that selects the
- *     `browser_webvital_*` metric naming (vs legacy `webvital_*` for the
- *     `@appsignal/javascript` SDK) and enables CLS×1000 scaling server-side.
- *   - `name` is the bare metric kind ("LCP", "CLS", ...). Server lowercases
- *     and prefixes → `browser_webvital_lcp`.
- *   - `rating`, `element`, `interaction_type` are server-ignored today (kept
- *     for future server-side features; payload cost is trivial).
- */
-export interface VitalEntry {
-  id: string;
-  label: "browser-web-vital";
+ * `page_url` is the route the SDK attributes the metric to: the template the
+ * host set via `setRouteTemplate` if any, otherwise the scrubbed raw URL. The
+ * server runs `auto_template` either way — idempotent on templates, helpful on
+ * raw URLs. */
+export interface EventVital {
   name: string;
-  startTime: number;
   value: number;
-  page_url?: string;
-  rating?: string;
-  element?: string;
-  interaction_type?: string;
+  page_url: string;
+  timestamp: number;
 }
 
 export interface EventPayload {
   type: "events";
   session: SessionContext;
   breadcrumbs: Breadcrumb[];
+  vitals: EventVital[];
   app_version?: string;
 }
 
