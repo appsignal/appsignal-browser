@@ -784,12 +784,15 @@ function initConsole(): void {
   };
 
   console.error = function (...args: unknown[]) {
+    // Serialise the args once — shared by the breadcrumb and the synthesized
+    // console error, both of which otherwise JSON-stringify the same args.
+    const formatted = config.console || onConsoleError ? formatConsoleArgs(args) : "";
     if (config.console) {
       try {
         addBreadcrumb({
           timestamp: Date.now(),
           category: "console",
-          message: formatConsoleArgs(args).slice(0, 200),
+          message: formatted.slice(0, 200),
           data: { level: "error" },
         });
       } catch { /* swallow — the host's console call must still run */ }
@@ -798,7 +801,7 @@ function initConsole(): void {
     // swallowed for the same reason as the breadcrumb above: the host's console
     // call below must always run, even if reporting throws.
     if (onConsoleError) {
-      try { onConsoleError(consoleArgsToError(args)); } catch { /* swallow */ }
+      try { onConsoleError(consoleArgsToError(args, formatted)); } catch { /* swallow */ }
     }
     origConsoleError(...args);
   };
@@ -813,15 +816,21 @@ function formatConsoleArgs(args: unknown[]): string {
   return args.map(safeStringifyArg).join(" ");
 }
 
+// Cap the synthesized console-error message. The breadcrumb is truncated to
+// 200; without a cap here a `console.error("state", hugeObject)` would ship a
+// multi-KB message and use it verbatim as the dedupe key. A passed Error keeps
+// its own (untouched) message.
+const CONSOLE_MESSAGE_MAX = 2000;
+
 // Build the Error to report from console.error's arguments. If the caller
 // passed an Error (`console.error(err)` / `console.error("ctx", err)`), reuse
-// it so its real stack survives; otherwise synthesize one from the formatted
-// args. errors.reportConsoleError strips the SDK frames off the synthesized
-// stack so it roots at the caller.
-function consoleArgsToError(args: unknown[]): Error {
+// it so its real stack survives; otherwise synthesize one from the
+// already-formatted args. errors.reportConsoleError strips the SDK frames off
+// the synthesized stack so it roots at the caller.
+function consoleArgsToError(args: unknown[], formatted: string): Error {
   const existing = args.find((a): a is Error => a instanceof Error);
   if (existing) return existing;
-  const err = new Error(formatConsoleArgs(args));
+  const err = new Error(formatted.slice(0, CONSOLE_MESSAGE_MAX));
   err.name = "console.error";
   return err;
 }

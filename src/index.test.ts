@@ -245,6 +245,71 @@ describe("SDK integration", () => {
     expect(errorBodies().filter((b) => b.error.message === msg)).toHaveLength(1);
   });
 
+  it("beforeError returning null drops a console error", () => {
+    init({ key: "test-key", beforeError: (e) => /drop-me/.test(e.message) ? null : e });
+
+    console.error("drop-me " + Math.random());
+
+    expect(errorBodies().filter((b) => /drop-me/.test(b.error.message))).toHaveLength(0);
+  });
+
+  it("sampleRate:0 drops console errors too", () => {
+    init({ key: "test-key", errors: { sampleRate: 0 } });
+
+    console.error("sampled out " + Math.random());
+
+    expect(errorBodies()).toHaveLength(0);
+  });
+
+  it("the SDK's own beforeError-Promise diagnostic is not escalated into a report", () => {
+    // A non-console error whose beforeError returns a Promise makes handleError
+    // log via console.error while inConsoleReport is false. That internal log
+    // must not itself become an escalated console error (the real feedback-loop
+    // path the reentrancy guard exists for).
+    init({ key: "test-key", beforeError: () => Promise.resolve(null) as never });
+
+    captureError(new Error("triggers async-beforeError warning"));
+
+    expect(errorBodies().some((b) => /beforeError returned a Promise/.test(b.error.message))).toBe(false);
+  });
+
+  it("reports a synthesized console error with a Firefox-shaped stack (no header line)", () => {
+    // Firefox/Safari stacks have no "Error: msg" header — line 0 is the first
+    // frame (the SDK interceptor). Regression guard for stripLeadingSdkFrames:
+    // the leading SDK frame must still be stripped, or isOwnError drops the
+    // whole error and the feature silently no-ops on those engines.
+    init({ key: "test-key" });
+
+    const err = new Error("ff console error");
+    err.stack = [
+      "consoleArgsToError@webpack://@appsignal/browser/dist/esm/browser.esm.js:800:10",
+      "appCode@https://app.example.com/main.js:12:3",
+    ].join("\n");
+    console.error(err);
+
+    expect(errorBodies().find((b) => b.error.message === "ff console error")).toBeDefined();
+  });
+
+  it("truncates a huge synthesized console message", () => {
+    init({ key: "test-key" });
+
+    console.error("x".repeat(10000));
+
+    const hit = errorBodies().find((b) => /^x+$/.test(b.error.message));
+    expect(hit).toBeDefined();
+    expect(hit.error.message.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("destroy() unpatches console.error so it no longer reports", () => {
+    init({ key: "test-key" });
+    destroy();
+    sentPayloads = [];
+
+    console.error("after destroy " + Math.random());
+
+    expect(errorBodies()).toHaveLength(0);
+  });
+
   it("endSession rotates session_id and clears user between flushes", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is

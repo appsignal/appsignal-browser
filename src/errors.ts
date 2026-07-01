@@ -179,9 +179,22 @@ export function reportConsoleError(error: Error): void {
 function stripLeadingSdkFrames(stack?: string): string | undefined {
   if (!stack) return stack;
   const lines = stack.split("\n");
-  let i = 1; // keep the "Error: message" header
+  // V8 prefixes the stack with an "Error: message" header line; Firefox and
+  // Safari do not — their line 0 is already the first frame. Preserve line 0
+  // only when it isn't itself a frame, otherwise the leading SDK frame is never
+  // stripped on non-V8 engines and isOwnError would drop the whole error.
+  const hasHeader = lines.length > 0 && !isStackFrame(lines[0]);
+  let i = hasHeader ? 1 : 0;
   while (i < lines.length && SDK_MARKERS.some((m) => lines[i].includes(m))) i++;
-  return [lines[0], ...lines.slice(i)].join("\n");
+  return [...(hasHeader ? [lines[0]] : []), ...lines.slice(i)].join("\n");
+}
+
+// V8 frames read "    at fn (file:line:col)"; Firefox/Safari read
+// "fn@file:line:col". A header ("Error: msg") matches neither — the `:\d+`
+// after `@` keeps an `@` inside a message (e.g. an email) from looking like a
+// frame.
+function isStackFrame(line: string): boolean {
+  return /^\s*at\s/.test(line) || /@.+:\d+/.test(line);
 }
 
 function handleError(
@@ -235,12 +248,22 @@ function handleError(
   // silent breakage. Detect it, drop the error, and log loudly so a host
   // developer can grep for the message.
   if (hookResult && typeof (hookResult as { then?: unknown }).then === "function") {
-    // eslint-disable-next-line no-console
-    console.error(
-      "[appsignal] beforeError returned a Promise. Async beforeError is " +
-      "not supported; the error was dropped. Move async work outside the " +
-      "hook (e.g. perform it before calling captureError).",
-    );
+    // Guard this log so errors.console doesn't escalate the SDK's own
+    // diagnostic into a captured error. Set the flag around the call regardless
+    // of entry path (an uncaught/rejection error can reach here with the flag
+    // still false); save/restore so a console-originated report stays guarded.
+    const prev = inConsoleReport;
+    inConsoleReport = true;
+    try {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[appsignal] beforeError returned a Promise. Async beforeError is " +
+        "not supported; the error was dropped. Move async work outside the " +
+        "hook (e.g. perform it before calling captureError).",
+      );
+    } finally {
+      inConsoleReport = prev;
+    }
     return;
   }
   if (!hookResult) return;

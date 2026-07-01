@@ -333,7 +333,19 @@ Stack traces are sent as raw strings. Source map processing is server-side (futu
 
 **URL privacy.** The error payload's `environment.url` is scrubbed through `privacy.queryParamsAllowlist`, identically to every other captured URL — raw query params and OAuth fragments never ride along.
 
-**`console.error` capture.** With `errors.console` (default `true`), `console.error(...)` calls are reported as errors, not just breadcrumbs. If an `Error` was passed (`console.error(err)`), its real stack is used; otherwise the formatted arguments become the message with `error_class` `"console.error"` and the stack rooted at the caller (the SDK's own interceptor frames are stripped). These flow through the full pipeline — `sampleRate`, the global rate limit, `beforeError`, and dedup all apply — and re-entrancy is guarded so the SDK's own logging can't loop. Set `errors.console: false` to keep `console.error` as breadcrumbs only (it stays a console breadcrumb either way, independent of this flag). Note this escalates library/framework `console.error` lint too, so `beforeError` is the place to filter noise you don't want as errors.
+**`console.error` capture.** With `errors.console` (default `true`), `console.error(...)` calls are reported as errors, not just breadcrumbs — **only `console.error`**, not `console.warn`/`console.info`. If an `Error` was passed (`console.error(err)` / `console.error("ctx", err)` — the first `Error` argument wins), its real stack is used; otherwise the formatted arguments become the message (truncated to 2000 chars) with `error_class` `"console.error"` and the stack rooted at the caller (the SDK's own interceptor frames are stripped, cross-browser). These flow through the full pipeline — `sampleRate`, the global rate limit, `beforeError`, and dedup all apply — and re-entrancy is guarded so the SDK's own logging can't loop. The call still records a `console` breadcrumb regardless; set `errors.console: false` to keep it a breadcrumb only (independent of `breadcrumbs.console`).
+
+**Behaviour change & filtering.** Because this defaults **on**, framework/library `console.error` lint (React dev-mode key & prop-type warnings, deprecation notices, third-party SDK diagnostics) is reported as errors too — expect some on first upgrade. `beforeError` is where you filter it out, and — since the console message is app-controlled text that, unlike captured URLs, is **not** scrubbed through `privacy.queryParamsAllowlist` — it is also where you redact anything sensitive your app logs. Filter on the `"console.error"` class:
+
+```ts
+beforeError: (e) => {
+  if (e.error_class === "console.error") {
+    if (/ResizeObserver|^Warning: |deprecated/.test(e.message)) return null; // drop lint
+    e.message = e.message.replace(/token=\w+/g, "token=[redacted]");         // redact
+  }
+  return e;
+}
+```
 
 **Error grouping (`action`).** Errors group server-side by `action`, which is the `setRouteTemplate()` template (e.g. `/users/:id`) when set, otherwise the raw `location.pathname`. Declaring a template keeps ID-heavy routes from fragmenting into one error group per id — the same route key vitals attribution uses.
 
