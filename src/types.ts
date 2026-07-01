@@ -44,6 +44,13 @@ export interface BrowserConfig {
 export interface ErrorsConfig {
   enabled?: boolean;
   sampleRate?: number;
+  /** Report `console.error(...)` calls as errors, not just breadcrumbs.
+   * Defaults to true. The message is the formatted console arguments (or the
+   * Error, if one was passed); the call flows through the same pipeline as
+   * uncaught errors (sampleRate, rate limit, beforeError, dedup). Set false to
+   * keep `console.error` as breadcrumbs only. Independent of
+   * `breadcrumbs.console`, which controls the breadcrumb trail. */
+  console?: boolean;
 }
 
 export interface BreadcrumbsConfig {
@@ -120,7 +127,7 @@ export interface ResolvedConfig {
 }
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
-  errors: { enabled: true, sampleRate: 1.0 },
+  errors: { enabled: true, sampleRate: 1.0, console: true },
   breadcrumbs: {
     network: true,
     console: true,

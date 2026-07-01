@@ -144,6 +144,46 @@ export function reportError(
   );
 }
 
+// Guards against the one feedback loop: handleError calls console.error when
+// beforeError returns a Promise (below). Without this, that call would be
+// escalated back into handleError, and so on. The SDK has no other
+// console.error call site, so this single flag closes the loop.
+let inConsoleReport = false;
+
+/** Escalate a `console.error(...)` call to a reported error, gated on
+ * `errors.console`. Wired from the breadcrumbs console interceptor via
+ * index.ts (breadcrumbs can't import errors — would be circular). */
+export function reportConsoleError(error: Error): void {
+  if (inConsoleReport) return;
+  if (!config?.console) return;
+  inConsoleReport = true;
+  try {
+    handleError(
+      error.message,
+      undefined,
+      undefined,
+      undefined,
+      // A synthesized console error is created inside the SDK, so its leading
+      // frames are the interceptor itself. Strip that leading SDK run so the
+      // stack roots at the caller (real app code) and isOwnError keeps it,
+      // while a genuinely SDK-rooted error is still dropped by isOwnError.
+      stripLeadingSdkFrames(error.stack),
+      { source: "console" },
+      error.name || "console.error",
+    );
+  } finally {
+    inConsoleReport = false;
+  }
+}
+
+function stripLeadingSdkFrames(stack?: string): string | undefined {
+  if (!stack) return stack;
+  const lines = stack.split("\n");
+  let i = 1; // keep the "Error: message" header
+  while (i < lines.length && SDK_MARKERS.some((m) => lines[i].includes(m))) i++;
+  return [lines[0], ...lines.slice(i)].join("\n");
+}
+
 function handleError(
   message: string,
   filename?: string,

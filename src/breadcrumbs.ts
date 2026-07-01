@@ -61,6 +61,11 @@ function setPrivacyDom(dom: ResolvedConfig["privacy"]["dom"]): void {
 let origConsoleWarn: typeof console.warn;
 let origConsoleError: typeof console.error;
 
+// Escalation hook: when set (errors.console enabled), console.error calls are
+// forwarded here to be reported as errors. Wired from index.ts to the errors
+// module — breadcrumbs can't import errors directly (circular).
+let onConsoleError: ((error: Error) => void) | undefined;
+
 // Cleanup functions for all observers, listeners, and patches
 let cleanups: (() => void)[] = [];
 
@@ -111,11 +116,13 @@ export function initBreadcrumbs(
   privacyNetworkBlocklist: string[] = [],
   privacyDom: ResolvedConfig["privacy"]["dom"] = { maskText: [], blockElement: [] },
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null,
+  onConsoleErrorFn?: (error: Error) => void,
 ): void {
   destroyBreadcrumbs();
 
   config = resolved;
   beforeBreadcrumbHook = beforeBreadcrumb;
+  onConsoleError = onConsoleErrorFn;
   queryParamsAllowlist = privacyQueryParamsAllowlist;
   networkBlocklist = privacyNetworkBlocklist;
   setPrivacyDom(privacyDom);
@@ -787,6 +794,12 @@ function initConsole(): void {
         });
       } catch { /* swallow — the host's console call must still run */ }
     }
+    // Escalate to a reported error when errors.console is enabled. Guarded and
+    // swallowed for the same reason as the breadcrumb above: the host's console
+    // call below must always run, even if reporting throws.
+    if (onConsoleError) {
+      try { onConsoleError(consoleArgsToError(args)); } catch { /* swallow */ }
+    }
     origConsoleError(...args);
   };
 
@@ -798,6 +811,19 @@ function initConsole(): void {
 
 function formatConsoleArgs(args: unknown[]): string {
   return args.map(safeStringifyArg).join(" ");
+}
+
+// Build the Error to report from console.error's arguments. If the caller
+// passed an Error (`console.error(err)` / `console.error("ctx", err)`), reuse
+// it so its real stack survives; otherwise synthesize one from the formatted
+// args. errors.reportConsoleError strips the SDK frames off the synthesized
+// stack so it roots at the caller.
+function consoleArgsToError(args: unknown[]): Error {
+  const existing = args.find((a): a is Error => a instanceof Error);
+  if (existing) return existing;
+  const err = new Error(formatConsoleArgs(args));
+  err.name = "console.error";
+  return err;
 }
 
 // JSON.stringify throws on circular structures (DOM nodes, React elements,

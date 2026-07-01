@@ -79,6 +79,7 @@ interface BrowserConfig {
   errors?: {
     enabled?: boolean;             // default: true
     sampleRate?: number;           // 0..1, default: 1.0
+    console?: boolean;             // default: true — report console.error() as errors
   };
   breadcrumbs?: {
     network?: boolean;             // default: true — fetch/XHR breadcrumbs
@@ -317,7 +318,7 @@ Server-side the names become `browser_webvital_lcp` / `_cls` / `_inp` / `_fcp` /
 
 ### Error collection
 
-Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`. For each error:
+Instrument `window.onerror`, `window.addEventListener("unhandledrejection")`, and — when `errors.console` is on (default) — `console.error(...)`. For each error:
 
 1. Capture: message, filename, line, column, stack trace (as a string).
 2. Attach current breadcrumbs (snapshot of the ring buffer).
@@ -331,6 +332,8 @@ Stack traces are sent as raw strings. Source map processing is server-side (futu
 **Non-`Error` rejections.** A `Promise.reject` whose reason isn't an `Error` (e.g. `reject({ code: 500 })`) is JSON-stringified so the detail survives in `message`, falling back to `String()` for primitives and non-serialisable values (circular refs, `BigInt`). Without this, object reasons would collapse to `"[object Object]"`.
 
 **URL privacy.** The error payload's `environment.url` is scrubbed through `privacy.queryParamsAllowlist`, identically to every other captured URL — raw query params and OAuth fragments never ride along.
+
+**`console.error` capture.** With `errors.console` (default `true`), `console.error(...)` calls are reported as errors, not just breadcrumbs. If an `Error` was passed (`console.error(err)`), its real stack is used; otherwise the formatted arguments become the message with `error_class` `"console.error"` and the stack rooted at the caller (the SDK's own interceptor frames are stripped). These flow through the full pipeline — `sampleRate`, the global rate limit, `beforeError`, and dedup all apply — and re-entrancy is guarded so the SDK's own logging can't loop. Set `errors.console: false` to keep `console.error` as breadcrumbs only (it stays a console breadcrumb either way, independent of this flag). Note this escalates library/framework `console.error` lint too, so `beforeError` is the place to filter noise you don't want as errors.
 
 **Error grouping (`action`).** Errors group server-side by `action`, which is the `setRouteTemplate()` template (e.g. `/users/:id`) when set, otherwise the raw `location.pathname`. Declaring a template keeps ID-heavy routes from fragmenting into one error group per id — the same route key vitals attribution uses.
 

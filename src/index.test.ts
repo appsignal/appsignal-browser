@@ -175,6 +175,76 @@ describe("SDK integration", () => {
     expect(body.error.message).toBe("manual error");
   });
 
+  const errorBodies = () =>
+    sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter(Boolean);
+
+  it("reports console.error(string) as an error by default (errors.console)", () => {
+    init({ key: "test-key" });
+
+    const msg = "console boom " + Math.random();
+    console.error(msg);
+
+    const hit = errorBodies().find((b) => b.error.message === msg);
+    expect(hit).toBeDefined();
+    expect(hit.error.name).toBe("console.error");
+  });
+
+  it("console.error(Error) reports the passed Error, not a synthesized one", () => {
+    init({ key: "test-key" });
+
+    console.error("context:", new Error("real console error"));
+
+    const hit = errorBodies().find((b) => b.error.message === "real console error");
+    expect(hit).toBeDefined();
+    expect(hit.error.name).toBe("Error");
+  });
+
+  it("errors.console:false keeps console.error a breadcrumb only, no report", () => {
+    init({ key: "test-key", errors: { console: false }, session: { enabled: true } });
+
+    const msg = "should not report " + Math.random();
+    console.error(msg);
+    flush();
+
+    expect(errorBodies()).toHaveLength(0);
+    // Still recorded as a console breadcrumb on the journey stream.
+    const crumbs = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events")
+      .flatMap((b) => b.breadcrumbs ?? []);
+    expect(crumbs.find((c) => c.category === "console" && c.message.includes("should not report"))).toBeDefined();
+  });
+
+  it("still reports a console error whose stack is SDK-rooted (leading SDK frames stripped)", () => {
+    // Without stripping, isOwnError would see "@appsignal/browser" in the stack
+    // and drop it — which would silently break the feature in the built bundle
+    // (tests otherwise never exercise this, since src paths lack the marker).
+    init({ key: "test-key" });
+
+    const err = new Error("sdk-stacked console error");
+    err.stack = [
+      "Error: sdk-stacked console error",
+      "    at consoleArgsToError (webpack://@appsignal/browser/dist/esm/index.js:800:10)",
+      "    at appCode (https://app.example.com/main.js:12:3)",
+    ].join("\n");
+    console.error(err);
+
+    expect(errorBodies().find((b) => b.error.message === "sdk-stacked console error")).toBeDefined();
+  });
+
+  it("escalating a console.error does not recurse into extra reports", () => {
+    init({ key: "test-key" });
+
+    const msg = "single report " + Math.random();
+    console.error(msg);
+
+    expect(errorBodies().filter((b) => b.error.message === msg)).toHaveLength(1);
+  });
+
   it("endSession rotates session_id and clears user between flushes", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is
