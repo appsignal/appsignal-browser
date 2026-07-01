@@ -335,17 +335,19 @@ Stack traces are sent as raw strings. Source map processing is server-side (futu
 
 **`console.error` capture.** With `errors.console` (default `true`), `console.error(...)` calls are reported as errors, not just breadcrumbs — **only `console.error`**, not `console.warn`/`console.info`. If an `Error` was passed (`console.error(err)` / `console.error("ctx", err)` — the first `Error` argument wins), its real stack is used; otherwise the formatted arguments become the message (truncated to 2000 chars) with `error_class` `"console.error"`. Console errors are reported regardless of stack shape — they bypass the SDK's self-error filter (`isOwnError`), with a reentrancy guard preventing feedback loops — and the SDK interceptor frames are stripped from the reported stack on a best-effort basis. These flow through the full pipeline — `sampleRate`, the global rate limit, `beforeError`, and dedup all apply — and re-entrancy is guarded so the SDK's own logging can't loop. The call still records a `console` breadcrumb regardless; set `errors.console: false` to keep it a breadcrumb only (independent of `breadcrumbs.console`).
 
-**Behaviour change & filtering.** Because this defaults **on**, framework/library `console.error` lint (React dev-mode key & prop-type warnings, deprecation notices, third-party SDK diagnostics) is reported as errors too — expect some on first upgrade. `beforeError` is where you filter it out, and — since the console message is app-controlled text that, unlike captured URLs, is **not** scrubbed through `privacy.queryParamsAllowlist` — it is also where you redact anything sensitive your app logs. Filter on the `"console.error"` class:
+**Behaviour change & filtering.** Because this defaults **on**, framework/library `console.error` lint (React dev-mode key & prop-type warnings, deprecation notices, third-party SDK diagnostics) is reported as errors too — expect some on first upgrade. `beforeError` is where you filter it out, and — since the console message is app-controlled text that, unlike captured URLs, is **not** scrubbed through `privacy.queryParamsAllowlist` — it is also where you redact anything sensitive your app logs. Filter on `context.source === "console"`, which is set for **every** console-escalated error (both `console.error("string")` and `console.error(errorObject)`). Do **not** filter on `error_class === "console.error"`: that only holds for the string form — a passed Error keeps its own class (`TypeError`, …):
 
 ```ts
 beforeError: (e) => {
-  if (e.error_class === "console.error") {
+  if (e.context?.source === "console") {
     if (/ResizeObserver|^Warning: |deprecated/.test(e.message)) return null; // drop lint
     e.message = e.message.replace(/token=\w+/g, "token=[redacted]");         // redact
   }
   return e;
 }
 ```
+
+**React `ErrorBoundary` double-reports.** React logs every render error it surfaces via `console.error`, so with `errors.console` on a boundary-caught error is reported **twice**: once through the boundary's `captureError` (rich — with `componentName`), and once through console escalation. If you use both, drop the console copy in `beforeError` (`e.context?.source === "console"` and the message matches the boundary error), or accept that dedup may collapse them when message + top frames align.
 
 **Error grouping (`action`).** Errors group server-side by `action`, which is the `setRouteTemplate()` template (e.g. `/users/:id`) when set, otherwise the raw `location.pathname`. Declaring a template keeps ID-heavy routes from fragmenting into one error group per id — the same route key vitals attribution uses.
 

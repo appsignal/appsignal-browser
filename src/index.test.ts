@@ -350,6 +350,36 @@ describe("SDK integration", () => {
     expect(crumbs.some((c) => c.category === "console")).toBe(false);
   });
 
+  it("reports a console error whose surviving stack still contains an SDK frame (isOwnError bypass)", () => {
+    // Guards the load-bearing `fromConsole` bypass: this stack has an app frame
+    // FIRST, so stripLeadingSdkFrames removes nothing and the SDK marker
+    // survives — isOwnError would drop it if console errors didn't bypass it.
+    // Fails iff the `!fromConsole &&` bypass is removed.
+    init({ key: "test-key" });
+
+    const err = new Error("interleaved sdk frame");
+    err.stack = [
+      "Error: interleaved sdk frame",
+      "    at appCode (https://app.example.com/main.js:1:1)",
+      "    at hook (https://cdn.example.com/@appsignal/browser/browser.esm.js:2:2)",
+    ].join("\n");
+    console.error(err);
+
+    expect(errorBodies().find((b) => b.error.message === "interleaved sdk frame")).toBeDefined();
+  });
+
+  it("beforeError sees context.source==='console' for both string and Error console calls", () => {
+    // Locks the documented filter: context.source is the reliable discriminator
+    // for ALL console escalations, unlike error_class (which a passed Error keeps).
+    const sources: unknown[] = [];
+    init({ key: "test-key", beforeError: (e) => { sources.push(e.context?.source); return e; } });
+
+    console.error("string console");
+    console.error(new Error("error console"));
+
+    expect(sources.filter((s) => s === "console")).toHaveLength(2);
+  });
+
   it("truncates a huge synthesized console message", () => {
     init({ key: "test-key" });
 

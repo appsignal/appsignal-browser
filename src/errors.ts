@@ -58,6 +58,9 @@ const DEDUPE_WINDOW_MS = 10_000;
 // bound. The global cap bounds total errors entering the pipeline per window
 // regardless of key — 100 / 10s is far above any sane app's real error rate
 // but stops a runaway loop from making the SDK the source of the problem.
+// Console-escalated errors (errors.console) share this same budget, so a very
+// chatty console.error app could in theory starve genuine uncaught errors in
+// the same window; the cap is high enough that this is acceptable for v1.
 const RATE_LIMIT_MAX = 100;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 let rateWindowStart = 0;
