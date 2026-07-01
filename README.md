@@ -347,7 +347,7 @@ beforeError: (e) => {
 }
 ```
 
-**React `ErrorBoundary` double-reports.** React logs every render error it surfaces via `console.error`, so with `errors.console` on a boundary-caught error is reported **twice**: once through the boundary's `captureError` (rich — with `componentName`), and once through console escalation. If you use both, drop the console copy in `beforeError` (`e.context?.source === "console"` and the message matches the boundary error), or accept that dedup may collapse them when message + top frames align.
+**React `ErrorBoundary`.** React logs every render error it surfaces via `console.error`, so with `errors.console` on a boundary-caught error reaches the pipeline twice — via the boundary's `captureError` (rich, with `componentName`) and via console escalation, back-to-back with an identical fingerprint. The **consecutive-duplicate dedup** (see *Error deduplication* below) collapses that pair into a single report, so no `beforeError` filtering is needed for it. (If you ever want to tell them apart, the console-escalated copy carries `context.source === "console"`.)
 
 **Error grouping (`action`).** Errors group server-side by `action`, which is the `setRouteTemplate()` template (e.g. `/users/:id`) when set, otherwise the raw `location.pathname`. Declaring a template keeps ID-heavy routes from fragmenting into one error group per id — the same route key vitals attribution uses.
 
@@ -366,7 +366,9 @@ beforeError: (e) => {
 
 `beforeError` does *not* see `breadcrumbs` or `session` — those are attached after the hook approves. Redact breadcrumb-level data in `beforeBreadcrumb` instead (see *Breadcrumbs*), which has the side benefit of also redacting breadcrumbs that ride in periodic events flushes.
 
-**Error deduplication.** Within one session, if the same error (same message + same stack top frame) fires more than 5 times in 10 seconds, the 6th+ are silently dropped. First 5 are sent normally. Prevents error storms from overwhelming ingestion.
+**Error deduplication.** Two layers, both keyed on message + top stack frames:
+1. *Consecutive-duplicate drop* — the same error reported again within 1s with no different error in between is collapsed into a single report. This is what merges a React `ErrorBoundary` report with React's own `console.error` escalation for one render error (identical fingerprint, back-to-back).
+2. *Per-key rate cap* — identical errors that are *interleaved* with others are capped at 5 per key per 10 seconds; the 6th+ are dropped. Prevents error storms from overwhelming ingestion.
 
 **Global error rate limit.** Independent of per-error dedup, the module caps total error sends at 100 per 10-second window across all distinct errors. Once the cap is hit, further errors in that window are dropped until it rolls over. Backstops a page emitting many *different* errors (which dedup, keyed per message+frame, wouldn't catch).
 

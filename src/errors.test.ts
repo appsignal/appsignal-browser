@@ -251,15 +251,33 @@ describe("errors", () => {
   });
 
   describe("deduplication", () => {
-    it("suppresses repeated identical errors after 5 occurrences", () => {
+    it("collapses consecutive identical errors into one", () => {
       initErrors({ enabled: true, sampleRate: 1.0 }, []);
 
       for (let i = 0; i < 10; i++) {
         fireError("dedup test error");
       }
 
-      // First 5 should be sent, 6-10 suppressed
-      expect(sendErrorMock).toHaveBeenCalledTimes(5);
+      // Consecutive identical errors within the window are one incident — this
+      // is what collapses an ErrorBoundary + React-console.error double-report.
+      expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rate-caps identical errors interleaved with others at 5 per window", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+
+      // A distinct separator between each "same error" keeps them
+      // non-consecutive, so the consecutive-drop doesn't apply and the per-key
+      // rate cap governs instead.
+      for (let i = 0; i < 10; i++) {
+        fireError("same error");
+        fireError(`separator ${i}`);
+      }
+
+      const sameSent = sendErrorMock.mock.calls.filter(
+        (c) => (c[0] as FrontendTransaction).error.message === "same error",
+      ).length;
+      expect(sameSent).toBe(5);
     });
   });
 

@@ -202,7 +202,7 @@ describe("ErrorBoundary × errors.console (double-report probe)", () => {
     console.error = realConsoleError; // don't leave console.error stubbed
   });
 
-  it("double-reports a boundary-caught render error (boundary + React's own console.error)", () => {
+  it("collapses the boundary + React-console.error double into one report (consecutive dedup)", () => {
     render(
       <ErrorBoundary captureError={sdkCaptureError} fallback={<p>boom</p>}>
         <ThrowingComponent message="double-report" />
@@ -213,11 +213,10 @@ describe("ErrorBoundary × errors.console (double-report probe)", () => {
       .filter((p) => p.url.includes("/ingest/browser/errors"))
       .map((p) => { try { return JSON.parse(p.body).error.message; } catch { return null; } });
 
-    // Two reports for one error: (1) the boundary's captureError, and (2) React
-    // logs the caught error via console.error, which errors.console escalates.
-    // They are NOT deduped — the dedupe window allows up to 5 identical per key
-    // before dropping. This is the behaviour the README's beforeError recipe
-    // (filter on context.source === "console") exists to let hosts suppress.
-    expect(messages.filter((m) => m === "double-report")).toHaveLength(2);
+    // One render error reaches the pipeline twice — the boundary's captureError
+    // and React's own console.error (escalated by errors.console) — with an
+    // identical fingerprint, back-to-back. The consecutive-duplicate drop
+    // collapses them into a single report.
+    expect(messages.filter((m) => m === "double-report")).toHaveLength(1);
   });
 });

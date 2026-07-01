@@ -51,6 +51,17 @@ let dedupeWindow: DedupeEntry[] = [];
 const DEDUPE_MAX_COUNT = 5;
 const DEDUPE_WINDOW_MS = 10_000;
 
+// Consecutive-duplicate drop (Sentry's dedupeIntegration model). Collapses the
+// same error reported back-to-back within this window into a single report —
+// most importantly a React render error captured by BOTH the ErrorBoundary
+// (captureError) and React's own console.error (escalated via errors.console),
+// which fire in the same commit with an identical fingerprint. Distinct from
+// the per-key rate cap below, which bounds identical errors that are
+// *interleaved* with others over the longer DEDUPE window.
+const CONSECUTIVE_DEDUPE_MS = 1_000;
+let lastSentKey = "";
+let lastSentAt = 0;
+
 // Global rate limit, independent of dedupe. Dedupe only caps *identical*
 // errors (5 per key); a loop emitting errors with ever-changing messages
 // (counters, ids, timestamps in the text) bypasses it entirely and would
@@ -125,6 +136,8 @@ export function destroyErrors(): void {
     rejectionHandler = null;
   }
   dedupeWindow = [];
+  lastSentKey = "";
+  lastSentAt = 0;
   rateWindowStart = 0;
   rateWindowCount = 0;
   lastErrorTimestamp = 0;
@@ -291,9 +304,17 @@ function handleError(
     message: effective.message.slice(0, 200),
   });
 
-  // Deduplication: first 5 occurrences sent, 6+ suppressed
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
+  // Consecutive-duplicate drop: the same error reported again within
+  // CONSECUTIVE_DEDUPE_MS with no different error in between is a duplicate of
+  // one incident (e.g. ErrorBoundary + React's console.error for one render
+  // error) — send it once.
+  if (dedupeKey === lastSentKey && now - lastSentAt < CONSECUTIVE_DEDUPE_MS) return;
+  // Per-key rate cap: identical errors interleaved with others — first 5 per
+  // key per window sent, 6+ suppressed.
   if (checkDedupe(dedupeKey, now)) return;
+  lastSentKey = dedupeKey;
+  lastSentAt = now;
 
   const payload: BrowserError = {
     type: "error",
