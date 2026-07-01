@@ -263,10 +263,15 @@ describe("SDK integration", () => {
 
   it("the SDK's own beforeError-Promise diagnostic is not escalated into a report", () => {
     // A non-console error whose beforeError returns a Promise makes handleError
-    // log via console.error while inConsoleReport is false. That internal log
-    // must not itself become an escalated console error (the real feedback-loop
-    // path the reentrancy guard exists for).
-    init({ key: "test-key", beforeError: () => Promise.resolve(null) as never });
+    // log via console.error. That internal log must not become an escalated
+    // console error. The hook deliberately PASSES console-sourced errors
+    // through (so they'd reach the wire if unguarded) and only drops the
+    // trigger — this way the test fails if the reentrancy guard is removed,
+    // rather than the diagnostic being silently dropped by the hook itself.
+    init({
+      key: "test-key",
+      beforeError: (e) => (e.context?.source === "console" ? e : (Promise.resolve(null) as never)),
+    });
 
     captureError(new Error("triggers async-beforeError warning"));
 
@@ -287,7 +292,62 @@ describe("SDK integration", () => {
     ].join("\n");
     console.error(err);
 
-    expect(errorBodies().find((b) => b.error.message === "ff console error")).toBeDefined();
+    const hit = errorBodies().find((b) => b.error.message === "ff console error");
+    expect(hit).toBeDefined();
+    // The SDK interceptor frame must be stripped from the shipped stack, and it
+    // should root at the app frame — not just "reported vs dropped".
+    expect(hit.error.backtrace.join("\n")).not.toContain("@appsignal/browser");
+    expect(hit.error.backtrace[0]).toContain("app.example.com/main.js");
+  });
+
+  it("reports a console error whose message contains @host:port (no false stack-frame match)", () => {
+    // Regression: a header line like "Error: connect wss://user@host:443 failed"
+    // used to be misclassified as a frame. Console errors bypass isOwnError now,
+    // so this must report regardless.
+    init({ key: "test-key" });
+
+    console.error("connect wss://user@host:443 failed at 10:30");
+
+    expect(errorBodies().find((b) => /user@host:443/.test(b.error.message))).toBeDefined();
+  });
+
+  it("console.error with multiple Errors reports the first one", () => {
+    init({ key: "test-key" });
+
+    console.error(new Error("first err"), new Error("second err"));
+
+    const bodies = errorBodies();
+    expect(bodies.find((b) => b.error.message === "first err")).toBeDefined();
+    expect(bodies.find((b) => b.error.message === "second err")).toBeUndefined();
+  });
+
+  it("console.error() with no args and non-serializable args don't throw and still report", () => {
+    init({ key: "test-key" });
+
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => console.error()).not.toThrow();
+    expect(() => console.error("s", circular, 10n, () => {})).not.toThrow();
+
+    expect(errorBodies().length).toBeGreaterThan(0);
+  });
+
+  it("errors.console works when breadcrumbs.console is off (format-once branch)", () => {
+    init({ key: "test-key", breadcrumbs: { console: false }, session: { enabled: true } });
+
+    const msg = "no-crumb report " + Math.random();
+    console.error(msg);
+    flush();
+
+    // Reported as an error...
+    expect(errorBodies().find((b) => b.error.message === msg)).toBeDefined();
+    // ...but no console breadcrumb was recorded (breadcrumbs.console off).
+    const crumbs = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events")
+      .flatMap((b) => b.breadcrumbs ?? []);
+    expect(crumbs.some((c) => c.category === "console")).toBe(false);
   });
 
   it("truncates a huge synthesized console message", () => {

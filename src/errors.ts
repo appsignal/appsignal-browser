@@ -163,13 +163,14 @@ export function reportConsoleError(error: Error): void {
       undefined,
       undefined,
       undefined,
-      // A synthesized console error is created inside the SDK, so its leading
-      // frames are the interceptor itself. Strip that leading SDK run so the
-      // stack roots at the caller (real app code) and isOwnError keeps it,
-      // while a genuinely SDK-rooted error is still dropped by isOwnError.
+      // Best-effort cosmetic cleanup: drop the SDK interceptor frames so the
+      // reported stack roots at the caller. Not load-bearing — console errors
+      // bypass isOwnError (see handleError's `fromConsole`), so an imperfect
+      // strip only yields a slightly noisier stack, never a dropped error.
       stripLeadingSdkFrames(error.stack),
       { source: "console" },
       error.name || "console.error",
+      true,
     );
   } finally {
     inConsoleReport = false;
@@ -190,11 +191,12 @@ function stripLeadingSdkFrames(stack?: string): string | undefined {
 }
 
 // V8 frames read "    at fn (file:line:col)"; Firefox/Safari read
-// "fn@file:line:col". A header ("Error: msg") matches neither — the `:\d+`
-// after `@` keeps an `@` inside a message (e.g. an email) from looking like a
-// frame.
+// "fn@file:line:col". A header ("Error: msg") matches neither. The @-form is
+// anchored to a trailing :line:col so an "@host:port" inside a message isn't
+// mistaken for a frame. Only cosmetic now (strip is best-effort), but keeps
+// the reported stack clean for the common case.
 function isStackFrame(line: string): boolean {
-  return /^\s*at\s/.test(line) || /@.+:\d+/.test(line);
+  return /^\s*at\s/.test(line) || /@.+:\d+:\d+$/.test(line.trimEnd());
 }
 
 function handleError(
@@ -205,11 +207,18 @@ function handleError(
   stack?: string,
   context?: Record<string, unknown>,
   errorClass?: string,
+  fromConsole = false,
 ): void {
   if (!config.enabled) return;
 
-  // Self-protection: ignore errors from our own SDK to prevent feedback loops
-  if (isOwnError(filename, stack)) return;
+  // Self-protection: ignore errors thrown from our own SDK to prevent feedback
+  // loops. Console-originated errors bypass this: a synthesized console error
+  // is SDK-rooted (created inside the interceptor) and its stack can't be
+  // parsed reliably cross-browser, so isOwnError would drop legitimate app
+  // console.errors. The `inConsoleReport` reentrancy guard is the loop
+  // protection for that path instead — the SDK's only console.error site (the
+  // beforeError-Promise diagnostic) is wrapped by it.
+  if (!fromConsole && isOwnError(filename, stack)) return;
 
   // Cross-origin script errors surface as an opaque "Script error." with no
   // stack and no usable location — the browser withholds the detail unless the
