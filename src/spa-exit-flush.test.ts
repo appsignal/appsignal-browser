@@ -33,9 +33,15 @@ if (typeof Blob.prototype.text !== "function") {
 
 describe("SPA exit flush", () => {
   let sent: { url: string; body: string }[] = [];
+  // sendBeacon is sync, but reading the blob isn't (FileReader under the
+  // polyfill above), so the read has to be awaited explicitly. Waiting a
+  // macrotask instead made this test fail whenever the reader didn't happen to
+  // finish within it — reliably under parallel-suite CPU load.
+  let pendingReads: Promise<void>[] = [];
 
   beforeEach(() => {
     sent = [];
+    pendingReads = [];
     for (const k of Object.keys(handlers)) delete handlers[k];
     vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
       sent.push({ url: String(url), body: String(init?.body || "") });
@@ -45,7 +51,7 @@ describe("SPA exit flush", () => {
       url,
       blob,
     ) => {
-      blob.text().then((b) => sent.push({ url, body: b }));
+      pendingReads.push(blob.text().then((b) => { sent.push({ url, body: b }); }));
       return true;
     };
     sessionStorage.clear();
@@ -69,7 +75,7 @@ describe("SPA exit flush", () => {
 
     // User leaves the page — no subsequent navigation to flush /c.
     window.dispatchEvent(new Event("pagehide"));
-    await new Promise((r) => setTimeout(r, 0)); // let blob.text() resolve
+    await Promise.all(pendingReads); // every beacon body is now readable
 
     const events = sent
       .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
