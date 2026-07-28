@@ -141,6 +141,35 @@ export function uuidv4(): string {
   return formatUuid(bytes);
 }
 
+/** Normalise anything that behaves like an Error into its reportable fields,
+ * or `undefined` if the value isn't error-shaped.
+ *
+ * `instanceof Error` is not sufficient: an error thrown in another realm (a
+ * same-origin iframe, a worker) has that realm's Error constructor, so the
+ * check fails — and because `message`/`stack` are non-enumerable,
+ * `JSON.stringify` of one yields `"{}"`. Duck-typing recovers those.
+ *
+ * A string `stack` is required for the duck-typed path, which is what
+ * distinguishes an error object from an ordinary data payload: rejecting with
+ * `{ code: 500, detail: "…" }` should still be JSON-stringified by the caller,
+ * not read as `name`/`message`. */
+export function errorLike(
+  value: unknown,
+): { name: string; message: string; stack?: string } | undefined {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: typeof value.stack === "string" ? value.stack : undefined,
+    };
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const { name, message, stack } = value as Record<string, unknown>;
+  if (typeof name !== "string" || typeof message !== "string") return undefined;
+  if (typeof stack !== "string") return undefined;
+  return { name, message, stack };
+}
+
 /** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
  * can't drift in output shape. */
 function formatUuid(bytes: Uint8Array): string {

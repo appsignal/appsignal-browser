@@ -622,6 +622,62 @@ describe("breadcrumbs", () => {
       expect(consoleBreadcrumbs[0].data?.level).toBe("error");
     });
 
+    it("surfaces an Error's message instead of serialising it to {}", () => {
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+      console.error(new TypeError("boom"));
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs[0].message).toBe("TypeError: boom");
+    });
+
+    it("surfaces the message of an error from another realm", () => {
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      // An iframe/worker error carries that realm's Error constructor, so
+      // `instanceof Error` is false. Non-enumerable fields, as on a real Error,
+      // are what make JSON.stringify collapse it to "{}".
+      const foreign = Object.create(null, {
+        name: { value: "TypeError" },
+        message: { value: "from another realm" },
+        stack: { value: "TypeError: from another realm\n    at <anonymous>" },
+      }) as object;
+      expect(foreign instanceof Error).toBe(false);
+      expect(JSON.stringify(foreign)).toBe("{}");
+
+      console.error(foreign);
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs[0].message).toBe("TypeError: from another realm");
+    });
+
+    it("keeps rendering a plain object with name and message as JSON", () => {
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      // No `stack`, so this is application data, not an error — it must not be
+      // flattened to "name: message".
+      console.error({ name: "checkout", message: "cart updated" });
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs[0].message).toBe(
+        '{"name":"checkout","message":"cart updated"}',
+      );
+    });
+
     it("truncates long console messages to 200 chars", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, console: true },

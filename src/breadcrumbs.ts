@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, errorLike } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -807,6 +807,11 @@ function formatConsoleArgs(args: unknown[]): string {
 // returns undefined for functions/undefined; coerce those too.
 function safeStringifyArg(a: unknown): string {
   if (typeof a === "string") return a;
+  // Errors carry message/stack on non-enumerable properties, so
+  // JSON.stringify(err) === "{}" — surface the actual message instead. Covers
+  // console.error(err), the most common way a console breadcrumb loses its text.
+  const asError = errorLike(a);
+  if (asError) return `${asError.name}: ${asError.message}`;
   try {
     return JSON.stringify(a) ?? String(a);
   } catch {
