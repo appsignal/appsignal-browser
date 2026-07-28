@@ -539,4 +539,46 @@ describe("errors", () => {
       expect(payload.error.message).toBe("[object Object]");
     });
   });
+
+  describe("cross-realm error rejections", () => {
+    // An error thrown inside a same-origin iframe or a worker carries that
+    // realm's Error constructor, so `instanceof Error` is false for it. The
+    // fields must be non-enumerable, as they are on a real Error — that is what
+    // makes JSON.stringify yield "{}" and is the whole point of the defect.
+    const foreignError = (name: string, message: string): object =>
+      Object.create(null, {
+        name: { value: name },
+        message: { value: message },
+        stack: {
+          value: `${name}: ${message}\n    at frame (https://example.com/iframe.js:4:9)`,
+        },
+      }) as object;
+
+    it("keeps message, class and stack instead of collapsing to {}", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      const reason = foreignError("TypeError", "iframe boom");
+      expect(reason instanceof Error).toBe(false);
+      expect(JSON.stringify(reason)).toBe("{}");
+
+      fireRejection(reason);
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("iframe boom");
+      expect(payload.error.name).toBe("TypeError");
+      expect(payload.error.backtrace.length).toBeGreaterThan(0);
+    });
+
+    it("dedupes distinct cross-realm errors separately", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+
+      // All eight share the message "{}" and carry no stack under the old
+      // `instanceof Error` gate, so they collapse to one dedupe key and
+      // everything past DEDUPE_MAX_COUNT (5) is dropped.
+      for (let i = 0; i < 8; i++) {
+        fireRejection(foreignError("TypeError", `boom ${i}`));
+      }
+
+      expect(sendErrorMock).toHaveBeenCalledTimes(8);
+    });
+  });
 });

@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubUrl } from "./utils.js";
+import { scrubUrl, errorLike } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -103,11 +103,20 @@ export function initErrors(
 
   rejectionHandler = (event: PromiseRejectionEvent) => {
     const reason = event.reason;
-    const message =
-      reason instanceof Error ? reason.message : stringifyReason(reason);
-    const stack = reason instanceof Error ? reason.stack : undefined;
-    const errorClass = reason instanceof Error ? reason.name : undefined;
-    handleError(message, undefined, undefined, undefined, stack, undefined, errorClass);
+    // errorLike, not `instanceof Error`, so a rejection carrying an error from
+    // another realm keeps its message, class and stack instead of collapsing to
+    // "{}" — which also made every such rejection share one dedupe key.
+    const asError = errorLike(reason);
+    const message = asError ? asError.message : stringifyReason(reason);
+    handleError(
+      message,
+      undefined,
+      undefined,
+      undefined,
+      asError?.stack,
+      undefined,
+      asError?.name,
+    );
   };
   window.addEventListener("unhandledrejection", rejectionHandler);
 }
