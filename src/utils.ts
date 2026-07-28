@@ -117,9 +117,35 @@ export function seededRandom(seed: string): number {
 
 /** RFC 9562 §5.4 v4: 122 random bits. Use for IDs whose lex order must
  * NOT leak generation time — primarily `anonymous_id`, which persists in
- * localStorage and would otherwise expose first-visit timestamp. */
+ * localStorage and would otherwise expose first-visit timestamp.
+ *
+ * Built by hand from `crypto.getRandomValues` rather than
+ * `crypto.randomUUID`, which throws "crypto.randomUUID is not a function" in
+ * two situations we have to survive — note that `session.ts` calls this at
+ * module scope, so a throw takes down the whole SDK at import, not just the
+ * anonymous ID:
+ *
+ *   1. Any page served over plain http:// (bar localhost), on every browser:
+ *      randomUUID is secure-context-only. This is the common one.
+ *   2. Browsers older than Chrome 92 / Safari 15.4, where it doesn't exist.
+ *
+ * `getRandomValues` has neither restriction — no secure-context gate, and
+ * Chrome 11+. */
 export function uuidv4(): string {
-  return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // Bits 48..51: version 4 (0b0100).
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  // Bits 64..65: variant 10.
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return formatUuid(bytes);
+}
+
+/** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
+ * can't drift in output shape. */
+function formatUuid(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
@@ -140,8 +166,7 @@ export function uuidv7(): string {
   bytes[5] = ts & 0xff;
   // Bits 48..51: version 7 (0b0111).
   bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  // Bits 64..65: variant 10 (RFC 4122).
+  // Bits 64..65: variant 10.
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return formatUuid(bytes);
 }
