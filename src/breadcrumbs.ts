@@ -68,16 +68,25 @@ let cleanups: (() => void)[] = [];
 // Single set of pushState/replaceState/popstate patches. Features register
 // callbacks instead of each patching history methods independently.
 //
-// The true originals are captured once, before any patching. On reinit
-// (tests, HMR) we re-patch from the originals instead of wrapping the
-// previous wrapper, so the call chain stays flat.
+// We capture pushState at patch time (not module load) and delegate to it, so we
+// compose with a foreign patch (e.g. a router that also wraps pushState) rather
+// than orphaning it and breaking SPA navigation. The wrapper is tagged so
+// reinit/HMR unwraps instead of chaining, and destroy restores the captured
+// previous handler, not native.
+
+type NavPatchedFn<T> = T & { __appsignalOrig?: T };
+
+const NAV_METHODS = ["pushState", "replaceState"] as const;
 
 let preNavListeners: (() => void)[] = [];
 let postNavListeners: (() => void)[] = [];
 let navigationHookInstalled = false;
 let popstateHandler: (() => void) | null = null;
-const origPushState = history.pushState.bind(history);
-const origReplaceState = history.replaceState.bind(history);
+// Bumped on every (re)install; a wrapper only dispatches while its generation is
+// current, so a stale wrapper we couldn't unwrap degrades to a pass-through
+// instead of double-firing. Each destroy→init cycle behind a foreign patch
+// therefore leaves one inert layer in the chain — call depth, not a leak.
+let navGeneration = 0;
 
 /** Register a callback that fires before pushState/replaceState (for flushing state). */
 export function onBeforeNavigation(fn: () => void): void {
@@ -94,10 +103,31 @@ export function onAfterNavigation(fn: () => void): void {
 function ensureNavigationHook(): void {
   if (navigationHookInstalled) return;
   navigationHookInstalled = true;
-  const dispatchPre = () => { for (const fn of preNavListeners) fn(); };
-  const dispatchPost = () => { for (const fn of postNavListeners) fn(); };
-  history.pushState = function (...args) { dispatchPre(); origPushState(...args); dispatchPost(); };
-  history.replaceState = function (...args) { dispatchPre(); origReplaceState(...args); dispatchPost(); };
+  const generation = ++navGeneration;
+  const dispatchPre = () => {
+    if (generation !== navGeneration) return;
+    for (const fn of preNavListeners) fn();
+  };
+  const dispatchPost = () => {
+    if (generation !== navGeneration) return;
+    for (const fn of postNavListeners) fn();
+  };
+
+  // Delegate to whatever is installed now; unwrap our own wrapper (HMR) so we
+  // don't chain. pushState and replaceState have the same signature, so one
+  // installer covers both.
+  for (const method of NAV_METHODS) {
+    const current = history[method] as NavPatchedFn<History["pushState"]>;
+    const previous = current.__appsignalOrig ?? current;
+    const wrapper = function (this: History, ...args: Parameters<History["pushState"]>): void {
+      dispatchPre();
+      previous.apply(this, args);
+      dispatchPost();
+    } as NavPatchedFn<History["pushState"]>;
+    wrapper.__appsignalOrig = previous;
+    history[method] = wrapper;
+  }
+
   // Remove previous popstate handler before adding a new one (reinit safety)
   if (popstateHandler) window.removeEventListener("popstate", popstateHandler);
   popstateHandler = () => { dispatchPre(); dispatchPost(); };
@@ -1003,10 +1033,13 @@ function initTabLifecycle(): void {
 export function destroyBreadcrumbs(): void {
   for (const fn of cleanups) fn();
   cleanups = [];
-  // Restore navigation hooks
+  // Restore the handler we captured (may be a foreign wrapper), not native — and
+  // only if our wrapper is still on top, else we'd clobber whatever patched over us.
   if (navigationHookInstalled) {
-    history.pushState = origPushState;
-    history.replaceState = origReplaceState;
+    for (const method of NAV_METHODS) {
+      const current = history[method] as NavPatchedFn<History["pushState"]>;
+      if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
+    }
     if (popstateHandler) {
       window.removeEventListener("popstate", popstateHandler);
       popstateHandler = null;

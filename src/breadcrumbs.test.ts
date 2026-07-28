@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   initBreadcrumbs,
+  destroyBreadcrumbs,
+  onAfterNavigation,
   addBreadcrumb,
   addManualBreadcrumb,
   getSnapshot,
@@ -786,5 +788,78 @@ describe("breadcrumbs", () => {
       expect(close).toHaveLength(1);
       expect(close[0].message).toBe("Tab closed");
     });
+  });
+});
+
+describe("navigation hook composition", () => {
+  let native: History["pushState"];
+  let originalHref: string;
+
+  beforeEach(() => {
+    // Earlier suites leave our patch installed (module state outlives their
+    // describe), so tear it down here to get back to the native method.
+    destroyBreadcrumbs();
+    native = history.pushState;
+    originalHref = location.href;
+  });
+
+  afterEach(() => {
+    destroyBreadcrumbs();
+    history.pushState = native;
+    native.call(history, {}, "", originalHref);
+  });
+
+  it("composes with a pre-existing history.pushState patch instead of orphaning it", () => {
+    // Foreign patch (stands in for a router) installed before the SDK.
+    let foreignCalls = 0;
+    const foreign = function (this: History, ...args: Parameters<History["pushState"]>): void {
+      foreignCalls++;
+      native.apply(this, args);
+    } as History["pushState"];
+    history.pushState = foreign;
+
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
+    let sdkFired = 0;
+    onAfterNavigation(() => { sdkFired++; });
+
+    history.pushState({}, "", "/composed");
+
+    // Both ran — foreign patch composed, not bypassed.
+    expect(foreignCalls).toBe(1);
+    expect(sdkFired).toBe(1);
+
+    // Teardown restores the foreign patch, not native.
+    destroyBreadcrumbs();
+    expect(history.pushState).toBe(foreign);
+    foreignCalls = 0;
+    history.pushState({}, "", "/after-destroy");
+    expect(foreignCalls).toBe(1);
+  });
+
+  it("fires listeners once per navigation when reinit has to delegate through a foreign patch", () => {
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
+
+    // A router patches over our wrapper *after* the SDK installed (script order
+    // we don't control). Reinit can't unwrap this one — it isn't ours — so it
+    // must delegate through it, leaving our first wrapper in the chain.
+    let routerCalls = 0;
+    const ourFirstWrapper = history.pushState;
+    const router = function (this: History, ...args: Parameters<History["pushState"]>): void {
+      routerCalls++;
+      ourFirstWrapper.apply(this, args);
+    } as History["pushState"];
+    history.pushState = router;
+
+    // Reinit (init() called twice, or HMR). Clears listeners, so re-register.
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
+    let sdkFired = 0;
+    onAfterNavigation(() => { sdkFired++; });
+
+    history.pushState({}, "", "/reinit-through-foreign");
+
+    // The stale wrapper is still in the chain and still passes the call through,
+    // but only the current generation dispatches — one breadcrumb, not two.
+    expect(routerCalls).toBe(1);
+    expect(sdkFired).toBe(1);
   });
 });
