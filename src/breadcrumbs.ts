@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, errorLike } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -587,27 +587,12 @@ function recordDocumentLoad(): void {
       duration,
     }
 
-    // Timing breakdown — same fields as getResourceTiming() for fetch/xhr
-    const rt: Record<string, unknown> = {}
-    const dns = Math.round(nav.domainLookupEnd - nav.domainLookupStart)
-    const connect = Math.round(nav.connectEnd - nav.connectStart)
-    const ssl = nav.secureConnectionStart > 0 ? Math.round(nav.connectEnd - nav.secureConnectionStart) : 0
-    const ttfb = Math.round(nav.responseStart - nav.requestStart)
-    const download = Math.round(nav.responseEnd - nav.responseStart)
-    if (dns > 0) rt.dns = dns
-    if (connect > 0) rt.connect = connect
-    if (ssl > 0) rt.ssl = ssl
-    if (ttfb > 0) rt.ttfb = ttfb
-    if (download > 0) rt.download = download
-    if (nav.transferSize > 0) rt.transfer_size = nav.transferSize
-    if (nav.encodedBodySize > 0) rt.encoded_body_size = nav.encodedBodySize
-    if (nav.decodedBodySize > 0) rt.decoded_body_size = nav.decodedBodySize
-    if (nav.nextHopProtocol) rt.protocol = nav.nextHopProtocol
+    const rt = timingPhases(nav)
     if (Object.keys(rt).length > 0) data.resource_timing = rt
 
     // Use the navigation start time so it sorts before other breadcrumbs
     addBreadcrumb({
-      timestamp: Math.round(nav.startTime + performance.timeOrigin),
+      timestamp: Math.round(nav.startTime + timeOrigin()),
       category: "network",
       message: `GET ${nav.name}`,
       data,
@@ -656,9 +641,19 @@ function initNavigation(): void {
 
 // --- Resource timing ---
 
-// Store recent resource timing entries keyed by URL for lookup
-const resourceTimings = new Map<string, { entry: PerformanceResourceTiming; addedAt: number }>();
+// Recent resource-timing entries awaiting correlation with a network
+// breadcrumb. A list (not a URL-keyed map) because several requests can share a
+// URL — common for POST APIs — and a map would let concurrent entries overwrite
+// each other, leaving all but one breadcrumb without timing.
+let resourceTimings: { entry: PerformanceResourceTiming; addedAt: number }[] = [];
 const TIMING_MAX_AGE_MS = 30_000;
+// Age alone doesn't bound this list: entries are only consumed by a matching
+// network breadcrumb, and plenty never get one — ingest/blocklisted URLs are
+// filtered out before recordNetworkBreadcrumb, and with `network: false` the
+// observer still runs (click-effect detection needs it) while nothing reads it.
+// A busy polling app would otherwise hold 30s of requests, so cap the list and
+// drop oldest-first.
+const TIMING_MAX_ENTRIES = 200;
 
 function initResourceTimingObserver(): void {
   if (typeof PerformanceObserver === "undefined") return;
@@ -668,34 +663,91 @@ function initResourceTimingObserver(): void {
       const now = Date.now();
       for (const entry of list.getEntries()) {
         const rt = entry as PerformanceResourceTiming;
-        // Mark as effect for click detection (fetch/xhr activity after click)
+        // Only fetch/xhr entries are ever looked up (from network breadcrumbs),
+        // so skip storing images/scripts/etc.
         if (rt.initiatorType === "xmlhttprequest" || rt.initiatorType === "fetch") {
-          lastEffectTime = Date.now();
+          // Mark as effect for click detection (fetch/xhr activity after click)
+          lastEffectTime = now;
+          resourceTimings.push({ entry: rt, addedAt: now });
         }
-        resourceTimings.set(rt.name, { entry: rt, addedAt: now });
       }
-      // Evict stale entries unconditionally
-      for (const [key, val] of resourceTimings) {
-        if (now - val.addedAt > TIMING_MAX_AGE_MS) resourceTimings.delete(key);
-      }
+      // Drop what aged out, then the oldest overflow — newest entries win both.
+      resourceTimings = resourceTimings
+        .filter((t) => now - t.addedAt <= TIMING_MAX_AGE_MS)
+        .slice(-TIMING_MAX_ENTRIES);
     });
-    observer.observe({ entryTypes: ["resource"] });
+    // `buffered: true` replays entries recorded before the observer registered,
+    // covering the gap between initNetworkHook (which starts producing network
+    // breadcrumbs) and this observer. Requests that finished before the hook was
+    // installed have no breadcrumb to attach to, so those replayed entries go
+    // unclaimed and age out — the cap above keeps that bounded. Requires the
+    // single-`type` form of observe().
+    observer.observe({ type: "resource", buffered: true });
     cleanups.push(() => observer.disconnect());
   } catch {
     // resource timing not supported
   }
 }
 
-function getResourceTiming(url: string): Record<string, unknown> | undefined {
-  // Try exact URL match first, then try resolved URL
-  const wrapped = resourceTimings.get(url)
-    ?? resourceTimings.get(new URL(url, location.origin).href);
-  if (!wrapped) return undefined;
-  const entry = wrapped.entry;
+// Find the resource-timing entry that best matches a request to `url` in the
+// [requestStart, requestEnd] epoch-ms window and consume it. Correlating by URL
+// alone is ambiguous when several requests hit the same endpoint, so the entry
+// whose start is closest to the request start wins and is removed, so a
+// concurrent same-URL request can't claim it too.
+function getResourceTiming(
+  url: string,
+  requestStart: number,
+  requestEnd: number,
+): Record<string, unknown> | undefined {
+  if (resourceTimings.length === 0) return undefined;
 
-  // Clean up after use
-  resourceTimings.delete(entry.name);
+  // PerformanceResourceTiming times are relative to timeOrigin; lift them to
+  // epoch ms to compare against the request's Date.now()-based window. One
+  // origin for the whole scan so candidates are compared on the same basis.
+  const origin = timeOrigin();
+  // Only parsed if some entry fails to match `url` verbatim — callers coming
+  // from fetch/Request already hand us an absolute URL.
+  let resolved: string | undefined;
 
+  let best: { entry: PerformanceResourceTiming; addedAt: number } | undefined;
+  let bestDistance = Infinity;
+  for (const candidate of resourceTimings) {
+    const { entry } = candidate;
+    if (entry.name !== url) {
+      resolved ??= new URL(url, location.origin).href;
+      if (entry.name !== resolved) continue;
+    }
+    const entryStart = origin + entry.startTime;
+    // Skip entries clearly outside the request window (1s slack for clock skew)
+    // so a stale same-URL entry isn't matched to an unrelated request.
+    if (origin + entry.responseEnd < requestStart - 1000) continue;
+    if (entryStart > requestEnd + 1000) continue;
+    const distance = Math.abs(entryStart - requestStart);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+
+  if (!best) return undefined;
+
+  resourceTimings.splice(resourceTimings.indexOf(best), 1);
+
+  // Cross-origin responses without a Timing-Allow-Origin header have their
+  // detailed timing zeroed for privacy. `responseStart === 0` signals that; skip
+  // rather than emit all-zero phases that would misleadingly read as "0ms".
+  if (best.entry.responseStart === 0) return undefined;
+
+  const timing = timingPhases(best.entry);
+  return Object.keys(timing).length > 0 ? timing : undefined;
+}
+
+// Phase/size breakdown shared by fetch/xhr resource entries and the
+// document-load navigation entry (PerformanceNavigationTiming extends
+// PerformanceResourceTiming), so both breadcrumb kinds emit one wire shape.
+// Zero-valued phases are omitted: a reused connection reports 0 for dns/connect,
+// and a consumer can't tell that apart from "not measured" anyway.
+function timingPhases(entry: PerformanceResourceTiming): Record<string, unknown> {
   const timing: Record<string, unknown> = {};
 
   const dns = entry.domainLookupEnd - entry.domainLookupStart;
@@ -716,7 +768,7 @@ function getResourceTiming(url: string): Record<string, unknown> | undefined {
   if (entry.decodedBodySize > 0) timing.decoded_body_size = entry.decodedBodySize;
   if (entry.nextHopProtocol) timing.protocol = entry.nextHopProtocol;
 
-  return Object.keys(timing).length > 0 ? timing : undefined;
+  return timing;
 }
 
 // --- Network tracking ---
@@ -765,10 +817,10 @@ async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
   // between fetch resolution and the timing entry's arrival serialises
   // without resource_timing — the case that matters most is a fetch right
   // before a pagehide, which is exactly when timing detail is wanted.
-  let rt = getResourceTiming(result.url);
+  let rt = getResourceTiming(result.url, result.startTime, result.endTime);
   if (!rt) {
     await new Promise((r) => setTimeout(r, 150));
-    rt = getResourceTiming(result.url);
+    rt = getResourceTiming(result.url, result.startTime, result.endTime);
   }
   if (rt) data.resource_timing = rt;
 
@@ -1048,7 +1100,7 @@ export function destroyBreadcrumbs(): void {
   }
   preNavListeners = [];
   postNavListeners = [];
-  resourceTimings.clear();
+  resourceTimings = [];
   recentClicks = [];
   sessionBuffer = new RingBuffer<Breadcrumb>(SESSION_BUFFER_CAPACITY);
   errorBuffer = new RingBuffer<Breadcrumb>(ERROR_BUFFER_CAPACITY);

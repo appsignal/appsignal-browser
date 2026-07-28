@@ -177,6 +177,25 @@ function formatUuid(bytes: Uint8Array): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Epoch ms corresponding to `performance.now() === 0`, for lifting
+ * performance-entry times (which are timeOrigin-relative) to wall-clock.
+ *
+ * `performance.timeOrigin` is Chrome 62+ / Safari 15+ — the same older-browser
+ * tail `uuidv4` above exists for leaves it undefined, and `undefined + t` is
+ * NaN, which propagates silently: NaN fails every comparison, so a caller
+ * filtering entries by a time window rejects all of them and reports no timing
+ * at all. Derive the offset from the two clocks instead when it's missing.
+ *
+ * Not cached — the derived value can drift sub-millisecond between calls as the
+ * wall clock is adjusted, which is irrelevant at our ms rounding and 1s match
+ * slack, and caching would freeze whichever value the first caller happened to
+ * compute. */
+export function timeOrigin(): number {
+  const origin = performance.timeOrigin;
+  if (typeof origin === "number" && !Number.isNaN(origin)) return origin;
+  return Date.now() - performance.now();
+}
+
 /** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
  * variant bits, then 74 random bits. Lex-sort of v7 strings matches
  * generation time, which lets the server order tabs / sessions

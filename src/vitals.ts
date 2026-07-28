@@ -1,5 +1,5 @@
 import type { EventVital } from "./types.js";
-import { scrubUrl } from "./utils.js";
+import { scrubUrl, timeOrigin } from "./utils.js";
 import { onFCP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
@@ -371,7 +371,7 @@ function resolvePageUrl(): string {
 }
 
 function toEpoch(entryTime: number): number {
-  return Math.round(performance.timeOrigin + entryTime);
+  return Math.round(timeOrigin() + entryTime);
 }
 
 /** Push a vital entry, replacing any existing entry with the same name and
