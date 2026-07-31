@@ -2,7 +2,7 @@ import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from ".
 import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
-import { initErrors, reportError, destroyErrors } from "./errors.js";
+import { initErrors, reportError, reportConsoleError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
@@ -174,6 +174,10 @@ function startCollection(endpoint: string): void {
     cfg.privacy.networkBlocklist,
     cfg.privacy.dom,
     clientConfig?.beforeBreadcrumb,
+    // Escalate console.error → reported error when errors.console is on.
+    // initErrors (below) runs synchronously next, so config is ready before
+    // any real console.error fires.
+    cfg.errors.console ? reportConsoleError : undefined,
   );
   initErrors(
     cfg.errors,

@@ -175,6 +175,231 @@ describe("SDK integration", () => {
     expect(body.error.message).toBe("manual error");
   });
 
+  const errorBodies = () =>
+    sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter(Boolean);
+
+  it("reports console.error(string) as an error by default (errors.console)", () => {
+    init({ key: "test-key" });
+
+    const msg = "console boom " + Math.random();
+    console.error(msg);
+
+    const hit = errorBodies().find((b) => b.error.message === msg);
+    expect(hit).toBeDefined();
+    expect(hit.error.name).toBe("console.error");
+  });
+
+  it("console.error(Error) reports the passed Error, not a synthesized one", () => {
+    init({ key: "test-key" });
+
+    console.error("context:", new Error("real console error"));
+
+    const hit = errorBodies().find((b) => b.error.message === "real console error");
+    expect(hit).toBeDefined();
+    expect(hit.error.name).toBe("Error");
+  });
+
+  it("errors.console:false keeps console.error a breadcrumb only, no report", () => {
+    init({ key: "test-key", errors: { console: false }, session: { enabled: true } });
+
+    const msg = "should not report " + Math.random();
+    console.error(msg);
+    flush();
+
+    expect(errorBodies()).toHaveLength(0);
+    // Still recorded as a console breadcrumb on the journey stream.
+    const crumbs = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events")
+      .flatMap((b) => b.breadcrumbs ?? []);
+    expect(crumbs.find((c) => c.category === "console" && c.message.includes("should not report"))).toBeDefined();
+  });
+
+  it("still reports a console error whose stack is SDK-rooted (leading SDK frames stripped)", () => {
+    // Without stripping, isOwnError would see "@appsignal/browser" in the stack
+    // and drop it — which would silently break the feature in the built bundle
+    // (tests otherwise never exercise this, since src paths lack the marker).
+    init({ key: "test-key" });
+
+    const err = new Error("sdk-stacked console error");
+    err.stack = [
+      "Error: sdk-stacked console error",
+      "    at consoleArgsToError (webpack://@appsignal/browser/dist/esm/index.js:800:10)",
+      "    at appCode (https://app.example.com/main.js:12:3)",
+    ].join("\n");
+    console.error(err);
+
+    expect(errorBodies().find((b) => b.error.message === "sdk-stacked console error")).toBeDefined();
+  });
+
+  it("escalating a console.error does not recurse into extra reports", () => {
+    init({ key: "test-key" });
+
+    const msg = "single report " + Math.random();
+    console.error(msg);
+
+    expect(errorBodies().filter((b) => b.error.message === msg)).toHaveLength(1);
+  });
+
+  it("beforeError returning null drops a console error", () => {
+    init({ key: "test-key", beforeError: (e) => /drop-me/.test(e.message) ? null : e });
+
+    console.error("drop-me " + Math.random());
+
+    expect(errorBodies().filter((b) => /drop-me/.test(b.error.message))).toHaveLength(0);
+  });
+
+  it("sampleRate:0 drops console errors too", () => {
+    init({ key: "test-key", errors: { sampleRate: 0 } });
+
+    console.error("sampled out " + Math.random());
+
+    expect(errorBodies()).toHaveLength(0);
+  });
+
+  it("the SDK's own beforeError-Promise diagnostic is not escalated into a report", () => {
+    // A non-console error whose beforeError returns a Promise makes handleError
+    // log via console.error. That internal log must not become an escalated
+    // console error. The hook deliberately PASSES console-sourced errors
+    // through (so they'd reach the wire if unguarded) and only drops the
+    // trigger — this way the test fails if the reentrancy guard is removed,
+    // rather than the diagnostic being silently dropped by the hook itself.
+    init({
+      key: "test-key",
+      beforeError: (e) => (e.context?.source === "console" ? e : (Promise.resolve(null) as never)),
+    });
+
+    captureError(new Error("triggers async-beforeError warning"));
+
+    expect(errorBodies().some((b) => /beforeError returned a Promise/.test(b.error.message))).toBe(false);
+  });
+
+  it("reports a synthesized console error with a Firefox-shaped stack (no header line)", () => {
+    // Firefox/Safari stacks have no "Error: msg" header — line 0 is the first
+    // frame (the SDK interceptor). Regression guard for stripLeadingSdkFrames:
+    // the leading SDK frame must still be stripped, or isOwnError drops the
+    // whole error and the feature silently no-ops on those engines.
+    init({ key: "test-key" });
+
+    const err = new Error("ff console error");
+    err.stack = [
+      "consoleArgsToError@webpack://@appsignal/browser/dist/esm/browser.esm.js:800:10",
+      "appCode@https://app.example.com/main.js:12:3",
+    ].join("\n");
+    console.error(err);
+
+    const hit = errorBodies().find((b) => b.error.message === "ff console error");
+    expect(hit).toBeDefined();
+    // The SDK interceptor frame must be stripped from the shipped stack, and it
+    // should root at the app frame — not just "reported vs dropped".
+    expect(hit.error.backtrace.join("\n")).not.toContain("@appsignal/browser");
+    expect(hit.error.backtrace[0]).toContain("app.example.com/main.js");
+  });
+
+  it("reports a console error whose message contains @host:port (no false stack-frame match)", () => {
+    // Regression: a header line like "Error: connect wss://user@host:443 failed"
+    // used to be misclassified as a frame. Console errors bypass isOwnError now,
+    // so this must report regardless.
+    init({ key: "test-key" });
+
+    console.error("connect wss://user@host:443 failed at 10:30");
+
+    expect(errorBodies().find((b) => /user@host:443/.test(b.error.message))).toBeDefined();
+  });
+
+  it("console.error with multiple Errors reports the first one", () => {
+    init({ key: "test-key" });
+
+    console.error(new Error("first err"), new Error("second err"));
+
+    const bodies = errorBodies();
+    expect(bodies.find((b) => b.error.message === "first err")).toBeDefined();
+    expect(bodies.find((b) => b.error.message === "second err")).toBeUndefined();
+  });
+
+  it("console.error() with no args and non-serializable args don't throw and still report", () => {
+    init({ key: "test-key" });
+
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => console.error()).not.toThrow();
+    expect(() => console.error("s", circular, 10n, () => {})).not.toThrow();
+
+    expect(errorBodies().length).toBeGreaterThan(0);
+  });
+
+  it("errors.console works when breadcrumbs.console is off (format-once branch)", () => {
+    init({ key: "test-key", breadcrumbs: { console: false }, session: { enabled: true } });
+
+    const msg = "no-crumb report " + Math.random();
+    console.error(msg);
+    flush();
+
+    // Reported as an error...
+    expect(errorBodies().find((b) => b.error.message === msg)).toBeDefined();
+    // ...but no console breadcrumb was recorded (breadcrumbs.console off).
+    const crumbs = sentPayloads
+      .filter((p) => p.url.includes("/ingest/browser") && !p.url.includes("/errors"))
+      .map((p) => { try { return JSON.parse(p.body); } catch { return null; } })
+      .filter((b) => b?.type === "events")
+      .flatMap((b) => b.breadcrumbs ?? []);
+    expect(crumbs.some((c) => c.category === "console")).toBe(false);
+  });
+
+  it("reports a console error whose surviving stack still contains an SDK frame (isOwnError bypass)", () => {
+    // Guards the load-bearing `fromConsole` bypass: this stack has an app frame
+    // FIRST, so stripLeadingSdkFrames removes nothing and the SDK marker
+    // survives — isOwnError would drop it if console errors didn't bypass it.
+    // Fails iff the `!fromConsole &&` bypass is removed.
+    init({ key: "test-key" });
+
+    const err = new Error("interleaved sdk frame");
+    err.stack = [
+      "Error: interleaved sdk frame",
+      "    at appCode (https://app.example.com/main.js:1:1)",
+      "    at hook (https://cdn.example.com/@appsignal/browser/browser.esm.js:2:2)",
+    ].join("\n");
+    console.error(err);
+
+    expect(errorBodies().find((b) => b.error.message === "interleaved sdk frame")).toBeDefined();
+  });
+
+  it("beforeError sees context.source==='console' for both string and Error console calls", () => {
+    // Locks the documented filter: context.source is the reliable discriminator
+    // for ALL console escalations, unlike error_class (which a passed Error keeps).
+    const sources: unknown[] = [];
+    init({ key: "test-key", beforeError: (e) => { sources.push(e.context?.source); return e; } });
+
+    console.error("string console");
+    console.error(new Error("error console"));
+
+    expect(sources.filter((s) => s === "console")).toHaveLength(2);
+  });
+
+  it("truncates a huge synthesized console message", () => {
+    init({ key: "test-key" });
+
+    console.error("x".repeat(10000));
+
+    const hit = errorBodies().find((b) => /^x+$/.test(b.error.message));
+    expect(hit).toBeDefined();
+    expect(hit.error.message.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("destroy() unpatches console.error so it no longer reports", () => {
+    init({ key: "test-key" });
+    destroy();
+    sentPayloads = [];
+
+    console.error("after destroy " + Math.random());
+
+    expect(errorBodies()).toHaveLength(0);
+  });
+
   it("endSession rotates session_id and clears user between flushes", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is

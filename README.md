@@ -79,6 +79,7 @@ interface BrowserConfig {
   errors?: {
     enabled?: boolean;             // default: true
     sampleRate?: number;           // 0..1, default: 1.0
+    console?: boolean;             // default: true — report console.error() as errors
   };
   breadcrumbs?: {
     network?: boolean;             // default: true — fetch/XHR breadcrumbs
@@ -317,7 +318,7 @@ Server-side the names become `browser_webvital_lcp` / `_cls` / `_inp` / `_fcp` /
 
 ### Error collection
 
-Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`. For each error:
+Instrument `window.onerror`, `window.addEventListener("unhandledrejection")`, and — when `errors.console` is on (default) — `console.error(...)`. For each error:
 
 1. Capture: message, filename, line, column, stack trace (as a string).
 2. Attach current breadcrumbs (snapshot of the ring buffer).
@@ -331,6 +332,22 @@ Stack traces are sent as raw strings. Source map processing is server-side (futu
 **Non-`Error` rejections.** A `Promise.reject` whose reason isn't an `Error` (e.g. `reject({ code: 500 })`) is JSON-stringified so the detail survives in `message`, falling back to `String()` for primitives and non-serialisable values (circular refs, `BigInt`). Without this, object reasons would collapse to `"[object Object]"`.
 
 **URL privacy.** The error payload's `environment.url` is scrubbed through `privacy.queryParamsAllowlist`, identically to every other captured URL — raw query params and OAuth fragments never ride along.
+
+**`console.error` capture.** With `errors.console` (default `true`), `console.error(...)` calls are reported as errors, not just breadcrumbs — **only `console.error`**, not `console.warn`/`console.info`. If an `Error` was passed (`console.error(err)` / `console.error("ctx", err)` — the first `Error` argument wins), its real stack is used; otherwise the formatted arguments become the message (truncated to 2000 chars) with `error_class` `"console.error"`. Console errors are reported regardless of stack shape — they bypass the SDK's self-error filter (`isOwnError`), with a reentrancy guard preventing feedback loops — and the SDK interceptor frames are stripped from the reported stack on a best-effort basis. These flow through the full pipeline — `sampleRate`, the global rate limit, `beforeError`, and dedup all apply — and re-entrancy is guarded so the SDK's own logging can't loop. The call still records a `console` breadcrumb regardless; set `errors.console: false` to keep it a breadcrumb only (independent of `breadcrumbs.console`).
+
+**Behaviour change & filtering.** Because this defaults **on**, framework/library `console.error` lint (React dev-mode key & prop-type warnings, deprecation notices, third-party SDK diagnostics) is reported as errors too — expect some on first upgrade. `beforeError` is where you filter it out, and — since the console message is app-controlled text that, unlike captured URLs, is **not** scrubbed through `privacy.queryParamsAllowlist` — it is also where you redact anything sensitive your app logs. Filter on `context.source === "console"`, which is set for **every** console-escalated error (both `console.error("string")` and `console.error(errorObject)`). Do **not** filter on `error_class === "console.error"`: that only holds for the string form — a passed Error keeps its own class (`TypeError`, …):
+
+```ts
+beforeError: (e) => {
+  if (e.context?.source === "console") {
+    if (/ResizeObserver|^Warning: |deprecated/.test(e.message)) return null; // drop lint
+    e.message = e.message.replace(/token=\w+/g, "token=[redacted]");         // redact
+  }
+  return e;
+}
+```
+
+**React `ErrorBoundary`.** React logs every render error it surfaces via `console.error`, so with `errors.console` on a boundary-caught error reaches the pipeline twice — via the boundary's `captureError` (rich, with `componentName`) and via console escalation, back-to-back with an identical fingerprint. The **consecutive-duplicate dedup** (see *Error deduplication* below) collapses that pair into a single report, so no `beforeError` filtering is needed for it. (If you ever want to tell them apart, the console-escalated copy carries `context.source === "console"`.)
 
 **Error grouping (`action`).** Errors group server-side by `action`, which is the `setRouteTemplate()` template (e.g. `/users/:id`) when set, otherwise the raw `location.pathname`. Declaring a template keeps ID-heavy routes from fragmenting into one error group per id — the same route key vitals attribution uses.
 
@@ -349,7 +366,9 @@ beforeError: (e) => {
 
 `beforeError` does *not* see `breadcrumbs` or `session` — those are attached after the hook approves. Redact breadcrumb-level data in `beforeBreadcrumb` instead (see *Breadcrumbs*), which has the side benefit of also redacting breadcrumbs that ride in periodic events flushes.
 
-**Error deduplication.** Within one session, if the same error (same message + same stack top frame) fires more than 5 times in 10 seconds, the 6th+ are silently dropped. First 5 are sent normally. Prevents error storms from overwhelming ingestion.
+**Error deduplication.** Two layers, both keyed on message + top stack frames:
+1. *Consecutive-duplicate drop* — the same error reported again within 1s with no different error in between is collapsed into a single report. This is what merges a React `ErrorBoundary` report with React's own `console.error` escalation for one render error (identical fingerprint, back-to-back).
+2. *Per-key rate cap* — identical errors that are *interleaved* with others are capped at 5 per key per 10 seconds; the 6th+ are dropped. Prevents error storms from overwhelming ingestion.
 
 **Global error rate limit.** Independent of per-error dedup, the module caps total error sends at 100 per 10-second window across all distinct errors. Once the cap is hit, further errors in that window are dropped until it rolls over. Backstops a page emitting many *different* errors (which dedup, keyed per message+frame, wouldn't catch).
 

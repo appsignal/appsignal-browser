@@ -51,6 +51,17 @@ let dedupeWindow: DedupeEntry[] = [];
 const DEDUPE_MAX_COUNT = 5;
 const DEDUPE_WINDOW_MS = 10_000;
 
+// Consecutive-duplicate drop (Sentry's dedupeIntegration model). Collapses the
+// same error reported back-to-back within this window into a single report —
+// most importantly a React render error captured by BOTH the ErrorBoundary
+// (captureError) and React's own console.error (escalated via errors.console),
+// which fire in the same commit with an identical fingerprint. Distinct from
+// the per-key rate cap below, which bounds identical errors that are
+// *interleaved* with others over the longer DEDUPE window.
+const CONSECUTIVE_DEDUPE_MS = 1_000;
+let lastSentKey = "";
+let lastSentAt = 0;
+
 // Global rate limit, independent of dedupe. Dedupe only caps *identical*
 // errors (5 per key); a loop emitting errors with ever-changing messages
 // (counters, ids, timestamps in the text) bypasses it entirely and would
@@ -58,6 +69,9 @@ const DEDUPE_WINDOW_MS = 10_000;
 // bound. The global cap bounds total errors entering the pipeline per window
 // regardless of key — 100 / 10s is far above any sane app's real error rate
 // but stops a runaway loop from making the SDK the source of the problem.
+// Console-escalated errors (errors.console) share this same budget, so a very
+// chatty console.error app could in theory starve genuine uncaught errors in
+// the same window; the cap is high enough that this is acceptable for v1.
 const RATE_LIMIT_MAX = 100;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 let rateWindowStart = 0;
@@ -131,6 +145,8 @@ export function destroyErrors(): void {
     rejectionHandler = null;
   }
   dedupeWindow = [];
+  lastSentKey = "";
+  lastSentAt = 0;
   rateWindowStart = 0;
   rateWindowCount = 0;
   lastErrorTimestamp = 0;
@@ -153,6 +169,61 @@ export function reportError(
   );
 }
 
+// Guards against the one feedback loop: handleError calls console.error when
+// beforeError returns a Promise (below). Without this, that call would be
+// escalated back into handleError, and so on. The SDK has no other
+// console.error call site, so this single flag closes the loop.
+let inConsoleReport = false;
+
+/** Escalate a `console.error(...)` call to a reported error, gated on
+ * `errors.console`. Wired from the breadcrumbs console interceptor via
+ * index.ts (breadcrumbs can't import errors — would be circular). */
+export function reportConsoleError(error: Error): void {
+  if (inConsoleReport) return;
+  if (!config?.console) return;
+  inConsoleReport = true;
+  try {
+    handleError(
+      error.message,
+      undefined,
+      undefined,
+      undefined,
+      // Best-effort cosmetic cleanup: drop the SDK interceptor frames so the
+      // reported stack roots at the caller. Not load-bearing — console errors
+      // bypass isOwnError (see handleError's `fromConsole`), so an imperfect
+      // strip only yields a slightly noisier stack, never a dropped error.
+      stripLeadingSdkFrames(error.stack),
+      { source: "console" },
+      error.name || "console.error",
+      true,
+    );
+  } finally {
+    inConsoleReport = false;
+  }
+}
+
+function stripLeadingSdkFrames(stack?: string): string | undefined {
+  if (!stack) return stack;
+  const lines = stack.split("\n");
+  // V8 prefixes the stack with an "Error: message" header line; Firefox and
+  // Safari do not — their line 0 is already the first frame. Preserve line 0
+  // only when it isn't itself a frame, otherwise the leading SDK frame is never
+  // stripped on non-V8 engines and isOwnError would drop the whole error.
+  const hasHeader = lines.length > 0 && !isStackFrame(lines[0]);
+  let i = hasHeader ? 1 : 0;
+  while (i < lines.length && SDK_MARKERS.some((m) => lines[i].includes(m))) i++;
+  return [...(hasHeader ? [lines[0]] : []), ...lines.slice(i)].join("\n");
+}
+
+// V8 frames read "    at fn (file:line:col)"; Firefox/Safari read
+// "fn@file:line:col". A header ("Error: msg") matches neither. The @-form is
+// anchored to a trailing :line:col so an "@host:port" inside a message isn't
+// mistaken for a frame. Only cosmetic now (strip is best-effort), but keeps
+// the reported stack clean for the common case.
+function isStackFrame(line: string): boolean {
+  return /^\s*at\s/.test(line) || /@.+:\d+:\d+$/.test(line.trimEnd());
+}
+
 function handleError(
   message: string,
   filename?: string,
@@ -161,11 +232,18 @@ function handleError(
   stack?: string,
   context?: Record<string, unknown>,
   errorClass?: string,
+  fromConsole = false,
 ): void {
   if (!config.enabled) return;
 
-  // Self-protection: ignore errors from our own SDK to prevent feedback loops
-  if (isOwnError(filename, stack)) return;
+  // Self-protection: ignore errors thrown from our own SDK to prevent feedback
+  // loops. Console-originated errors bypass this: a synthesized console error
+  // is SDK-rooted (created inside the interceptor) and its stack can't be
+  // parsed reliably cross-browser, so isOwnError would drop legitimate app
+  // console.errors. The `inConsoleReport` reentrancy guard is the loop
+  // protection for that path instead — the SDK's only console.error site (the
+  // beforeError-Promise diagnostic) is wrapped by it.
+  if (!fromConsole && isOwnError(filename, stack)) return;
 
   // Cross-origin script errors surface as an opaque "Script error." with no
   // stack and no usable location — the browser withholds the detail unless the
@@ -204,12 +282,22 @@ function handleError(
   // silent breakage. Detect it, drop the error, and log loudly so a host
   // developer can grep for the message.
   if (hookResult && typeof (hookResult as { then?: unknown }).then === "function") {
-    // eslint-disable-next-line no-console
-    console.error(
-      "[appsignal] beforeError returned a Promise. Async beforeError is " +
-      "not supported; the error was dropped. Move async work outside the " +
-      "hook (e.g. perform it before calling captureError).",
-    );
+    // Guard this log so errors.console doesn't escalate the SDK's own
+    // diagnostic into a captured error. Set the flag around the call regardless
+    // of entry path (an uncaught/rejection error can reach here with the flag
+    // still false); save/restore so a console-originated report stays guarded.
+    const prev = inConsoleReport;
+    inConsoleReport = true;
+    try {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[appsignal] beforeError returned a Promise. Async beforeError is " +
+        "not supported; the error was dropped. Move async work outside the " +
+        "hook (e.g. perform it before calling captureError).",
+      );
+    } finally {
+      inConsoleReport = prev;
+    }
     return;
   }
   if (!hookResult) return;
@@ -225,9 +313,17 @@ function handleError(
     message: effective.message.slice(0, 200),
   });
 
-  // Deduplication: first 5 occurrences sent, 6+ suppressed
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
+  // Consecutive-duplicate drop: the same error reported again within
+  // CONSECUTIVE_DEDUPE_MS with no different error in between is a duplicate of
+  // one incident (e.g. ErrorBoundary + React's console.error for one render
+  // error) — send it once.
+  if (dedupeKey === lastSentKey && now - lastSentAt < CONSECUTIVE_DEDUPE_MS) return;
+  // Per-key rate cap: identical errors interleaved with others — first 5 per
+  // key per window sent, 6+ suppressed.
   if (checkDedupe(dedupeKey, now)) return;
+  lastSentKey = dedupeKey;
+  lastSentAt = now;
 
   const payload: BrowserError = {
     type: "error",
