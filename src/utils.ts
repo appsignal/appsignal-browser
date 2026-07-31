@@ -117,9 +117,83 @@ export function seededRandom(seed: string): number {
 
 /** RFC 9562 §5.4 v4: 122 random bits. Use for IDs whose lex order must
  * NOT leak generation time — primarily `anonymous_id`, which persists in
- * localStorage and would otherwise expose first-visit timestamp. */
+ * localStorage and would otherwise expose first-visit timestamp.
+ *
+ * Built by hand from `crypto.getRandomValues` rather than
+ * `crypto.randomUUID`, which throws "crypto.randomUUID is not a function" in
+ * two situations we have to survive — note that `session.ts` calls this at
+ * module scope, so a throw takes down the whole SDK at import, not just the
+ * anonymous ID:
+ *
+ *   1. Any page served over plain http:// (bar localhost), on every browser:
+ *      randomUUID is secure-context-only. This is the common one.
+ *   2. Browsers older than Chrome 92 / Safari 15.4, where it doesn't exist.
+ *
+ * `getRandomValues` has neither restriction — no secure-context gate, and
+ * Chrome 11+. */
 export function uuidv4(): string {
-  return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // Bits 48..51: version 4 (0b0100).
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  // Bits 64..65: variant 10.
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return formatUuid(bytes);
+}
+
+/** Normalise anything that behaves like an Error into its reportable fields,
+ * or `undefined` if the value isn't error-shaped.
+ *
+ * `instanceof Error` is not sufficient: an error thrown in another realm (a
+ * same-origin iframe, a worker) has that realm's Error constructor, so the
+ * check fails — and because `message`/`stack` are non-enumerable,
+ * `JSON.stringify` of one yields `"{}"`. Duck-typing recovers those.
+ *
+ * A string `stack` is required for the duck-typed path, which is what
+ * distinguishes an error object from an ordinary data payload: rejecting with
+ * `{ code: 500, detail: "…" }` should still be JSON-stringified by the caller,
+ * not read as `name`/`message`. */
+export function errorLike(
+  value: unknown,
+): { name: string; message: string; stack?: string } | undefined {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: typeof value.stack === "string" ? value.stack : undefined,
+    };
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const { name, message, stack } = value as Record<string, unknown>;
+  if (typeof name !== "string" || typeof message !== "string") return undefined;
+  if (typeof stack !== "string") return undefined;
+  return { name, message, stack };
+}
+
+/** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
+ * can't drift in output shape. */
+function formatUuid(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Epoch ms corresponding to `performance.now() === 0`, for lifting
+ * performance-entry times (which are timeOrigin-relative) to wall-clock.
+ *
+ * `performance.timeOrigin` is Chrome 62+ / Safari 15+ — the same older-browser
+ * tail `uuidv4` above exists for leaves it undefined, and `undefined + t` is
+ * NaN, which propagates silently: NaN fails every comparison, so a caller
+ * filtering entries by a time window rejects all of them and reports no timing
+ * at all. Derive the offset from the two clocks instead when it's missing.
+ *
+ * Not cached — the derived value can drift sub-millisecond between calls as the
+ * wall clock is adjusted, which is irrelevant at our ms rounding and 1s match
+ * slack, and caching would freeze whichever value the first caller happened to
+ * compute. */
+export function timeOrigin(): number {
+  const origin = performance.timeOrigin;
+  if (typeof origin === "number" && !Number.isNaN(origin)) return origin;
+  return Date.now() - performance.now();
 }
 
 /** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
@@ -140,8 +214,7 @@ export function uuidv7(): string {
   bytes[5] = ts & 0xff;
   // Bits 48..51: version 7 (0b0111).
   bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  // Bits 64..65: variant 10 (RFC 4122).
+  // Bits 64..65: variant 10.
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return formatUuid(bytes);
 }

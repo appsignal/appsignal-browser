@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   initBreadcrumbs,
+  destroyBreadcrumbs,
+  onAfterNavigation,
   addBreadcrumb,
   addManualBreadcrumb,
   getSnapshot,
@@ -9,6 +11,7 @@ import {
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
+import { timeOrigin } from "./utils.js";
 import type { ResolvedConfig } from "./types.js";
 
 vi.mock("./errors.js", () => ({
@@ -622,6 +625,62 @@ describe("breadcrumbs", () => {
       expect(consoleBreadcrumbs[0].data?.level).toBe("error");
     });
 
+    it("surfaces an Error's message instead of serialising it to {}", () => {
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+      console.error(new TypeError("boom"));
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs[0].message).toBe("TypeError: boom");
+    });
+
+    it("surfaces the message of an error from another realm", () => {
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      // An iframe/worker error carries that realm's Error constructor, so
+      // `instanceof Error` is false. Non-enumerable fields, as on a real Error,
+      // are what make JSON.stringify collapse it to "{}".
+      const foreign = Object.create(null, {
+        name: { value: "TypeError" },
+        message: { value: "from another realm" },
+        stack: { value: "TypeError: from another realm\n    at <anonymous>" },
+      }) as object;
+      expect(foreign instanceof Error).toBe(false);
+      expect(JSON.stringify(foreign)).toBe("{}");
+
+      console.error(foreign);
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs[0].message).toBe("TypeError: from another realm");
+    });
+
+    it("keeps rendering a plain object with name and message as JSON", () => {
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, console: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      // No `stack`, so this is application data, not an error — it must not be
+      // flattened to "name: message".
+      console.error({ name: "checkout", message: "cart updated" });
+
+      const consoleBreadcrumbs = getSnapshot().filter(
+        (b) => b.category === "console",
+      );
+      expect(consoleBreadcrumbs[0].message).toBe(
+        '{"name":"checkout","message":"cart updated"}',
+      );
+    });
+
     it("truncates long console messages to 200 chars", () => {
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, console: true },
@@ -730,5 +789,207 @@ describe("breadcrumbs", () => {
       expect(close).toHaveLength(1);
       expect(close[0].message).toBe("Tab closed");
     });
+  });
+});
+
+describe("navigation hook composition", () => {
+  let native: History["pushState"];
+  let originalHref: string;
+
+  beforeEach(() => {
+    // Earlier suites leave our patch installed (module state outlives their
+    // describe), so tear it down here to get back to the native method.
+    destroyBreadcrumbs();
+    native = history.pushState;
+    originalHref = location.href;
+  });
+
+  afterEach(() => {
+    destroyBreadcrumbs();
+    history.pushState = native;
+    native.call(history, {}, "", originalHref);
+  });
+
+  it("composes with a pre-existing history.pushState patch instead of orphaning it", () => {
+    // Foreign patch (stands in for a router) installed before the SDK.
+    let foreignCalls = 0;
+    const foreign = function (this: History, ...args: Parameters<History["pushState"]>): void {
+      foreignCalls++;
+      native.apply(this, args);
+    } as History["pushState"];
+    history.pushState = foreign;
+
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
+    let sdkFired = 0;
+    onAfterNavigation(() => { sdkFired++; });
+
+    history.pushState({}, "", "/composed");
+
+    // Both ran — foreign patch composed, not bypassed.
+    expect(foreignCalls).toBe(1);
+    expect(sdkFired).toBe(1);
+
+    // Teardown restores the foreign patch, not native.
+    destroyBreadcrumbs();
+    expect(history.pushState).toBe(foreign);
+    foreignCalls = 0;
+    history.pushState({}, "", "/after-destroy");
+    expect(foreignCalls).toBe(1);
+  });
+
+  it("fires listeners once per navigation when reinit has to delegate through a foreign patch", () => {
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
+
+    // A router patches over our wrapper *after* the SDK installed (script order
+    // we don't control). Reinit can't unwrap this one — it isn't ours — so it
+    // must delegate through it, leaving our first wrapper in the chain.
+    let routerCalls = 0;
+    const ourFirstWrapper = history.pushState;
+    const router = function (this: History, ...args: Parameters<History["pushState"]>): void {
+      routerCalls++;
+      ourFirstWrapper.apply(this, args);
+    } as History["pushState"];
+    history.pushState = router;
+
+    // Reinit (init() called twice, or HMR). Clears listeners, so re-register.
+    initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
+    let sdkFired = 0;
+    onAfterNavigation(() => { sdkFired++; });
+
+    history.pushState({}, "", "/reinit-through-foreign");
+
+    // The stale wrapper is still in the chain and still passes the call through,
+    // but only the current generation dispatches — one breadcrumb, not two.
+    expect(routerCalls).toBe(1);
+    expect(sdkFired).toBe(1);
+  });
+});
+
+describe("network resource timing correlation", () => {
+  type PoCallback = (list: { getEntries: () => PerformanceResourceTiming[] }) => void;
+  let observers: { cb: PoCallback; args?: unknown }[];
+
+  // A resource entry for the shared URL. Phase fields are offsets from the
+  // entry's own startTime so ttfb comes out as `ttfb`; startTime itself is
+  // lifted from timeOrigin to "now" so it lands inside the request window.
+  // Uses the production helper, so entries stay valid in the test below that
+  // removes performance.timeOrigin.
+  const makeResourceEntry = (ttfb: number): PerformanceResourceTiming => {
+    const startTime = Date.now() - timeOrigin();
+    const requestStart = startTime + 3;
+    const responseStart = requestStart + ttfb;
+    return {
+      name: "http://example.com/api/timeseries",
+      initiatorType: "fetch",
+      startTime,
+      domainLookupStart: startTime,
+      domainLookupEnd: startTime + 1,
+      connectStart: startTime + 1,
+      connectEnd: startTime + 3,
+      secureConnectionStart: 0,
+      requestStart,
+      responseStart,
+      responseEnd: responseStart + 5,
+      transferSize: 1200,
+      encodedBodySize: 900,
+      decodedBodySize: 3000,
+      nextHopProtocol: "h2",
+    } as unknown as PerformanceResourceTiming;
+  };
+
+  const resourceObserver = () =>
+    observers.find((o) => (o.args as { type?: string })?.type === "resource");
+
+  beforeEach(() => {
+    observers = [];
+    class FakePerformanceObserver {
+      cb: PoCallback;
+      args?: unknown;
+      constructor(cb: PoCallback) {
+        this.cb = cb;
+        observers.push(this);
+      }
+      observe(args: unknown) {
+        this.args = args;
+      }
+      disconnect() {}
+    }
+    vi.stubGlobal("PerformanceObserver", FakePerformanceObserver);
+  });
+
+  afterEach(() => {
+    destroyBreadcrumbs();
+    destroyNetworkHook();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("observes resource timing with buffered:true to capture pre-init entries", () => {
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, network: true },
+      ["http://localhost/ingest/browser"],
+    );
+
+    // Without buffered:true, entries recorded before observe() are never
+    // delivered, so the earliest requests on the page get no resource_timing.
+    expect(resourceObserver()?.args).toEqual({ type: "resource", buffered: true });
+  });
+
+  it("matches concurrent same-URL requests to distinct resource entries", async () => {
+    window.fetch = async () =>
+      new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+
+    initNetworkHook();
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, network: true },
+      ["http://localhost/ingest/browser"],
+    );
+
+    const url = "http://example.com/api/timeseries";
+    await Promise.all([
+      window.fetch(url, { method: "POST" }),
+      window.fetch(url, { method: "POST" }),
+    ]);
+
+    // Deliver two timing entries for the same URL, as the PerformanceObserver
+    // would. A URL-keyed map would collapse these to one (delete-on-read), so
+    // only one breadcrumb would get timing; the list keeps both.
+    resourceObserver()!.cb({ getEntries: () => [makeResourceEntry(20), makeResourceEntry(40)] });
+
+    // Past the 150ms resource-timing retry in recordNetworkBreadcrumb.
+    await new Promise((r) => setTimeout(r, 250));
+
+    const network = getSnapshot().filter((b) => b.category === "network");
+    expect(network).toHaveLength(2);
+    const ttfbs = network
+      .map((b) => (b.data?.resource_timing as { ttfb?: number } | undefined)?.ttfb)
+      .sort((a, b) => (a ?? 0) - (b ?? 0));
+    expect(ttfbs).toEqual([20, 40]);
+  });
+
+  it("still correlates timing when performance.timeOrigin is unavailable", async () => {
+    // Chrome <62 / Safari <15 — the browser tail uuidv4's getRandomValues path
+    // exists for. Undefined here used to make every window comparison NaN, so
+    // no entry ever matched and resource_timing silently disappeared.
+    vi.spyOn(performance, "timeOrigin", "get").mockReturnValue(
+      undefined as unknown as number,
+    );
+
+    window.fetch = async () =>
+      new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+
+    initNetworkHook();
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, network: true },
+      ["http://localhost/ingest/browser"],
+    );
+
+    await window.fetch("http://example.com/api/timeseries", { method: "POST" });
+    resourceObserver()!.cb({ getEntries: () => [makeResourceEntry(20)] });
+    await new Promise((r) => setTimeout(r, 250));
+
+    const network = getSnapshot().filter((b) => b.category === "network");
+    expect(network).toHaveLength(1);
+    expect((network[0].data?.resource_timing as { ttfb?: number })?.ttfb).toBe(20);
   });
 });
