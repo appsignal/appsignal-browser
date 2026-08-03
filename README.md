@@ -1,6 +1,6 @@
 # @appsignal/browser
 
-Standalone JavaScript SDK that collects frontend errors, breadcrumbs, web vitals, and session data from customer web apps.
+Standalone JavaScript SDK that collects frontend errors, breadcrumbs, and web vitals from customer web apps.
 
 ## Goal
 
@@ -12,18 +12,23 @@ All collection behavior is set in `init()`; the SDK does not fetch any server-si
 
 ### Installation
 
-```html
-<!-- Script tag -->
-<script src="https://cdn.example.com/@appsignal/browser@1/dist/browser.umd.js"></script>
-<script>
-  AppsignalBrowser.init({ key: "your-public-ingestion-key" });
-</script>
+```sh
+npm install @appsignal/browser@beta
 ```
 
 ```js
 // ES module
 import { init } from "@appsignal/browser";
 init({ key: "your-public-ingestion-key" });
+```
+
+```html
+<!-- Script tag. Any npm CDN serves the UMD bundle; pin the exact version so a
+     release can't change the script under your users. -->
+<script src="https://cdn.jsdelivr.net/npm/@appsignal/browser@1.0.0-beta.1/dist/browser.umd.js"></script>
+<script>
+  AppsignalBrowser.init({ key: "your-public-ingestion-key" });
+</script>
 ```
 
 ### Configuration
