@@ -1,0 +1,4 @@
+---
+language: nodejs
+repo: "https://github.com/appsignal/appsignal-browser"
+npm_client: "npm"

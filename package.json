@@ -1,7 +1,14 @@
 {
   "name": "@appsignal/browser",
   "version": "0.1.0",
+  "description": "AppSignal for browsers: frontend error tracking, breadcrumbs and web vitals",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/appsignal/appsignal-browser.git"
+  },
   "type": "module",
+  "sideEffects": false,
   "main": "dist/browser.umd.js",
   "module": "dist/esm/index.js",
   "types": "dist/index.d.ts",
@@ -17,8 +24,8 @@
     }
   },
   "files": ["dist"],
-  "engines": {
-    "node": ">=22.0.0"
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc && node build.mjs",
@@ -27,10 +34,6 @@
     "test:watch": "vitest",
     "test:e2e": "bun run build && playwright test",
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@rrweb/record": "^2.0.0-alpha.18",
-    "web-vitals": "^5.3.0"
   },
   "peerDependencies": {
     "react": ">=16.8.0"
@@ -42,6 +45,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@rrweb/record": "^2.0.0-alpha.18",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -51,6 +55,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.2.4",
     "typescript": "~5.9.3",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "web-vitals": "^5.3.0"
   }
 }
