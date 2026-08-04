@@ -157,6 +157,8 @@ export function initBreadcrumbs(
   // module-level `config` and short-circuits when its category is off.
   initClicks();
   initNavigation();
+  // Navigation also counts as an effect
+  onAfterNavigation(() => { lastEffectTime = Date.now(); });
   if (document.readyState === "complete") {
     recordDocumentLoad();
   } else {
@@ -380,9 +382,6 @@ function stopEffectObservers(): void {
     effectMutationObserver = null;
   }
 }
-
-// Navigation also counts as an effect
-onAfterNavigation(() => { lastEffectTime = Date.now(); });
 
 // Narrowed to "dead_click" only. Rage is emitted immediately in initClicks —
 // routing it through here would silence it whenever a click causes any DOM
