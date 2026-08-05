@@ -47,7 +47,7 @@ export function safeUrl(url: string): URL | null {
  *  - otherwise → preserved verbatim
  *
  * This defends against OAuth implicit flow leaks while keeping hash-routed
- * apps (React Router HashRouter, etc.) usable without an extra knob. */
+ * apps (React Router HashRouter, etc.) usable without an extra option. */
 export function scrubUrl(url: string, allowlist: string[]): string {
   if (!url) return url;
   try {
@@ -149,10 +149,9 @@ export function uuidv4(): string {
  * check fails — and because `message`/`stack` are non-enumerable,
  * `JSON.stringify` of one yields `"{}"`. Duck-typing recovers those.
  *
- * A string `stack` is required for the duck-typed path, which is what
- * distinguishes an error object from an ordinary data payload: rejecting with
- * `{ code: 500, detail: "…" }` should still be JSON-stringified by the caller,
- * not read as `name`/`message`. */
+ * `name` + `message` is the signal, not `stack`: a data payload like
+ * `{ code: 500 }` has neither, and a `DOMException` carries no stack in
+ * WebKit. */
 export function errorLike(
   value: unknown,
 ): { name: string; message: string; stack?: string } | undefined {
@@ -166,8 +165,7 @@ export function errorLike(
   if (typeof value !== "object" || value === null) return undefined;
   const { name, message, stack } = value as Record<string, unknown>;
   if (typeof name !== "string" || typeof message !== "string") return undefined;
-  if (typeof stack !== "string") return undefined;
-  return { name, message, stack };
+  return { name, message, stack: typeof stack === "string" ? stack : undefined };
 }
 
 /** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators

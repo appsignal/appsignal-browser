@@ -118,7 +118,7 @@ Stack traces are sent as raw strings.
 
 **Cross-origin scripts.** When a script from another origin throws, the browser collapses it to an opaque `"Script error."` with no stack and no location, unless that script is served with `crossorigin="anonymous"` **and** an `Access-Control-Allow-Origin` header. The SDK drops these opaque, unsymbolicatable `"Script error."` entries rather than fill the stream with indistinguishable noise. To capture real errors from third-party/CDN-hosted scripts, add `crossorigin="anonymous"` to those `<script>` tags and ensure the host serves the matching CORS header.
 
-**Non-`Error` rejections.** A `Promise.reject` whose reason isn't an `Error` (e.g. `reject({ code: 500 })`) is JSON-stringified so the detail survives in `message`, falling back to `String()` for primitives and non-serialisable values (circular refs, `BigInt`). Without this, object reasons would collapse to `"[object Object]"`.
+**Non-`Error` rejections.** A rejection carrying anything error-shaped — a `name` and `message`, stack or not — keeps both, so a `DOMException` from an aborted fetch reports as `AbortError` rather than losing its identity. Everything else is JSON-stringified so the detail survives in `message` (`reject({ code: 500 })` stays readable), falling back to the value's own string form and then its class name. Primitives use `String()`.
 
 **URL privacy.** The error payload's `environment.url` is scrubbed through `privacy.queryParamsAllowlist`, identically to every other captured URL — raw query params and OAuth fragments never ride along.
 

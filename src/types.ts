@@ -1,12 +1,12 @@
-/** Client-side configuration. All knobs live here — there is no server-side
- * config fetch. Every group is optional; only `key` is required. */
+/** Client-side configuration. Every group is optional; only `key` is
+ * required. */
 export interface BrowserConfig {
   key: string;
   endpoint?: string;
   /** Master switch. Defaults to active. Set `false` to make `init()` a complete
    * no-op — nothing is patched (fetch/XHR), no timers start, and no network
-   * request ever fires. Every public method (`setUser`, `addBreadcrumb`,
-   * `reportError`, …) already no-ops while the SDK is inactive, so app code can
+   * request ever fires. Every public method (`addBreadcrumb`, `captureError`,
+   * …) already no-ops while the SDK is inactive, so app code can
    * call them unconditionally. Gate this on your build environment to keep
    * dev/test/CI from sending data, e.g. `active: import.meta.env.PROD` or
    * `active: process.env.NODE_ENV === "production"`. */
@@ -35,9 +35,9 @@ export interface BrowserConfig {
   errors?: ErrorsConfig;
   breadcrumbs?: BreadcrumbsConfig;
   session?: SessionConfig;
-  /** Cross-cutting privacy controls. Each knob lists the subsystems that
+  /** Cross-cutting privacy controls. Each option lists the subsystems that
    * consume it; if no subsystem applies (e.g. error messages, console args)
-   * the knob has no effect there. */
+   * the option has no effect there. */
   privacy?: PrivacyConfig;
 }
 
