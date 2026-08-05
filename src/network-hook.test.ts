@@ -5,7 +5,6 @@ import {
   onBeforeRequest,
   onAfterRequest,
 } from "./network-hook.js";
-import { initTracing, consumeTraceId, destroyTracing } from "./tracing.js";
 
 // Capture what origFetch actually receives so we can assert on the headers
 // the wrapper forwards. The real network never runs.
