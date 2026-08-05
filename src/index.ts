@@ -1,12 +1,12 @@
 import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
-import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initSession, getSessionContext, getTags, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
-import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
+import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate, getRouteAction } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
-import { initTracing, destroyTracing } from "./tracing.js";
+import { initTracing, destroyTracing, getTraceContext, markTracingNavigation } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 
@@ -180,10 +180,15 @@ function startCollection(endpoint: string): void {
     cfg.privacy.queryParamsAllowlist,
     clientConfig?.appVersion,
     clientConfig?.beforeError,
+    clientConfig?.serviceName,
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
-    initTracing(clientConfig.tracePropagationTargets);
+    initTracing(
+      clientConfig.tracePropagationTargets,
+      clientConfig.appVersion,
+      clientConfig.serviceName,
+    );
   }
 
   initVitals(cfg.privacy.queryParamsAllowlist);
@@ -233,6 +238,10 @@ function startCollection(endpoint: string): void {
     lastRouteKey = key;
     flushEvents();
     markVitalsNavigation();
+    // After the flush, so the outgoing navigation's events payload still closes
+    // the page load span it declared. The next navigation then starts a fresh
+    // trace instead of extending this one forever.
+    markTracingNavigation();
   };
   onAfterNavigation(onNavigation);
   // hashchange covers hash-router SPAs, which change the route without
@@ -288,7 +297,32 @@ function flushEvents({
   if (includeVitals) finalizeRouteVitals();
   const vitals = includeVitals ? drainVitals() : [];
 
-  if (breadcrumbs.length === 0 && vitals.length === 0) return;
+  // Close the page load span this navigation declared, if it declared one.
+  // Repeats the action and start time the declaring post already sent — the
+  // freeze guarantees they agree — so a lost `page_load` post still leaves a
+  // span with a real action rather than none at all.
+  //
+  // Tags are read fresh rather than repeated, because the host can call
+  // setTags after the declaring post has gone. This is the only delivery that
+  // can carry those later tags, and the server unions tags across the span's
+  // rows, so both the earlier and the later ones survive.
+  const trace = getTraceContext();
+  const pageLoad = trace
+    ? {
+        ...trace,
+        action: getRouteAction(),
+        service_name: clientConfig?.serviceName,
+        end_time: Date.now(),
+        tags: getTags(),
+      }
+    : undefined;
+
+  // A pending closing object is reason enough to send this post on its own:
+  // without it, a navigation with no vitals and no breadcrumbs (breadcrumbs
+  // ship only with session streaming, off by default) would send no closing
+  // post at all, and its end time — which the library does know — would be
+  // lost.
+  if (breadcrumbs.length === 0 && vitals.length === 0 && !pageLoad) return;
 
   const payload: EventPayload = {
     type: "events",
@@ -297,6 +331,7 @@ function flushEvents({
     vitals,
     app_version: clientConfig?.appVersion,
   };
+  if (pageLoad) payload.page_load = pageLoad;
   if (beacon) {
     sendBeaconEvents(payload);
   } else {

@@ -9,7 +9,8 @@ import type {
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
+import { getRouteAction } from "./vitals.js";
+import { getTraceContext } from "./tracing.js";
 import { scrubUrl, errorLike } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
@@ -28,6 +29,7 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
+let serviceName: string | undefined;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 // Query-param allowlist for scrubbing URLs that ride the error payload. The
 // errors module captures `location.href` for `environment.url`; without this it
@@ -80,12 +82,14 @@ export function initErrors(
   queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
+  service?: string,
 ): void {
   destroyErrors();
 
   config = resolved;
   allowlist = queryParamsAllowlist;
   appVersion = version;
+  serviceName = service;
   beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
@@ -264,7 +268,18 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // Group by the host's route template (e.g. "/users/:id") when set via
     // setRouteTemplate, so ID-heavy routes don't fragment into one error group
     // per id. Falls back to the raw pathname when no template is declared.
-    action: getRouteTemplate() || location.pathname,
+    // Reading it here freezes it for the rest of the navigation, so the page
+    // load span this error belongs to reports the same action.
+    action: getRouteAction(),
+    // The page load's propagated IDs and start time, when it propagated any.
+    // They put this error on the same span the backend spans hang off, and
+    // state the span's real start rather than the error's own moment, instead
+    // of a span of its own that nothing refers to.
+    ...getTraceContext(),
+    // Overrides the server's "browser" default. Undefined unless the host set
+    // BrowserConfig.serviceName, in which case every payload describing this
+    // span sends the same value.
+    service_name: serviceName,
     revision: error.app_version,
     error: {
       name: error.error_class || "Error",

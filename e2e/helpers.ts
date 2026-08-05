@@ -82,6 +82,26 @@ export function ingestEvents(items: Captured[]): Array<Record<string, unknown>> 
   return jsonBodiesAtPath(items, "/ingest/browser").filter((b) => b.type === "events");
 }
 
+/** The `page_load` posts that declare a navigation's page load span. They share
+ * the /ingest/browser path with events, so filter on the body discriminator. */
+export function ingestPageLoads(items: Captured[]): Array<Record<string, unknown>> {
+  return jsonBodiesAtPath(items, "/ingest/browser").filter((b) => b.type === "page_load");
+}
+
+/** The traceparent headers the test API endpoint actually received, oldest
+ * first. Split each into its trace and span segments. */
+export function receivedTraceparents(
+  items: Captured[],
+): Array<{ traceparent: string; trace_id: string; span_id: string }> {
+  return items
+    .filter((i): i is CapturedApi => i.kind === "api" && !!i.headers.traceparent)
+    .map((i) => {
+      const traceparent = i.headers.traceparent as string;
+      const [, trace_id, span_id] = traceparent.split("-");
+      return { traceparent, trace_id, span_id };
+    });
+}
+
 /** Kept for the skipped replay/error-replay specs. */
 export function ingestReplays(items: Captured[]): Array<Record<string, unknown>> {
   return jsonBodiesAtPath(items, "/ingest/browser").filter((b) => b.type === "replay");

@@ -1,4 +1,4 @@
-import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
+import type { EventPayload, FrontendTransaction, PageLoadPayload, ReplayChunk } from "./types.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -94,6 +94,12 @@ export function sendError(payload: FrontendTransaction): void {
 }
 
 export function sendEvents(payload: EventPayload): void {
+  send(JSON.stringify(payload), "events");
+}
+
+/** Declare a navigation's page load span. Rides the same `/ingest/browser`
+ * channel as the events payload, distinguished by its `type`. */
+export function sendPageLoad(payload: PageLoadPayload): void {
   send(JSON.stringify(payload), "events");
 }
 

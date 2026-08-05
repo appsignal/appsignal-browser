@@ -19,7 +19,7 @@ vi.mock("./errors.js", () => ({
 }));
 
 vi.mock("./tracing.js", () => ({
-  consumeTraceId: vi.fn(() => undefined),
+  traceIdForUrl: vi.fn(() => undefined),
 }));
 
 const defaultBreadcrumbConfig: ResolvedConfig["breadcrumbs"] = {

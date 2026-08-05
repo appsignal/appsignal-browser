@@ -19,12 +19,28 @@ vi.mock("./breadcrumbs.js", () => ({
   getErrorBreadcrumbs: vi.fn(() => []),
 }));
 
-// getRouteTemplate is the only thing errors.ts pulls from vitals; mock it so
-// the route-template grouping is controllable per test without driving the
-// real vitals observers.
+// getRouteAction is the only thing errors.ts pulls from vitals; mock it so the
+// route-template grouping is controllable per test without driving the real
+// vitals observers. The real one also freezes the value for the rest of the
+// navigation, which is behaviour of the route state rather than of errors.ts —
+// error-action.test.ts covers that against the real module. What matters here is
+// that the value is still `template || pathname`, which is what the grouping
+// tests below assert.
 const vitalsMock = vi.hoisted(() => ({ routeTemplate: "" }));
 vi.mock("./vitals.js", () => ({
-  getRouteTemplate: () => vitalsMock.routeTemplate,
+  getRouteAction: () => vitalsMock.routeTemplate || location.pathname,
+}));
+
+// The trace identity this page load propagated. undefined is the normal case:
+// it means the page load propagated no traceparent, so there is no span for the
+// error to join.
+const traceMock = vi.hoisted(() => ({
+  context: undefined as
+    | { trace_id: string; span_id: string; start_time: number }
+    | undefined,
+}));
+vi.mock("./tracing.js", () => ({
+  getTraceContext: () => traceMock.context,
 }));
 
 vi.mock("./session.js", () => ({
@@ -82,6 +98,7 @@ describe("errors", () => {
     getErrorBreadcrumbsMock.mockReturnValue([]);
     getTagsMock.mockReturnValue({});
     vitalsMock.routeTemplate = "";
+    traceMock.context = undefined;
     Object.defineProperty(window, "location", { value: originalLocation, configurable: true });
   });
 
@@ -493,6 +510,59 @@ describe("errors", () => {
 
       const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
       expect(payload.action).toBe("/users/12345");
+    });
+  });
+
+  describe("propagated trace identity", () => {
+    it("sends the page load's trace id, span id and start time when it propagated any", () => {
+      // The IDs go out exactly as they appear in the traceparent header, in
+      // lowercase hex, because the server stores them without normalising them.
+      // The error span then joins the trace the backend spans are already in.
+      // start_time states the navigation's real start rather than the error's
+      // own moment, so the row's interval genuinely belongs to the span.
+      traceMock.context = {
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id: "00f067aa0ba902b7",
+        start_time: 1_700_000_000_000,
+      };
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.trace_id).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+      expect(payload.span_id).toBe("00f067aa0ba902b7");
+      expect(payload.start_time).toBe(1_700_000_000_000);
+    });
+
+    it("omits the IDs and start time when the page load propagated nothing", () => {
+      // The server generates its own IDs then, exactly as it did before the
+      // library sent any. Sending empty strings instead would be worse: the
+      // server treats an empty ID as absent anyway, so it would just be noise.
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect("trace_id" in payload).toBe(false);
+      expect("span_id" in payload).toBe(false);
+      expect("start_time" in payload).toBe(false);
+    });
+  });
+
+  describe("service_name override", () => {
+    it("sends the host's configured service_name on the payload", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, undefined, "checkout");
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.service_name).toBe("checkout");
+    });
+
+    it("omits service_name when the host set none", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.service_name).toBeUndefined();
     });
   });
 

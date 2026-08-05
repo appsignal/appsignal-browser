@@ -40,6 +40,21 @@ let currentRouteTemplate = "";
 // incoming URL.
 let routePageUrl = "";
 
+// The action for the currently active route — the value AppSignal groups
+// incidents and traces by. Captured when the route begins, upgraded to the
+// host's template when it declares one, and frozen the first time something
+// sends it.
+//
+// Both halves of that are needed. It is captured per route because the route
+// boundary runs after `location` has advanced to the incoming route, so reading
+// `location.pathname` at send time would name the route being navigated *to*.
+// It freezes because several payloads describe one page load — the page load
+// span and any errors — and the server folds them into one span only if they
+// agree on the action. The first sender therefore decides, and every later one
+// reuses its string verbatim.
+let routeAction = "";
+let routeActionFrozen = false;
+
 // Route the load metrics (LCP/FCP/TTFB) are attributed to. Frozen the first
 // time pending load metrics are flushed at a boundary — by which point the host
 // has had a chance to set the landing route's template (its router effect runs
@@ -310,6 +325,10 @@ function resetRouteVitals(): void {
   // Capture the route's page_url now (route start), so a flush after the URL
   // later advances still attributes this route's metrics to this route.
   routePageUrl = resolvePageUrl();
+  // Same reasoning for the action, and a new route starts unfrozen because
+  // nothing has sent its action yet.
+  routeAction = resolveRouteAction();
+  routeActionFrozen = false;
 }
 
 /** Set the route template the host app considers current — e.g. `/users/:id`
@@ -340,6 +359,21 @@ export function setRouteTemplate(template: string | null): void {
   // Refresh the active route's page_url so metrics accruing on this route (and
   // the load metrics, if not yet flushed) pick up the template.
   routePageUrl = resolvePageUrl();
+  // Upgrade the route's action to the template, unless something already sent
+  // the old value. Once sent it cannot change, or two payloads describing one
+  // page load would disagree.
+  if (!routeActionFrozen) routeAction = resolveRouteAction();
+}
+
+/** The action for the current route, frozen from this call onwards. Only
+ * payloads that actually carry the action to the server may call this: an
+ * error, and the post that declares the page load span.
+ *
+ * Mid-route this returns what `getRouteTemplate() || location.pathname` would,
+ * which is what keeps error grouping the same as before the freeze existed. */
+export function getRouteAction(): string {
+  routeActionFrozen = true;
+  return routeAction;
 }
 
 export function drainVitals(): EventVital[] {
@@ -368,6 +402,12 @@ export function destroyVitals(): void {
 function resolvePageUrl(): string {
   if (currentRouteTemplate) return currentRouteTemplate;
   return scrubUrl(location.href, allowlist);
+}
+
+// The action uses the bare pathname rather than the scrubbed href, because it is
+// a grouping key: a query string would fragment one route into many incidents.
+function resolveRouteAction(): string {
+  return currentRouteTemplate || location.pathname;
 }
 
 function toEpoch(entryTime: number): number {

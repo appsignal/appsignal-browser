@@ -55,18 +55,36 @@ describe("error action across one navigation", () => {
     vi.restoreAllMocks();
   });
 
-  it("reports different actions for errors either side of setRouteTemplate", () => {
-    // Current behaviour: each error reads the route state at its own moment.
-    // The first error lands before the host's router effect has run, so it
-    // reports the raw pathname, and the second reports the template. Two
-    // errors on one page view therefore group as two incidents.
+  it("freezes the action, so errors either side of setRouteTemplate agree", () => {
+    // This is the one intended behaviour change in the page load span work, and
+    // it is deliberate. The first error freezes the action, so the second
+    // reports the same string even though the host declared a template in
+    // between. Before the freeze the two reported different actions and grouped
+    // as two incidents; now they group as one.
+    //
+    // Two errors on one page view should group together, so this is the better
+    // grouping. It does mean an app that throws before its router effect runs
+    // will see two of its existing incidents merge into one.
     sdk.init({ key: "k" });
 
     sdk.captureError(new Error("thrown before the router effect"));
     sdk.setRouteTemplate("/users/:id");
     sdk.captureError(new Error("thrown after the router effect"));
 
-    expect(errorActions()).toEqual(["/users/12345", "/users/:id"]);
+    expect(errorActions()).toEqual(["/users/12345", "/users/12345"]);
+  });
+
+  it("starts a fresh action on the next navigation", () => {
+    // The freeze lasts one navigation. Without the reset, every route after the
+    // first would report the landing route's action.
+    sdk.init({ key: "k" });
+    sdk.captureError(new Error("on the landing route"));
+
+    history.pushState({}, "", "/invoices/7");
+    sdk.setRouteTemplate("/invoices/:id");
+    sdk.captureError(new Error("on the second route"));
+
+    expect(errorActions()).toEqual(["/users/12345", "/invoices/:id"]);
   });
 
   it("reports the template for both errors when the host set it first", () => {

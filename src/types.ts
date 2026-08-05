@@ -31,6 +31,14 @@ export interface BrowserConfig {
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to inject trace context headers into. Glob syntax. */
   tracePropagationTargets?: string[];
+  /** Overrides the service name the server records for the page load span.
+   * Unset by default, in which case the server defaults it to `"browser"`.
+   * Sent on every payload that can describe the span — the `page_load` post,
+   * the closing object on the events payload, and error payloads — so the
+   * rows always agree on it. Setting it only for some of those payloads is
+   * not supported: the server would then have rows disagreeing about the
+   * span's identity. */
+  serviceName?: string;
 
   errors?: ErrorsConfig;
   breadcrumbs?: BreadcrumbsConfig;
@@ -243,8 +251,28 @@ export interface FrontendTransaction {
   /** Unix seconds (not milliseconds). */
   timestamp: number;
   namespace: "browser";
-  /** Route template if known, else `location.pathname`. */
+  /** The current navigation's action, frozen at first use. See
+   * `getRouteAction` in vitals.ts. */
   action: string;
+  /** The trace this page load propagated in its `traceparent` headers, so the
+   * error span joins the trace the backend spans are already in. Absent when
+   * the page load propagated nothing, in which case the server generates one.
+   * Both IDs are lowercase hex exactly as they appear in the header. */
+  trace_id?: string;
+  /** The page load span this error belongs to. Absent under the same condition
+   * as `trace_id`. */
+  span_id?: string;
+  /** The navigation's start, epoch ms. Absent under the same condition as
+   * `trace_id`. The server used to store the moment the error happened as the
+   * span's bounds, which can be long after the page load; sending the real
+   * start here lets the error row state an interval that actually belongs to
+   * the span, so a union of rows' intervals is correct with no special case
+   * for error rows. `timestamp` above still means the error's own time — this
+   * is a separate field. */
+  start_time?: number;
+  /** Overrides the server's `"browser"` default for the span's service name.
+   * See `BrowserConfig.serviceName`. */
+  service_name?: string;
   /** Maps to `BrowserConfig.appVersion`. */
   revision?: string;
   error: {
@@ -300,12 +328,80 @@ export interface EventVital {
   timestamp: number;
 }
 
+/** The identity of one navigation's page load span. Every payload that
+ * describes that span carries this triple — frozen once per navigation, so it
+ * cannot disagree between posts — and the server folds the rows that share it
+ * into a single span. */
+export interface TraceContext {
+  trace_id: string;
+  span_id: string;
+  /** Navigation start, epoch ms. The server clamps it against the time it
+   * received the post. */
+  start_time: number;
+}
+
+/** Wire shape POSTed to `/ingest/browser` on the first request of a navigation
+ * that propagates a `traceparent`. It declares the page load span, so the
+ * backend spans created from that header have a parent that exists. Sent on its
+ * own rather than inside an `events` payload, because the events payload only
+ * leaves at route and page boundaries — far too late for a span that is being
+ * referred to now. */
+export interface PageLoadPayload extends TraceContext {
+  type: "page_load";
+  /** The navigation's frozen action. This is the only payload that sets the
+   * action on the page load span. */
+  action: string;
+  /** Maps to `BrowserConfig.appVersion`. Sent here too, alongside the events
+   * payload, so a page load whose closing post never arrives still has a
+   * revision to be found by. */
+  app_version?: string;
+  /** Overrides the server's `"browser"` default for the span's service name.
+   * See `BrowserConfig.serviceName`. */
+  service_name?: string;
+  /** The host's error tags, from `setTags`. Previously these rode on error
+   * payloads only, so a page load had tags if and only if something threw.
+   * Sending them here too means every page load carries them regardless. */
+  tags: ErrorTags;
+}
+
+/** Closes the page load span declared by a `PageLoadPayload`, riding along on
+ * the `events` payload at a route or page boundary. Repeats the action and
+ * start time the declaring post already sent, alongside its own end time.
+ * Those two used to be left off deliberately, on the theory that only one
+ * payload should ever set them. But the freeze already guarantees every
+ * payload for one navigation agrees on them, so leaving them off just meant a
+ * page load with no closing-post-only fallback: a lost `page_load` post left
+ * a span with an end time and no action, which is excluded from the trace
+ * locator and never matches a trace list filter. */
+export interface EventsPageLoad extends TraceContext {
+  action: string;
+  /** Overrides the server's `"browser"` default for the span's service name.
+   * See `BrowserConfig.serviceName`. */
+  service_name?: string;
+  /** Navigation end, epoch ms. Repeated posts for one navigation are fine: the
+   * server keeps the latest. */
+  end_time: number;
+  /** Host tags as they stand at the boundary, from `setTags`.
+   *
+   * Repeated from the `page_load` post rather than assumed to have arrived with
+   * it, for two reasons. A lost `page_load` post would otherwise leave a span
+   * with no tags at all. And the host can call `setTags` after the page load
+   * post has gone, so this is the only delivery that can carry those later
+   * tags. The server unions the tags across every row for the span, so nothing
+   * set at any point in the navigation is dropped. */
+  tags: ErrorTags;
+}
+
 export interface EventPayload {
   type: "events";
   session: SessionContext;
   breadcrumbs: Breadcrumb[];
   vitals: EventVital[];
   app_version?: string;
+  /** Present when this navigation declared a page load span. Absent when
+   * `tracePropagationTargets` is not configured, or when the navigation
+   * propagated no `traceparent`, because then there is no span to close. */
+  page_load?: EventsPageLoad;
 }
 
 export interface ReplayChunk {

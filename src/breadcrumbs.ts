@@ -2,7 +2,7 @@ import type { Breadcrumb, ResolvedConfig } from "./types.js";
 import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
-import { consumeTraceId } from "./tracing.js";
+import { traceIdForUrl } from "./tracing.js";
 import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
@@ -806,7 +806,7 @@ async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
     duration: result.endTime - result.startTime,
   };
 
-  const traceId = consumeTraceId(result.url);
+  const traceId = traceIdForUrl(result.url);
   if (traceId) data.trace_id = traceId;
 
   // Resource timing — the PerformanceObserver may not have flushed yet, so
