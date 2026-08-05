@@ -22,6 +22,52 @@ describe("tracing", () => {
       window.fetch = originalFetch;
     });
 
+    it("generates a fresh trace_id and span_id for every propagated request", async () => {
+      // Current behaviour: each outgoing request gets its own identity, so two
+      // requests from the same page load belong to two separate traces and the
+      // span each one points at is never the same.
+      const sentHeaders: Headers[] = [];
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentHeaders.push(new Headers(init?.headers));
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/one");
+      await window.fetch("http://localhost/api/two");
+
+      const [, traceOne, spanOne] = sentHeaders[0].get("traceparent")!.split("-");
+      const [, traceTwo, spanTwo] = sentHeaders[1].get("traceparent")!.split("-");
+
+      expect(traceOne).not.toBe(traceTwo);
+      expect(spanOne).not.toBe(spanTwo);
+    });
+
+    it("initTracing with no targets registers no request listener", async () => {
+      // The early return has to leave the network hook untouched. When no
+      // before-request listener runs, the hook passes the caller's `init`
+      // object straight through instead of rebuilding it with fresh headers,
+      // so object identity is what proves nothing was registered.
+      let receivedInit: RequestInit | undefined;
+      let capturedHeaders: Headers | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        receivedInit = init;
+        capturedHeaders = new Headers(init?.headers);
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing([]);
+
+      const callerInit: RequestInit = { method: "POST" };
+      await window.fetch("http://localhost/api/test", callerInit);
+
+      expect(receivedInit).toBe(callerInit);
+      expect(capturedHeaders?.get("traceparent")).toBeNull();
+    });
+
     it("injects traceparent header for matching URLs", async () => {
       let capturedHeaders: Headers | undefined;
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
