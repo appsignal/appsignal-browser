@@ -338,13 +338,29 @@ function isOwnError(filename?: string, stack?: string): boolean {
 // making every distinct object rejection dedupe to the same key. JSON-stringify
 // objects so the payload survives; fall back to String() for primitives and for
 // values JSON can't handle (circular refs, BigInt).
+//
+// "{}" names nothing, so every object rejection would share one dedupe key —
+// fall back to the value's own string form, then its class name.
 function stringifyReason(reason: unknown): string {
   if (reason === null || typeof reason !== "object") return String(reason);
+
+  let json: string | undefined;
   try {
-    return JSON.stringify(reason);
+    json = JSON.stringify(reason);
+    if (json && json !== "{}") return json;
   } catch {
-    return String(reason);
+    // Circular refs, BigInt.
   }
+
+  try {
+    const text = String(reason);
+    if (!text.startsWith("[object ")) return text;
+  } catch {
+    // A null-prototype object has no toString to call.
+  }
+
+  const className = reason.constructor?.name;
+  return className && className !== "Object" ? className : (json ?? "[object Object]");
 }
 
 function dedupeKeyFor(message: string, stack?: string): string {

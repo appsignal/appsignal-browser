@@ -18,7 +18,7 @@ import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 //   UX-derived categories (rage_click, scroll_depth, …) dominate the page.
 //
 // The capacities and allowlist are hardcoded; we don't expose them as
-// config because there are no good knobs for an end-user to pick from.
+// config because there are no good values for an end-user to pick from.
 const SESSION_BUFFER_CAPACITY = 100;
 const ERROR_BUFFER_CAPACITY = 25;
 // Allowlist (not denylist) so any new SDK-emitted category defaults to
@@ -888,16 +888,18 @@ function formatConsoleArgs(args: unknown[]): string {
 // returns undefined for functions/undefined; coerce those too.
 function safeStringifyArg(a: unknown): string {
   if (typeof a === "string") return a;
-  // Errors carry message/stack on non-enumerable properties, so
-  // JSON.stringify(err) === "{}" — surface the actual message instead. Covers
-  // console.error(err), the most common way a console breadcrumb loses its text.
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(a);
+  } catch {
+    json = undefined;
+  }
+  // JSON first: an object JSON can see is data, not an error, and flattening it
+  // to "name: message" would drop its other fields.
+  if (json && json !== "{}") return json;
   const asError = errorLike(a);
   if (asError) return `${asError.name}: ${asError.message}`;
-  try {
-    return JSON.stringify(a) ?? String(a);
-  } catch {
-    return String(a);
-  }
+  return json ?? String(a);
 }
 
 // --- Long task tracking ---

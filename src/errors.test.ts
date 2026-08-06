@@ -538,6 +538,93 @@ describe("errors", () => {
       const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
       expect(payload.error.message).toBe("[object Object]");
     });
+
+    it("keeps {} for a genuinely empty plain object", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireRejection({});
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("{}");
+    });
+
+    it("still reports a null-prototype reason, which String() throws on", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      const bare = Object.create(null);
+      expect(JSON.stringify(bare)).toBe("{}");
+      expect(() => String(bare)).toThrow();
+
+      fireRejection(bare);
+
+      expect(sendErrorMock).toHaveBeenCalledTimes(1);
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("{}");
+    });
+  });
+
+  describe("stack-less host error rejections", () => {
+    // A DOMException — an aborted fetch, a denied permission — has `name` and
+    // `message` as prototype getters and no stack. JSON.stringify sees nothing
+    // enumerable, so before the duck-typed path accepted it these all reported
+    // as class "Error" with the message "{}", sharing one dedupe key.
+    const domException = (name: string, message: string): object =>
+      Object.create(
+        Object.create(null, {
+          name: { get: () => name },
+          message: { get: () => message },
+        }),
+      ) as object;
+
+    it("keeps name and message when the value carries no stack", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      const reason = domException("AbortError", "The operation was aborted.");
+      expect(JSON.stringify(reason)).toBe("{}");
+
+      fireRejection(reason);
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.name).toBe("AbortError");
+      expect(payload.error.message).toBe("The operation was aborted.");
+    });
+
+    it("dedupes stack-less host errors by message", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+
+      for (let i = 0; i < 8; i++) {
+        fireRejection(domException("AbortError", `aborted ${i}`));
+      }
+
+      expect(sendErrorMock).toHaveBeenCalledTimes(8);
+    });
+
+    it("names the class for an instance whose fields are all private", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      class UploadFailure {
+        #reason = "quota";
+        get reason() {
+          return this.#reason;
+        }
+      }
+      const reason = new UploadFailure();
+      expect(JSON.stringify(reason)).toBe("{}");
+
+      fireRejection(reason);
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("UploadFailure");
+    });
+
+    it("prefers a custom toString over the class name", () => {
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      class Timeout {
+        toString() {
+          return "Timeout after 30s";
+        }
+      }
+      fireRejection(new Timeout());
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.error.message).toBe("Timeout after 30s");
+    });
   });
 
   describe("cross-realm error rejections", () => {
