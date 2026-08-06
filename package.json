@@ -1,6 +1,6 @@
 {
   "name": "@appsignal/browser",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.3",
   "description": "AppSignal for browsers: frontend error tracking, breadcrumbs and web vitals",
   "license": "MIT",
   "repository": {
