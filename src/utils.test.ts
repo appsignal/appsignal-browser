@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, seededRandom, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
+import { storage, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
 
 describe("storage helper", () => {
   beforeEach(() => {
@@ -177,6 +177,11 @@ describe("scrubUrl", () => {
     });
   });
 
+  it("records a trailing slash as the page served it", () => {
+    expect(scrubUrl("https://app.com/products/", [])).toBe("https://app.com/products/");
+    expect(scrubUrl("https://api.app.com/v1/orders/", [])).toBe("https://api.app.com/v1/orders/");
+  });
+
   describe("fragment heuristic", () => {
     it("preserves hash routes (no '=')", () => {
       expect(scrubUrl("https://app.com/#/checkout", [])).toBe(
@@ -229,6 +234,62 @@ describe("scrubUrl", () => {
         "https://app.com/page?page=2#state=def",
       );
     });
+  });
+});
+
+describe("scrubPageUrl", () => {
+  it("reports one page whether or not the path ends in a slash", () => {
+    expect(scrubPageUrl("https://app.com/products/", [])).toBe("https://app.com/products");
+  });
+
+  it("keeps the root path as a slash", () => {
+    expect(scrubPageUrl("https://app.com/", [])).toBe("https://app.com/");
+  });
+
+  it("normalises before the query, not after it", () => {
+    expect(scrubPageUrl("https://app.com/products/?page=2", ["page"])).toBe(
+      "https://app.com/products?page=2",
+    );
+  });
+
+  it("normalises a hash route too, since that is the route for hash-routed apps", () => {
+    expect(scrubPageUrl("https://app.com/#/checkout/", [])).toBe("https://app.com/#/checkout");
+  });
+
+  it("normalises a hash route that carries its own query", () => {
+    expect(scrubPageUrl("https://app.com/#/checkout/?page=2", [])).toBe(
+      "https://app.com/#/checkout?page=2",
+    );
+  });
+
+  it("keeps the root of a hash route as a slash", () => {
+    expect(scrubPageUrl("https://app.com/#/?page=2", [])).toBe("https://app.com/#/?page=2");
+  });
+
+  it("leaves an anchor alone", () => {
+    expect(scrubPageUrl("https://app.com/docs#section-1", [])).toBe(
+      "https://app.com/docs#section-1",
+    );
+  });
+
+  it("leaves a slash inside an anchor alone, since an anchor is not a route", () => {
+    expect(scrubPageUrl("https://app.com/docs#section/", [])).toBe(
+      "https://app.com/docs#section/",
+    );
+  });
+
+  it("still applies the allowlist it scrubs through", () => {
+    expect(scrubPageUrl("https://app.com/page/?token=xyz&page=2", ["page"])).toBe(
+      "https://app.com/page?page=2",
+    );
+  });
+
+  it("returns a URL it cannot parse untouched", () => {
+    expect(scrubPageUrl("http://[", [])).toBe("http://[");
+  });
+
+  it("does not invent a page out of an empty string", () => {
+    expect(scrubPageUrl("", [])).toBe("");
   });
 });
 

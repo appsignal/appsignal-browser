@@ -473,6 +473,15 @@ describe("errors", () => {
       const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
       expect(payload.environment.url).toBe("https://app.example.com/p");
     });
+
+    it("reports one URL whether or not the path ends in a slash", () => {
+      setLocation("https://app.example.com/checkout/");
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.environment.url).toBe("https://app.example.com/checkout");
+    });
   });
 
   describe("error action grouping", () => {
@@ -493,6 +502,34 @@ describe("errors", () => {
 
       const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
       expect(payload.action).toBe("/users/12345");
+    });
+
+    it("gives one group whether or not the pathname ends in a slash", () => {
+      setLocation("https://app.example.com/checkout/");
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.action).toBe("/checkout");
+    });
+
+    it("keeps the root pathname as a slash", () => {
+      setLocation("https://app.example.com/");
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.action).toBe("/");
+    });
+
+    it("removes the trailing slash from a route template too", () => {
+      setLocation("https://app.example.com/users/12345/");
+      vitalsMock.routeTemplate = "/users/:id";
+      initErrors({ enabled: true, sampleRate: 1.0 }, []);
+      fireError("boom");
+
+      const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+      expect(payload.action).toBe("/users/:id");
     });
   });
 

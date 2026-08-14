@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubUrl, errorLike } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -261,10 +261,9 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
-    // Group by the host's route template (e.g. "/users/:id") when set via
-    // setRouteTemplate, so ID-heavy routes don't fragment into one error group
-    // per id. Falls back to the raw pathname when no template is declared.
-    action: getRouteTemplate() || location.pathname,
+    // The action groups the errors. A template such as "/users/:id" prevents
+    // one error group for each ID in the URL.
+    action: getRouteTemplate() || stripTrailingSlash(location.pathname),
     revision: error.app_version,
     error: {
       name: error.error_class || "Error",
@@ -277,9 +276,8 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // session stream, not error tags; a host that wants user on errors sets it
     // explicitly via setTags.
     tags: getTags(),
-    // Scrubbed through the query-param allowlist, same as every other captured
-    // URL — the raw href would otherwise leak tokens / OAuth fragments here.
-    environment: { url: scrubUrl(location.href, allowlist) },
+    // The full href can contain a token or an OAuth fragment.
+    environment: { url: scrubPageUrl(location.href, allowlist) },
     user_agent: navigator.userAgent,
   };
 }

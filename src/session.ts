@@ -1,5 +1,5 @@
 import type { ErrorTags, SessionContext, UserContext } from "./types.js";
-import { storage, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
+import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
@@ -356,7 +356,7 @@ export function getSessionContext(): SessionContext {
     session_id: getSessionId(),
     tab_id: getTabId(),
     anonymous_id: getAnonymousId(),
-    page_url: scrubUrl(location.href, queryParamsAllowlist),
+    page_url: scrubPageUrl(location.href, queryParamsAllowlist),
     referrer: scrubUrl(stat.referrer, queryParamsAllowlist),
     user_agent: stat.user_agent,
     screen_width: stat.screen_width,
