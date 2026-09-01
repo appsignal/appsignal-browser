@@ -1,5 +1,21 @@
 # AppSignal for Browsers Changelog
 
+## 1.0.0-beta.4
+
+_Published on 2026-09-01._
+
+### Fixed
+
+- Report one page URL when a path has a trailing slash. `/checkout` and
+  `/checkout/` are now one page for the web vitals, the session context, the
+  error URL and the error action. This also applies to a hash route. A breadcrumb
+  and the session referrer keep the URL as it occurred.
+
+  The aggregation key changes with this release. A dashboard row for `/checkout/`
+  stops, and a new row for `/checkout` starts.
+
+  (patch [958331b](https://github.com/appsignal/appsignal-browser/commit/958331bef8c482908d1f134b56556f857c8803b6))
+
 ## 1.0.0-beta.3
 
 _Published on 2026-08-06._
