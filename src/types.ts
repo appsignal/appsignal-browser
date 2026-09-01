@@ -79,7 +79,8 @@ export interface PrivacyConfig {
    *  - network breadcrumb URLs (request/response capture)
    *  - SPA navigation breadcrumbs (`data.from`, `data.to`)
    *  - `session_context.page_url` and `session_context.referrer`
-   *  - `web_vitals.page_url` */
+   *  - `web_vitals.page_url`
+   *  - the error payload's `environment.url` */
   queryParamsAllowlist?: string[];
   /** Glob URL patterns whose requests are never recorded. Matched against
    * host + pathname. Today applied to network breadcrumbs; when replay

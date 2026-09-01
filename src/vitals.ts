@@ -1,5 +1,5 @@
 import type { EventVital } from "./types.js";
-import { scrubUrl, timeOrigin } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, timeOrigin } from "./utils.js";
 import { onFCP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
@@ -25,11 +25,8 @@ let collectedVitals: EventVital[] = [];
 let allowlist: string[] = [];
 let destroyed = false;
 
-// Route template the host app most recently declared via setRouteTemplate.
-// When set, we send it as `page_url` on each vital report — that's the
-// aggregation key on the server side, and an explicit template avoids any
-// auto-template false positives. When unset (empty string), we fall back to
-// `scrubUrl(location.href)` and let the server auto-template it.
+// The server uses `page_url` as the aggregation key. An explicit template
+// prevents a false positive from the auto-template function on the server.
 let currentRouteTemplate = "";
 
 // Resolved page_url for the *currently active* route — captured when the route
@@ -312,22 +309,10 @@ function resetRouteVitals(): void {
   routePageUrl = resolvePageUrl();
 }
 
-/** Set the route template the host app considers current — e.g. `/users/:id`
- * for a route that renders any user profile. While set, vital reports ship this
- * string as `page_url` instead of the raw URL. Persists until the next call;
- * pass `null` (or "") to clear and fall back to `scrubUrl(location.href)` (the
- * server then auto-templates it).
- *
- * Call this on every navigation in your router so CLS/INP attribute to the
- * route they occurred on, and call it as early as possible on first load so the
- * landing route's LCP/FCP get the template too.
- *
- * @example
- * // React Router
- * useEffect(() => appsignal.setRouteTemplate(route.path), [route.path]);
- * @example
- * // Next.js App Router
- * useEffect(() => appsignal.setRouteTemplate(usePathname()), [pathname]); */
+function normalizeRouteTemplate(template: string | null): string {
+  return stripTrailingSlash((template ?? "").trim());
+}
+
 /** The host's most recently declared route template (e.g. "/users/:id"), or ""
  * if none is set. Shared with the errors module so error grouping uses the same
  * route key as vitals attribution. */
@@ -336,7 +321,7 @@ export function getRouteTemplate(): string {
 }
 
 export function setRouteTemplate(template: string | null): void {
-  currentRouteTemplate = template ?? "";
+  currentRouteTemplate = normalizeRouteTemplate(template);
   // Refresh the active route's page_url so metrics accruing on this route (and
   // the load metrics, if not yet flushed) pick up the template.
   routePageUrl = resolvePageUrl();
@@ -367,7 +352,7 @@ export function destroyVitals(): void {
 
 function resolvePageUrl(): string {
   if (currentRouteTemplate) return currentRouteTemplate;
-  return scrubUrl(location.href, allowlist);
+  return scrubPageUrl(location.href, allowlist);
 }
 
 function toEpoch(entryTime: number): number {

@@ -114,6 +114,9 @@ export function addBreadcrumb(breadcrumb: {
  * server can aggregate by route instead of by raw URL. Persists until the
  * next call. Pass `null` to clear.
  *
+ * The SDK removes the spaces around the template and its trailing slash, so
+ * `/checkout` and `/checkout/` give one page.
+ *
  * If the host app never calls this, the server still groups vitals by an
  * auto-derived template (numeric IDs and UUIDs collapse via regex), but
  * explicit templates produce cleaner buckets — call this on every

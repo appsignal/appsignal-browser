@@ -33,6 +33,18 @@ export function safeUrl(url: string): URL | null {
   }
 }
 
+export function stripTrailingSlash(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/, "") || "/" : path;
+}
+
+function stripHashRouteTrailingSlash(hashRoute: string): string {
+  const queryStart = hashRoute.indexOf("?");
+
+  return queryStart === -1
+    ? stripTrailingSlash(hashRoute)
+    : stripTrailingSlash(hashRoute.slice(0, queryStart)) + hashRoute.slice(queryStart);
+}
+
 /** Scrub a URL by applying an allowlist of query-param keys to both `?query`
  * and the `#fragment` (when the fragment looks like `k=v&k=v` rather than a
  * route or anchor).
@@ -85,6 +97,19 @@ export function scrubUrl(url: string, allowlist: string[]): string {
   } catch {
     return url;
   }
+}
+
+export function scrubPageUrl(url: string, allowlist: string[]): string {
+  const scrubbed = scrubUrl(url, allowlist);
+  const parsed = scrubbed ? safeUrl(scrubbed) : null;
+  if (!parsed) return scrubbed;
+
+  const hashRoute = parsed.hash.slice(1);
+  const hash = hashRoute.startsWith("/")
+    ? `#${stripHashRouteTrailingSlash(hashRoute)}`
+    : parsed.hash;
+
+  return parsed.origin + stripTrailingSlash(parsed.pathname) + parsed.search + hash;
 }
 
 export function globMatch(pattern: string, input: string): boolean {

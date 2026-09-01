@@ -383,6 +383,31 @@ describe("vitals", () => {
       );
     });
 
+    it("reports one route whether or not the host adds a trailing slash", () => {
+      initVitals([]);
+      setRouteTemplate("/checkout/");
+      emitShifts([{ value: 0.05, startTime: 100 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "CLS")?.page_url).toBe("/checkout");
+    });
+
+    it("trims whitespace around the template", () => {
+      initVitals([]);
+      setRouteTemplate("  /checkout  ");
+      emitShifts([{ value: 0.05, startTime: 100 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "CLS")?.page_url).toBe("/checkout");
+    });
+
+    it("keeps the root route as a slash rather than emptying it", () => {
+      setLocation("https://example.com/");
+      initVitals([]);
+      setRouteTemplate("/");
+      emitShifts([{ value: 0.05, startTime: 100 }]);
+      finalizeRouteVitals();
+      expect(drainVitals().find((v) => v.name === "CLS")?.page_url).toBe("/");
+    });
+
     it("resets internal state when initVitals is called again", () => {
       initVitals([]);
       setRouteTemplate("/users/:id");

@@ -197,6 +197,8 @@ Collection starts when `init()` runs, so a GDPR-style consent gate is a matter o
 
 **`queryParamsAllowlist`** scrubs every captured URL — network and navigation breadcrumbs, `page_url`, `referrer`, each vital's `page_url`, and the error payload's `environment.url`. Param names are glob-matched, and the default `[]` strips all of them.
 
+A page URL also loses its trailing slash, so `/checkout` and `/checkout/` report as one page. This applies to `page_url`, each vital's `page_url` and `environment.url`. A breadcrumb and `referrer` keep the URL as it occurred.
+
 ```
 queryParamsAllowlist: ["utm_*", "page"]
 
