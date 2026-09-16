@@ -6,6 +6,7 @@ import type {
   ResolvedConfig,
   TransactionBreadcrumb,
 } from "./types.js";
+import { DEFAULT_SERVICE_NAME } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
@@ -28,6 +29,7 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
+let serviceName: string = DEFAULT_SERVICE_NAME;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 // Query-param allowlist for scrubbing URLs that ride the error payload. The
 // errors module captures `location.href` for `environment.url`; without this it
@@ -80,12 +82,14 @@ export function initErrors(
   queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
+  service: string = DEFAULT_SERVICE_NAME,
 ): void {
   destroyErrors();
 
   config = resolved;
   allowlist = queryParamsAllowlist;
   appVersion = version;
+  serviceName = service;
   beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
@@ -274,6 +278,7 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // one error group for each ID in the URL.
     action: getRouteTemplate() || stripTrailingSlash(location.pathname),
     revision: error.app_version,
+    service_name: serviceName,
     error: {
       name: error.error_class || "Error",
       message: error.message,

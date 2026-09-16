@@ -40,6 +40,87 @@ describe("tracing", () => {
       );
     });
 
+    it("sends the default service name in the tracestate header", async () => {
+      let capturedHeaders: Headers | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/test");
+
+      expect(capturedHeaders?.get("tracestate")).toBe("appsignal=service:Browser");
+    });
+
+    it("sends the configured service name in the tracestate header", async () => {
+      let capturedHeaders: Headers | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"], "Checkout Web");
+
+      await window.fetch("http://localhost/api/test");
+
+      expect(capturedHeaders?.get("tracestate")).toBe("appsignal=service:Checkout Web");
+    });
+
+    it("keeps the tracestate value within what the header allows", async () => {
+      let capturedHeaders: Headers | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"], `  shop=eu,west \u00e9${"x".repeat(300)}`);
+
+      await window.fetch("http://localhost/api/test");
+
+      const value = capturedHeaders?.get("tracestate") ?? "";
+      expect(value.startsWith("appsignal=service:shop_eu_west x")).toBe(true);
+      expect(value.length).toBe("appsignal=".length + 256);
+    });
+
+    it("puts its entry first and drops an older appsignal entry from an existing tracestate", async () => {
+      let capturedHeaders: Headers | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/test", {
+        headers: { tracestate: "congo=t61rcWkgMzE, appsignal=service:Old" },
+      });
+
+      expect(capturedHeaders?.get("tracestate")).toBe(
+        "appsignal=service:Browser,congo=t61rcWkgMzE",
+      );
+    });
+
+    it("does not send a tracestate header for non-matching URLs", async () => {
+      let capturedHeaders: Headers | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedHeaders = new Headers(init?.headers);
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["api.example.com/**"]);
+
+      await window.fetch("http://other.com/api/test");
+
+      expect(capturedHeaders?.get("tracestate")).toBeNull();
+    });
+
     it("does not inject headers for non-matching URLs", async () => {
       let capturedHeaders: Headers | undefined;
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {

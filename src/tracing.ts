@@ -1,7 +1,12 @@
 import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
 import { onBeforeRequest } from "./network-hook.js";
+import { DEFAULT_SERVICE_NAME } from "./types.js";
+
+const TRACESTATE_KEY = "appsignal";
+const TRACESTATE_MAX_VALUE_LENGTH = 256;
 
 let targets: string[] = [];
+let tracestateEntry = "";
 let unregister: (() => void) | null = null;
 
 // FIFO queue keyed by URL, with a global cap on total entries. Concurrent
@@ -51,8 +56,12 @@ class KeyedQueue<V> {
 
 const pendingTraces = new KeyedQueue<string>(200);
 
-export function initTracing(tracePropagationTargets: string[]): void {
+export function initTracing(
+  tracePropagationTargets: string[],
+  serviceName: string = DEFAULT_SERVICE_NAME,
+): void {
   targets = tracePropagationTargets;
+  tracestateEntry = `${TRACESTATE_KEY}=service:${tracestateValue(serviceName)}`;
   if (targets.length === 0) return;
 
   unregister = onBeforeRequest((ctx) => {
@@ -61,7 +70,30 @@ export function initTracing(tracePropagationTargets: string[]): void {
     const spanId = randomHex(8);
     pendingTraces.push(ctx.url, traceId);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+    ctx.headers.set("tracestate", mergeTracestate(ctx.headers.get("tracestate")));
   });
+}
+
+/** Our entry first, then the entries the caller already had, minus any older
+ * `appsignal` entry. The W3C spec reads the list left to right, so the first
+ * entry is the one a backend keeps when it has to drop some. */
+function mergeTracestate(existing: string | null): string {
+  const others = (existing ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "" && !entry.startsWith(`${TRACESTATE_KEY}=`));
+  return [tracestateEntry, ...others].join(",");
+}
+
+/** A tracestate value allows printable ASCII except `,` and `=`. The whole
+ * value, `service:` included, stays within the 256 characters the spec allows. */
+function tracestateValue(serviceName: string): string {
+  const cleaned = serviceName
+    .trim()
+    .replace(/[,=]/g, "_")
+    .replace(/[^\x20-\x7e]/g, "");
+  const maxLength = TRACESTATE_MAX_VALUE_LENGTH - "service:".length;
+  return cleaned.slice(0, maxLength);
 }
 
 /** Get and consume the trace ID generated for a request URL. FIFO per URL. */
@@ -75,6 +107,7 @@ export function destroyTracing(): void {
     unregister = null;
   }
   targets = [];
+  tracestateEntry = "";
   pendingTraces.clear();
 }
 

@@ -86,6 +86,14 @@ describe("errors", () => {
     Object.defineProperty(window, "location", { value: originalLocation, configurable: true });
   });
 
+  it("sends the configured service name", () => {
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], "v1.0", undefined, "Checkout Web");
+    fireError("Test error");
+
+    const payload = sendErrorMock.mock.calls[0][0] as FrontendTransaction;
+    expect(payload.service_name).toBe("Checkout Web");
+  });
+
   it("sends error events via transport", () => {
     initErrors({ enabled: true, sampleRate: 1.0 }, [], "v1.0");
     fireError("Test error");
@@ -95,6 +103,7 @@ describe("errors", () => {
     expect(payload.namespace).toBe("browser");
     expect(payload.error.message).toBe("Test error");
     expect(payload.revision).toBe("v1.0");
+    expect(payload.service_name).toBe("Browser");
     // No tags set → empty map. SDK identity (session/tab/anonymous ids) is
     // never sent as tags; tags carry only what the host set via setTags.
     expect(payload.tags).toEqual({});

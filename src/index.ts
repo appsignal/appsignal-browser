@@ -225,10 +225,11 @@ function startCollection(endpoint: string): void {
     cfg.privacy.queryParamsAllowlist,
     clientConfig?.appVersion,
     clientConfig?.beforeError,
+    cfg.serviceName,
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
-    initTracing(clientConfig.tracePropagationTargets);
+    initTracing(clientConfig.tracePropagationTargets, cfg.serviceName);
   }
 
   initVitals(cfg.privacy.queryParamsAllowlist);
