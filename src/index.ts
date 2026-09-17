@@ -55,46 +55,6 @@ export function init(config: BrowserConfig): void {
   initialized = true;
 }
 
-/** Wrap a public entry point. It is inert until init succeeds, and nothing it
- * does can throw into the host page: the host calls these from its own code
- * paths, a React render, a router effect, a catch block, and a failure inside
- * the SDK is the SDK's problem.
- *
- * `init` is not wrapped: it needs its own handler, to roll back what it built.
- * Registered callbacks and listeners are guarded where they are dispatched. */
-function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (...args: A) => void {
-  return (...args: A): void => {
-    if (!initialized) return;
-    try {
-      fn(...args);
-    } catch (error) {
-      logError(`${name} failed`, error);
-    }
-  };
-}
-
-/** Cleanup is a postcondition, not an all-or-nothing sequence. One hostile
- * browser API or foreign wrapper must not prevent the remaining steps. */
-function cleanup(name: string, fn: () => void): void {
-  try {
-    fn();
-  } catch (error) {
-    logError(`${name} cleanup failed`, error);
-  }
-}
-
-/** Undo what init built: patched fetch/XHR, listeners, observers, timers.
- * Each step is guarded on its own, so a throw in one still leaves the rest
- * torn down. The visitor's stored session, user and tags survive: they are not
- * this page load's to delete. `destroy` ends them separately. */
-function teardown(): void {
-  cleanup("collection", stopCollection);
-  cleanup("session tracking", stopSessionTracking);
-  cleanup("transport", destroyTransport);
-  clientConfig = null;
-  resolved = null;
-}
-
 /** Identify the current user (`id`, `email`, `name`). Rides the session/journey
  * stream as user context. Does not tag errors — for error-filtering metadata
  * (and to put user info on errors), use {@link setTags}. Call {@link clearUser}
@@ -208,6 +168,46 @@ export const destroy = /* @__PURE__ */ guard("destroy", (): void => {
 });
 
 // --- Internal ---
+
+/** Wrap a public entry point. It is inert until init succeeds, and nothing it
+ * does can throw into the host page: the host calls these from its own code
+ * paths, a React render, a router effect, a catch block, and a failure inside
+ * the SDK is the SDK's problem.
+ *
+ * `init` is not wrapped: it needs its own handler, to roll back what it built.
+ * Registered callbacks and listeners are guarded where they are dispatched. */
+function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (...args: A) => void {
+  return (...args: A): void => {
+    if (!initialized) return;
+    try {
+      fn(...args);
+    } catch (error) {
+      logError(`${name} failed`, error);
+    }
+  };
+}
+
+/** Cleanup is a postcondition, not an all-or-nothing sequence. One hostile
+ * browser API or foreign wrapper must not prevent the remaining steps. */
+function cleanup(name: string, fn: () => void): void {
+  try {
+    fn();
+  } catch (error) {
+    logError(`${name} cleanup failed`, error);
+  }
+}
+
+/** Undo what init built: patched fetch/XHR, listeners, observers, timers.
+ * Each step is guarded on its own, so a throw in one still leaves the rest
+ * torn down. The visitor's stored session, user and tags survive: they are not
+ * this page load's to delete. `destroy` ends them separately. */
+function teardown(): void {
+  cleanup("collection", stopCollection);
+  cleanup("session tracking", stopSessionTracking);
+  cleanup("transport", destroyTransport);
+  clientConfig = null;
+  resolved = null;
+}
 
 function resolveEndpoint(config: BrowserConfig): string {
   if (config.endpoint) return config.endpoint.replace(/\/$/, "");

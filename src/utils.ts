@@ -7,6 +7,8 @@
 // storage is disabled or quota is exceeded. Every storage operation in this
 // SDK should go through these so a single failed read can't crash init or a
 // flush.
+// --- Storage ---
+
 export type StorageArea = "local" | "session";
 
 // Stands in for an unreachable area so anonymous_id / tab_id / session_id stay
@@ -72,6 +74,8 @@ export const storage = {
     try { storage.setString(area, key, JSON.stringify(value)); } catch { /* ignore */ }
   },
 };
+
+// --- JSON pruning ---
 
 const MAX_JSON_DEPTH = 4;
 const MAX_JSON_ENTRIES = 50;
@@ -174,6 +178,8 @@ export function jsonSafeRecord(value: Record<string, unknown>): Record<string, u
   return { value: safe };
 }
 
+// --- Logging and host hooks ---
+
 /** The SDK's own failures go to the console under one prefix, so a host can
  * recognise and filter them. One place to change the channel. */
 export function logError(message: string, error?: unknown): void {
@@ -200,6 +206,8 @@ export function applyHook<T>(hook: ((value: T) => T | null) | undefined, value: 
     return value;
   }
 }
+
+// --- URLs ---
 
 export function safeUrl(url: string): URL | null {
   try {
@@ -297,24 +305,8 @@ export function globMatch(pattern: string, input: string): boolean {
   return new RegExp(`^${regex}$`).test(input);
 }
 
-/** Deterministic Math.random() replacement keyed on a seed string. Returns a
- * value uniformly distributed in [0, 1) — given any threshold T, exactly the
- * fraction T of inputs hash below it. The same seed always produces the same
- * output, which is what makes session-stable sampling work: every page load
- * within a session lands on the same side of the threshold.
- *
- * Implemented as 32-bit FNV-1a over the input bytes, then divided by 2^32 to
- * map into the unit interval. Math.imul keeps the multiplication in 32-bit
- * unsigned space; (h >>> 0) coerces the signed result back to unsigned before
- * the divide. */
-export function seededRandom(seed: string): number {
-  let h = 2166136261; // FNV offset basis
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619); // FNV prime
-  }
-  return (h >>> 0) / 0x100000000;
-}
+
+// --- Identifiers ---
 
 /** N bytes of randomness. Reaching the generator is not guaranteed: Firefox
  * raises `OperationError` when it fails, and `crypto` is absent in some
@@ -334,6 +326,12 @@ export function randomBytes(numBytes: number): Uint8Array {
     }
   }
   return bytes;
+}
+
+/** Lowercase hex for N bytes. Shared by the UUID format and the W3C
+ * traceparent ids. */
+export function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** RFC 9562 §5.4 v4: 122 random bits. Use for IDs whose lex order must
@@ -359,6 +357,59 @@ export function uuidv4(): string {
   // Bits 64..65: variant 10.
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   return formatUuid(bytes);
+}
+
+
+
+/** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
+ * can't drift in output shape. */
+function formatUuid(bytes: Uint8Array): string {
+  const hex = toHex(bytes);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+
+/** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
+ * variant bits, then 74 random bits. Lex-sort of v7 strings matches
+ * generation time, which lets the server order tabs / sessions
+ * chronologically without peeking into the data. */
+export function uuidv7(): string {
+  const ts = Date.now();
+  const bytes = randomBytes(16);
+  // Bits 0..47: timestamp, big-endian. Date.now() fits in 48 bits until year
+  // 10889, so the divide/and dance below loses no precision in practice.
+  bytes[0] = (ts / 0x10000000000) & 0xff;
+  bytes[1] = (ts / 0x100000000) & 0xff;
+  bytes[2] = (ts / 0x1000000) & 0xff;
+  bytes[3] = (ts / 0x10000) & 0xff;
+  bytes[4] = (ts / 0x100) & 0xff;
+  bytes[5] = ts & 0xff;
+  // Bits 48..51: version 7 (0b0111).
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  // Bits 64..65: variant 10.
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return formatUuid(bytes);
+}
+
+// --- Misc ---
+
+/** Deterministic Math.random() replacement keyed on a seed string. Returns a
+ * value uniformly distributed in [0, 1) — given any threshold T, exactly the
+ * fraction T of inputs hash below it. The same seed always produces the same
+ * output, which is what makes session-stable sampling work: every page load
+ * within a session lands on the same side of the threshold.
+ *
+ * Implemented as 32-bit FNV-1a over the input bytes, then divided by 2^32 to
+ * map into the unit interval. Math.imul keeps the multiplication in 32-bit
+ * unsigned space; (h >>> 0) coerces the signed result back to unsigned before
+ * the divide. */
+export function seededRandom(seed: string): number {
+  let h = 2166136261; // FNV offset basis
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619); // FNV prime
+  }
+  return (h >>> 0) / 0x100000000;
 }
 
 /** Normalise anything that behaves like an Error into its reportable fields,
@@ -388,19 +439,6 @@ export function errorLike(
   return { name, message, stack: typeof stack === "string" ? stack : undefined };
 }
 
-/** Lowercase hex for N bytes. Shared by the UUID format and the W3C
- * traceparent ids. */
-export function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
- * can't drift in output shape. */
-function formatUuid(bytes: Uint8Array): string {
-  const hex = toHex(bytes);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
 /** Epoch ms corresponding to `performance.now() === 0`, for lifting
  * performance-entry times (which are timeOrigin-relative) to wall-clock.
  *
@@ -418,26 +456,4 @@ export function timeOrigin(): number {
   const origin = performance.timeOrigin;
   if (typeof origin === "number" && !Number.isNaN(origin)) return origin;
   return Date.now() - performance.now();
-}
-
-/** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
- * variant bits, then 74 random bits. Lex-sort of v7 strings matches
- * generation time, which lets the server order tabs / sessions
- * chronologically without peeking into the data. */
-export function uuidv7(): string {
-  const ts = Date.now();
-  const bytes = randomBytes(16);
-  // Bits 0..47: timestamp, big-endian. Date.now() fits in 48 bits until year
-  // 10889, so the divide/and dance below loses no precision in practice.
-  bytes[0] = (ts / 0x10000000000) & 0xff;
-  bytes[1] = (ts / 0x100000000) & 0xff;
-  bytes[2] = (ts / 0x1000000) & 0xff;
-  bytes[3] = (ts / 0x10000) & 0xff;
-  bytes[4] = (ts / 0x100) & 0xff;
-  bytes[5] = ts & 0xff;
-  // Bits 48..51: version 7 (0b0111).
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  // Bits 64..65: variant 10.
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  return formatUuid(bytes);
 }

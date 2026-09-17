@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initTransport, sendError, sendEvents, sendReplayChunk, destroyTransport } from "./transport.js";
+import { initTransport, sendError, sendEvents, sendBeaconEvents, sendReplayChunk, destroyTransport } from "./transport.js";
 import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext } from "./types.js";
 
 const mockSession: SessionContext = {
@@ -303,5 +303,45 @@ describe("transport", () => {
     expect(() => sendError(payload as unknown as FrontendTransaction)).not.toThrow();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(consoleSpy).toHaveBeenCalled();
+  });
+
+  it("drops an unserializable events payload rather than throwing at the flush", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const payload: EventPayload = { type: "events", session: mockSession, breadcrumbs: [], vitals: [] };
+    (payload as unknown as Record<string, unknown>).self = payload;
+
+    expect(() => sendEvents(payload)).not.toThrow();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("drops an unserializable beacon payload rather than throwing on page hide", () => {
+    const beaconSpy = vi.fn(() => true);
+    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const payload: EventPayload = { type: "events", session: mockSession, breadcrumbs: [], vitals: [] };
+    (payload as unknown as Record<string, unknown>).self = payload;
+
+    expect(() => sendBeaconEvents(payload)).not.toThrow();
+
+    expect(beaconSpy).not.toHaveBeenCalled();
+  });
+
+  it("drops an unserializable replay chunk rather than throwing at the recorder", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const payload: ReplayChunk = {
+      type: "replay",
+      session_id: "sess",
+      tab_id: "tab",
+      chunk_index: 0,
+      events: ["x"],
+    };
+    (payload as unknown as Record<string, unknown>).self = payload;
+
+    expect(() => sendReplayChunk(payload)).not.toThrow();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
