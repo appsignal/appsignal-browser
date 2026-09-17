@@ -589,7 +589,10 @@ describe("jsonSafe", () => {
 
     const safe = jsonSafe(wide(4));
 
-    const markers = JSON.stringify(safe).match(/\[Truncated\]/g) || [];
-    expect(markers.length).toBeGreaterThan(0);
+    const encoded = JSON.stringify(safe);
+    expect(encoded).toContain("[Truncated]");
+    // Every copied value costs a node, leaves included. Charging containers
+    // alone would leave the real bound at 1000 x 50 values.
+    expect(encoded.length).toBeLessThan(20_000);
   });
 });

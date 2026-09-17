@@ -92,23 +92,17 @@ const MAX_JSON_NODES = 1000;
  * object graph. The caps bound the copy, because one controller reaches most
  * of the application through its own properties. */
 export function jsonSafe(value: unknown): unknown {
-  return copySafely(value, 0, [], { left: MAX_JSON_NODES });
+  return copyValue(value, 0, [], { left: MAX_JSON_NODES });
 }
 
 interface NodeBudget { left: number }
 
-function copySafely(value: unknown, depth: number, ancestors: object[], budget: NodeBudget): unknown {
-  try {
-    return copyValue(value, depth, ancestors, budget);
-  } catch {
-    // A hostile value can still throw: a revoked proxy refuses `Object.keys`,
-    // a `toJSON` can fail. Each level catches its own subtree, so one bad
-    // branch becomes a marker and the rest of the payload survives.
-    return "[Unserializable]";
-  }
-}
-
 function copyValue(value: unknown, depth: number, ancestors: object[], budget: NodeBudget): unknown {
+  // Every copied value costs a node, leaves included. Charging containers
+  // alone would leave the real bound at MAX_JSON_NODES × MAX_JSON_ENTRIES.
+  if (budget.left <= 0) return "[Truncated]";
+  budget.left--;
+
   if (value === null) return null;
 
   const type = typeof value;
@@ -120,25 +114,24 @@ function copyValue(value: unknown, depth: number, ancestors: object[], budget: N
   // Ancestors, not every object seen: siblings that share a reference are not
   // circular. The list is never longer than MAX_JSON_DEPTH.
   if (ancestors.includes(object)) return "[Circular]";
-  if (depth >= MAX_JSON_DEPTH) return Array.isArray(object) ? "[Array]" : "[Object]";
-  if (budget.left <= 0) return "[Truncated]";
-  budget.left--;
 
   ancestors.push(object);
   try {
+    if (depth >= MAX_JSON_DEPTH) return Array.isArray(object) ? "[Array]" : "[Object]";
+
     // `JSON.stringify` asks for `toJSON` first, so honour it: a Date, a Luxon
     // DateTime or a Moment keeps the string the host used to see, instead of
     // its internal fields. An invalid Date answers `null` here, where
     // `toISOString` would throw.
     const toJSON = (object as { toJSON?: unknown }).toJSON;
     if (typeof toJSON === "function") {
-      return copySafely((toJSON as () => unknown).call(object), depth + 1, ancestors, budget);
+      return copyValue((toJSON as () => unknown).call(object), depth + 1, ancestors, budget);
     }
 
     if (Array.isArray(object)) {
       return object
         .slice(0, MAX_JSON_ENTRIES)
-        .map((entry) => copySafely(entry, depth + 1, ancestors, budget));
+        .map((entry) => copyValue(entry, depth + 1, ancestors, budget));
     }
 
     const copy: Record<string, unknown> = {};
@@ -153,12 +146,17 @@ function copyValue(value: unknown, depth: number, ancestors: object[], budget: N
       } catch {
         continue;
       }
-      const safe = copySafely(entry, depth + 1, ancestors, budget);
+      const safe = copyValue(entry, depth + 1, ancestors, budget);
       if (safe === undefined) continue;
       copy[key] = safe;
       entries++;
     }
     return copy;
+  } catch {
+    // A hostile value still throws: a revoked proxy refuses `Object.keys` or
+    // `Array.isArray`, a `toJSON` fails. Each node catches its own subtree, so
+    // one bad branch becomes a marker and the rest of the payload survives.
+    return "[Unserializable]";
   } finally {
     ancestors.pop();
   }
@@ -174,6 +172,27 @@ export function jsonSafeRecord(value: Record<string, unknown>): Record<string, u
     return safe as Record<string, unknown>;
   }
   return { value: safe };
+}
+
+/** The SDK's own failures go to the console under one prefix, so a host can
+ * recognise and filter them. One place to change the channel. */
+export function logError(message: string, error?: unknown): void {
+  // eslint-disable-next-line no-console
+  console.error(`[appsignal] ${message}`, error);
+}
+
+/** Run a host hook. A null return drops the value. A throwing hook is a bug in
+ * host code, and must break neither the SDK nor the call it came from, so a
+ * throw is a passthrough. Shared by beforeError and beforeBreadcrumb. */
+export function applyHook<T>(hook: ((value: T) => T | null) | undefined, value: T): T | null {
+  // Hot path: every network request, click and console call reaches this.
+  // Skip the call entirely when no hook is configured.
+  if (!hook) return value;
+  try {
+    return hook(value);
+  } catch {
+    return value;
+  }
 }
 
 export function safeUrl(url: string): URL | null {
@@ -363,14 +382,14 @@ export function errorLike(
   return { name, message, stack: typeof stack === "string" ? stack : undefined };
 }
 
-/** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
- * can't drift in output shape. */
 /** Lowercase hex for N bytes. Shared by the UUID format and the W3C
  * traceparent ids. */
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
+ * can't drift in output shape. */
 function formatUuid(bytes: Uint8Array): string {
   const hex = toHex(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;

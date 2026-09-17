@@ -11,3 +11,6 @@ now logs the failure and returns.
 A `beforeError` hook that throws is now treated as passthrough, which is the
 rule `beforeBreadcrumb` already followed. A bug in host code no longer drops
 the error it was called for.
+
+The wrapped exports keep their tree shaking: each one is marked as a pure
+call, so a bundler still drops the methods an application does not import.

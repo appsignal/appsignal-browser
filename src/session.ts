@@ -325,8 +325,7 @@ export function stopSessionTracking(): void {
     tabChannel.close();
     tabChannel = null;
   }
-  // The timer outlives the listeners, and a rollback of a failed init stops
-  // the tracking without ending the visitor's session.
+  // The timer outlives the listeners it was armed alongside.
   clearActivityTimer();
   activityTrackingStarted = false;
   staticContextFields = null;

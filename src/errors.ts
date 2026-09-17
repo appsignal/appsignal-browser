@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord, applyHook, logError } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -153,18 +153,6 @@ export function reportError(
   );
 }
 
-/** beforeError decides whether the error goes on. A null return drops it. A
- * throwing callback should not break the SDK or the host's call, so treat it
- * as passthrough, the same rule applyBeforeBreadcrumb follows. */
-function applyBeforeError(incoming: IncomingError): IncomingError | null {
-  if (!beforeErrorHook) return incoming;
-  try {
-    return beforeErrorHook(incoming);
-  } catch {
-    return incoming;
-  }
-}
-
 function handleError(
   message: string,
   filename?: string,
@@ -209,18 +197,18 @@ function handleError(
     stack,
     context,
   };
-  const hookResult = applyBeforeError(incoming);
+  // A null return drops the error: no breadcrumb, no dedupe slot, no send.
+  const hookResult = applyHook(beforeErrorHook, incoming);
 
   // beforeError is sync only. A Promise return would otherwise pass the
   // truthy check and the SDK would proceed treating the Promise as fields —
   // silent breakage. Detect it, drop the error, and log loudly so a host
   // developer can grep for the message.
   if (hookResult && typeof (hookResult as { then?: unknown }).then === "function") {
-    // eslint-disable-next-line no-console
-    console.error(
-      "[appsignal] beforeError returned a Promise. Async beforeError is " +
-      "not supported; the error was dropped. Move async work outside the " +
-      "hook (e.g. perform it before calling captureError).",
+    logError(
+      "beforeError returned a Promise. Async beforeError is not supported; " +
+      "the error was dropped. Move async work outside the hook (e.g. perform " +
+      "it before calling captureError).",
     );
     return;
   }

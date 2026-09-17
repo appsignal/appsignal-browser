@@ -1,4 +1,5 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
+import { logError } from "./utils.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -90,8 +91,7 @@ function serialize(payload: unknown): string | null {
   try {
     return JSON.stringify(payload);
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error("[appsignal] payload could not be serialized; dropped", error);
+    logError("payload could not be serialized; dropped", error);
     return null;
   }
 }
