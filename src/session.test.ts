@@ -320,6 +320,40 @@ describe("session", () => {
 
       vi.unstubAllGlobals();
     });
+
+    it("answers the announce it keeps its id against, so the other tab resolves too", () => {
+      // Only the duplicate hears a collision: the older tab announced before
+      // the duplicate existed. Half the time the duplicate holds the smaller
+      // tag and keeps its id, and without an answer both tabs then report the
+      // same tab_id for the rest of the page.
+      const listeners: Array<(ev: MessageEvent) => void> = [];
+      const posted: Array<{ tabId?: string; tag?: string }> = [];
+      const FakeBC = class {
+        addEventListener(_: string, fn: (ev: MessageEvent) => void) { listeners.push(fn); }
+        removeEventListener(_: string, fn: (ev: MessageEvent) => void) {
+          const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1);
+        }
+        postMessage(data: unknown) { posted.push(data as { tabId?: string; tag?: string }); }
+        close() {}
+      };
+      vi.stubGlobal("BroadcastChannel", FakeBC);
+      destroySession();
+
+      initSession(1800000);
+      const initialTabId = getTabId();
+      const myTag = posted.find((m) => m.tabId === initialTabId)!.tag!;
+      const announceCount = posted.length;
+
+      const largerTag = "z".repeat(36);
+      for (const fn of listeners) {
+        fn({ data: { tabId: initialTabId, tag: largerTag } } as MessageEvent);
+      }
+
+      expect(getTabId()).toBe(initialTabId);
+      expect(posted.slice(announceCount)).toEqual([{ tabId: initialTabId, tag: myTag }]);
+
+      vi.unstubAllGlobals();
+    });
   });
 
   describe("cross-tab sync via storage events", () => {
