@@ -103,6 +103,21 @@ describe("SDK integration", () => {
     expect(eventPayloads[0].url).toContain("api_key=k2");
   });
 
+  it("does not throw when reading active itself throws", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const config = {
+      key: "test-key",
+      get active(): boolean { throw new Error("hostile config"); },
+    };
+
+    expect(() => init(config)).not.toThrow();
+    expect(consoleSpy).toHaveBeenCalled();
+
+    addBreadcrumb({ category: "test", message: "still inactive" });
+    flush();
+    expect(sentPayloads).toHaveLength(0);
+  });
+
   it("sends events to the correct endpoint with ingestion key", () => {
     init({ key: "my-key", endpoint: "https://example.com", session: { enabled: true } });
 
@@ -161,6 +176,46 @@ describe("SDK integration", () => {
     expect(afterPayloads).toHaveLength(0);
   });
 
+  it("destroy still leaves the SDK inert when its final flush throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key", session: { enabled: true } });
+    addBreadcrumb({ category: "before", message: "pending at destroy" });
+    (navigator as unknown as { sendBeacon: () => boolean }).sendBeacon = () => {
+      throw new Error("beacon unavailable");
+    };
+
+    expect(() => destroy()).not.toThrow();
+
+    // If destroy aborted at the flush, these calls would still collect and
+    // send because `initialized` and the collectors would remain active.
+    sentPayloads = [];
+    (navigator as unknown as { sendBeacon: () => boolean }).sendBeacon = () => true;
+    addBreadcrumb({ category: "after", message: "must be ignored" });
+    flush();
+    expect(sentPayloads).toHaveLength(0);
+  });
+
+  it("continues teardown when one collector cleanup throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key" });
+    const patchedFetch = window.fetch;
+    const removeEventListener = document.removeEventListener.bind(document);
+    let firstRemoval = true;
+    vi.spyOn(document, "removeEventListener").mockImplementation((...args) => {
+      if (firstRemoval) {
+        firstRemoval = false;
+        throw new Error("foreign listener cleanup failed");
+      }
+      return removeEventListener(...args);
+    });
+
+    destroy();
+
+    // destroyBreadcrumbs is before destroyNetworkHook. A single unguarded
+    // cleanup failure used to abort stopCollection before fetch was restored.
+    expect(window.fetch).not.toBe(patchedFetch);
+  });
+
   it("captureError sends error payload", () => {
     init({ key: "test-key", session: { enabled: true } });
 
@@ -204,6 +259,24 @@ describe("SDK integration", () => {
     expect(afterPayloads.length).toBeGreaterThan(0);
     expect(afterPayloads[0].session.session_id).not.toBe(sessionBefore);
     expect(afterPayloads[0].session.user_id).toBeUndefined();
+  });
+
+  it("endSession clears identity even when its final flush throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key", session: { enabled: true } });
+    setUser({ id: "u1" });
+    setTags({ plan: "pro" });
+    addBreadcrumb({ category: "before", message: "pending at logout" });
+    (navigator as unknown as { sendBeacon: () => boolean }).sendBeacon = () => {
+      throw new Error("beacon unavailable");
+    };
+
+    expect(() => endSession()).not.toThrow();
+
+    expect(localStorage.getItem("appsignal_session_id")).toBeNull();
+    expect(localStorage.getItem("appsignal_last_activity")).toBeNull();
+    expect(localStorage.getItem("appsignal_user")).toBeNull();
+    expect(localStorage.getItem("appsignal_tags")).toBeNull();
   });
 
   it("attaches tab_id to event payloads, distinct from session_id", () => {
@@ -350,5 +423,97 @@ describe("SDK integration", () => {
       .filter((b) => !!b);
     expect(errorPayloads.length).toBeGreaterThan(0);
     expect(errorPayloads[0].tags).toEqual({});
+  });
+
+  it("stays inactive when startCollection throws, instead of taking the host down", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A config whose getter throws stands in for anything that can fail inside
+    // startCollection — a blocked storage global, an RNG that refuses.
+    expect(() =>
+      init({
+        key: "test-key",
+        get beforeBreadcrumb(): undefined { throw new Error("boom"); },
+      }),
+    ).not.toThrow();
+
+    expect(consoleSpy).toHaveBeenCalled();
+    // Rolled back: the public API no-ops rather than running against state
+    // startCollection never finished building, and nothing is sent.
+    expect(() => captureError(new Error("after failed init"))).not.toThrow();
+    expect(() => setTags({ plan: "pro" })).not.toThrow();
+    expect(() => addBreadcrumb({ category: "test", message: "hi" })).not.toThrow();
+    expect(sentPayloads).toHaveLength(0);
+  });
+
+  it("reports an error after a breadcrumb whose data points back at itself", () => {
+    init({ key: "test-key" });
+
+    const node: Record<string, unknown> = { tag: "div" };
+    node.parent = node;
+    addBreadcrumb({ category: "dom", message: "mounted", data: node });
+
+    expect(() => captureError(new Error("later failure"))).not.toThrow();
+
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/errors"));
+    expect(errorPayloads).toHaveLength(1);
+    const body = JSON.parse(errorPayloads[0].body);
+    const crumb = body.breadcrumbs.find((b: { message: string }) => b.message === "mounted");
+    expect(crumb.metadata).toEqual({ tag: "div", parent: "[Circular]" });
+  });
+
+  it("keeps the visitor's stored session, user and tags when init fails", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    localStorage.setItem("appsignal_session_id", "session-from-earlier-page");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
+    localStorage.setItem("appsignal_user", JSON.stringify({ id: "u1" }));
+    localStorage.setItem("appsignal_tags", JSON.stringify({ plan: "pro" }));
+
+    init({
+      key: "test-key",
+      get beforeBreadcrumb(): undefined { throw new Error("boom"); },
+    });
+
+    // The rollback undoes what this init built. The stored session, user and
+    // tags are the visitor's own state from an earlier page load.
+    expect(localStorage.getItem("appsignal_session_id")).toBe("session-from-earlier-page");
+    expect(localStorage.getItem("appsignal_user")).toBe(JSON.stringify({ id: "u1" }));
+    expect(localStorage.getItem("appsignal_tags")).toBe(JSON.stringify({ plan: "pro" }));
+  });
+
+  it("prunes what a beforeBreadcrumb hook puts into the data", () => {
+    init({
+      key: "test-key",
+      beforeBreadcrumb: (crumb) => {
+        const controller: Record<string, unknown> = { identifier: "dropdown" };
+        controller.self = controller;
+        return { ...crumb, data: { ...crumb.data, controller } };
+      },
+    });
+
+    addBreadcrumb({ category: "test", message: "enriched" });
+
+    expect(() => captureError(new Error("later failure"))).not.toThrow();
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/errors"));
+    expect(errorPayloads).toHaveLength(1);
+    const body = JSON.parse(errorPayloads[0].body);
+    const crumb = body.breadcrumbs.find((b: { message: string }) => b.message === "enriched");
+    expect(crumb.metadata.controller).toEqual({ identifier: "dropdown", self: "[Circular]" });
+  });
+
+  it("does not throw into host code when a public method fails", () => {
+    // The host calls these from its own code paths: a React render, a router
+    // effect, a catch block. A failure inside the SDK is the SDK's problem.
+    init({ key: "test-key" });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const hostile = {
+      name: "Error",
+      stack: "",
+      get message(): string { throw new Error("boom"); },
+    } as unknown as Error;
+
+    expect(() => captureError(hostile)).not.toThrow();
+
+    expect(consoleSpy.mock.calls[0][0]).toContain("captureError");
   });
 });

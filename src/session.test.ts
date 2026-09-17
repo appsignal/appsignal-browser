@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, setTags, clearTags, getTags, getSessionContext, touchActivity, endSession, destroySession } from "./session.js";
+import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, setTags, clearTags, getTags, getSessionContext, touchActivity, endSession, stopSessionTracking } from "./session.js";
 
 describe("session", () => {
   beforeEach(() => {
@@ -274,7 +274,7 @@ describe("session", () => {
         close() {}
       };
       vi.stubGlobal("BroadcastChannel", FakeBC);
-      destroySession(); // reset module-level tabChannel from any prior test
+      stopSessionTracking(); // reset module-level tabChannel from any prior test
 
       initSession(1800000);
       const initialTabId = getTabId();
@@ -306,7 +306,7 @@ describe("session", () => {
         close() {}
       };
       vi.stubGlobal("BroadcastChannel", FakeBC);
-      destroySession(); // reset module-level tabChannel from any prior test
+      stopSessionTracking(); // reset module-level tabChannel from any prior test
 
       initSession(1800000);
       const initialTabId = getTabId();
@@ -402,5 +402,16 @@ describe("session", () => {
     initSession(1800000);
     expect(getSessionId()).toBe(firstId);
     expect(localStorage.getItem("appsignal_session_id")).toBe(firstId);
+  });
+
+  it("stopSessionTracking clears the inactivity timer", () => {
+    // A failed init rolls back with stopSessionTracking, not endSession. The
+    // timer nulls the session id half an hour later, so it must go too.
+    initSession(1800000);
+    const armed = vi.getTimerCount();
+
+    stopSessionTracking();
+
+    expect(vi.getTimerCount()).toBe(armed - 1);
   });
 });

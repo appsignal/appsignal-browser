@@ -1,6 +1,6 @@
 import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
-import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
@@ -9,6 +9,7 @@ import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_P
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
+import { logError, attemptCleanup } from "./utils.js";
 
 export type { BrowserConfig } from "./types.js";
 
@@ -28,84 +29,94 @@ const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
   if (initialized) return;
-  // Master off-switch: `active: false` makes init a complete no-op — nothing
-  // patched, no timers, no network. Consumers gate this on their build env
-  // (e.g. `active: import.meta.env.PROD`) so dev/test/CI never sends data.
-  // Public methods already guard on `initialized`, so they stay safe no-ops.
-  if (config.active === false) return;
-  initialized = true;
-  clientConfig = config;
-  resolved = resolveConfig(config);
 
-  const endpoint = resolveEndpoint(config);
-  initTransport(endpoint, config.key);
-  startCollection(endpoint);
+  try {
+    // Keep every config read inside the boundary: JavaScript callers can pass
+    // a malformed value, and a config property can itself be a throwing getter.
+    // Neither should escape from this public entry point.
+    if (config.active === false) return;
+
+    clientConfig = config;
+    resolved = resolveConfig(config);
+
+    const endpoint = resolveEndpoint(config);
+    initTransport(endpoint, config.key);
+    startCollection(endpoint);
+  } catch (error) {
+    // Hosts import this module at the top of their entry bundle, so a throw
+    // here runs before their own code and takes the page down with it. The
+    // flag stays down, so every public method no-ops instead of running
+    // against state that startCollection never finished to build.
+    detachAll();
+    logError("init failed; the SDK is inactive", error);
+    return;
+  }
+
+  initialized = true;
 }
 
 /** Identify the current user (`id`, `email`, `name`). Rides the session/journey
  * stream as user context. Does not tag errors — for error-filtering metadata
  * (and to put user info on errors), use {@link setTags}. Call {@link clearUser}
  * on logout to drop identity. */
-export function setUser(user: UserContext): void {
-  if (!initialized) return;
+export const setUser = /* @__PURE__ */ guard("setUser", (user: UserContext): void => {
   sessionSetUser(user);
-}
+});
 
-export function clearUser(): void {
-  if (!initialized) return;
+export const clearUser = /* @__PURE__ */ guard("clearUser", (): void => {
   sessionClearUser();
-}
+});
 
 /** Attach arbitrary string tags to every subsequent error payload, for
  * filtering/searching errors in the UI — e.g.
  * `setTags({ plan: "pro", org_id: "acme" })`. Merges with any existing tags;
  * pass an empty value to drop a key. Values are coerced to strings and the set
  * is capped. Use {@link clearTags} to reset. */
-export function setTags(tags: Record<string, unknown>): void {
-  if (!initialized) return;
+export const setTags = /* @__PURE__ */ guard("setTags", (tags: Record<string, unknown>): void => {
   sessionSetTags(tags);
-}
+});
 
-export function clearTags(): void {
-  if (!initialized) return;
+export const clearTags = /* @__PURE__ */ guard("clearTags", (): void => {
   sessionClearTags();
-}
+});
 
 /** End the current browser session. Flushes pending events and replay chunks
  * under the current session_id, then clears session and user state so the next
  * captured event starts a fresh session. Typical use: call on user logout —
  * the flush uses sendBeacon since logout is often followed immediately by a
  * navigation that would cancel a plain fetch. */
-export function endSession(): void {
-  if (!initialized) return;
+export const endSession = /* @__PURE__ */ guard("endSession", (): void => {
   // touchActivity below may rotate the session if the inactivity window has
   // already elapsed (app woke from long sleep). In that case the buffered
   // events we're about to flush get attributed to the fresh session, not
   // the one the caller meant to end; accept this as the documented behavior.
   // The subsequent touchActivity keeps getSessionId() inside flushEvents
   // from rotating again mid-flush.
-  touchActivity();
-  flushEvents({ beacon: true });
-  sessionEndSession();
-}
+  try {
+    touchActivity();
+    flushEvents({ beacon: true });
+  } finally {
+    // Logout semantics are more important than the best-effort final flush:
+    // never retain the old identity because a browser API rejected the send.
+    sessionEndSession();
+  }
+});
 
 /** Report a caught error manually. Used by framework plugins and try/catch blocks. */
-export function captureError(
+export const captureError = /* @__PURE__ */ guard("captureError", (
   error: Error,
   context?: { componentName?: string; [key: string]: unknown },
-): void {
-  if (!initialized) return;
+): void => {
   reportError(error, context);
-}
+});
 
-export function addBreadcrumb(breadcrumb: {
+export const addBreadcrumb = /* @__PURE__ */ guard("addBreadcrumb", (breadcrumb: {
   category: string;
   message: string;
   data?: Record<string, unknown>;
-}): void {
-  if (!initialized) return;
+}): void => {
   addManualBreadcrumb(breadcrumb);
-}
+});
 
 /** Tell the SDK which route template the user is currently on — typically
  * a router-shaped string like `/users/:id` or `/orders/[id]/items`.
@@ -134,28 +145,59 @@ export function addBreadcrumb(breadcrumb: {
  *   appsignal.setRouteTemplate(usePathname()); // e.g. "/users/[id]"
  * }, [pathname]);
  */
-export function setRouteTemplate(template: string | null): void {
-  if (!initialized) return;
+export const setRouteTemplate = /* @__PURE__ */ guard("setRouteTemplate", (template: string | null): void => {
   setVitalsRouteTemplate(template);
-}
+});
 
-export function flush(): void {
+export const flush = /* @__PURE__ */ guard("flush", (): void => {
   flushEvents();
-}
+});
 
 /** Tear down the SDK. Flushes remaining data and stops all collection. */
-export function destroy(): void {
-  if (!initialized) return;
-  flushEvents({ beacon: true });
-  stopCollection();
-  destroySession();
-  destroyTransport();
-  initialized = false;
+export const destroy = /* @__PURE__ */ guard("destroy", (): void => {
+  try {
+    flushEvents({ beacon: true });
+  } finally {
+    // Disable callbacks before detaching them. Even if the final flush or an
+    // individual cleanup fails, destroy still leaves the SDK inert.
+    initialized = false;
+    detachAll();
+    // Unlike a rollback, an explicit destroy ends the visitor's session.
+    attemptCleanup("session", sessionEndSession);
+  }
+});
+
+// --- Internal ---
+
+/** Wrap a public entry point. It is inert until init succeeds, and nothing it
+ * does can throw into the host page: the host calls these from its own code
+ * paths, a React render, a router effect, a catch block, and a failure inside
+ * the SDK is the SDK's problem.
+ *
+ * `init` is not wrapped: it needs its own handler, to roll back what it built.
+ * Registered callbacks and listeners are guarded where they are dispatched. */
+function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (...args: A) => void {
+  return (...args: A): void => {
+    if (!initialized) return;
+    try {
+      fn(...args);
+    } catch (error) {
+      logError(`${name} failed`, error);
+    }
+  };
+}
+
+/** Undo what init built: patched fetch/XHR, listeners, observers, timers.
+ * Each step is guarded on its own, so a throw in one still leaves the rest
+ * torn down. The visitor's stored session, user and tags survive: they are not
+ * this page load's to delete. `destroy` ends them separately. */
+function detachAll(): void {
+  attemptCleanup("collection", stopCollection);
+  attemptCleanup("session tracking", stopSessionTracking);
+  attemptCleanup("transport", destroyTransport);
   clientConfig = null;
   resolved = null;
 }
-
-// --- Internal ---
 
 function resolveEndpoint(config: BrowserConfig): string {
   if (config.endpoint) return config.endpoint.replace(/\/$/, "");
@@ -253,19 +295,21 @@ function startCollection(endpoint: string): void {
 function stopCollection(): void {
   // Unregister listeners before tearing down the hook so the hook doesn't
   // call into half-destroyed modules during in-flight requests.
-  destroyTracing();
-  destroyBreadcrumbs();
-  destroyErrors();
-  destroyVitals();
-  destroyNetworkHook();
+  attemptCleanup("tracing", destroyTracing);
+  attemptCleanup("breadcrumbs", destroyBreadcrumbs);
+  attemptCleanup("errors", destroyErrors);
+  attemptCleanup("vitals", destroyVitals);
+  attemptCleanup("network hook", destroyNetworkHook);
 
   if (flushTimer) {
-    clearInterval(flushTimer);
+    const timer = flushTimer;
     flushTimer = null;
+    attemptCleanup("flush timer", () => clearInterval(timer));
   }
-  for (const unsub of lifecycleUnsubscribers) unsub();
+  const unsubscribers = lifecycleUnsubscribers;
   lifecycleUnsubscribers = [];
-  destroyLifecycle();
+  for (const unsub of unsubscribers) attemptCleanup("lifecycle subscription", unsub);
+  attemptCleanup("lifecycle", destroyLifecycle);
 }
 
 function flushEvents({

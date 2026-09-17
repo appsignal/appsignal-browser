@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -123,12 +123,14 @@ export function initErrors(
 
 export function destroyErrors(): void {
   if (errorHandler) {
-    window.removeEventListener("error", errorHandler);
+    const handler = errorHandler;
     errorHandler = null;
+    attemptCleanup("error listener", () => window.removeEventListener("error", handler));
   }
   if (rejectionHandler) {
-    window.removeEventListener("unhandledrejection", rejectionHandler);
+    const handler = rejectionHandler;
     rejectionHandler = null;
+    attemptCleanup("rejection listener", () => window.removeEventListener("unhandledrejection", handler));
   }
   dedupeWindow = [];
   rateWindowStart = 0;
@@ -197,18 +199,18 @@ function handleError(
     stack,
     context,
   };
-  const hookResult = beforeErrorHook ? beforeErrorHook(incoming) : incoming;
+  // A null return drops the error: no breadcrumb, no dedupe slot, no send.
+  const hookResult = applyHook(beforeErrorHook, incoming);
 
   // beforeError is sync only. A Promise return would otherwise pass the
   // truthy check and the SDK would proceed treating the Promise as fields —
   // silent breakage. Detect it, drop the error, and log loudly so a host
   // developer can grep for the message.
   if (hookResult && typeof (hookResult as { then?: unknown }).then === "function") {
-    // eslint-disable-next-line no-console
-    console.error(
-      "[appsignal] beforeError returned a Promise. Async beforeError is " +
-      "not supported; the error was dropped. Move async work outside the " +
-      "hook (e.g. perform it before calling captureError).",
+    logError(
+      "beforeError returned a Promise. Async beforeError is not supported; " +
+      "the error was dropped. Move async work outside the hook (e.g. perform " +
+      "it before calling captureError).",
     );
     return;
   }
@@ -246,6 +248,13 @@ function handleError(
   // so skip it entirely when nobody's listening.
   if (errorListeners.length > 0) {
     payload.session = getSessionContext();
+    // `context` does not reach the wire: toFrontendTransaction leaves it out.
+    // The subscribers are its only readers, so prune it here, where the same
+    // guard already gates getSessionContext, and after the dedupe gate. The
+    // beforeError hook has run by now and saw the host's own objects.
+    if (payload.context) {
+      payload.context = pruneRecordForJson(payload.context);
+    }
     for (const l of errorListeners) {
       try { l(payload); } catch { /* don't break the chain */ }
     }

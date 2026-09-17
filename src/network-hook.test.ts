@@ -78,3 +78,30 @@ describe("network-hook fetch header preservation", () => {
     expect(forwarded.get("traceparent")).toBe("00-abc-def-01");
   });
 });
+
+describe("network-hook teardown that the browser refuses", () => {
+  it("does not wrap its own wrapper when the fetch restore fails", async () => {
+    // A frozen or foreign-owned global refuses the restore. `installed` says
+    // our patch is on the global, so it must stay up: a second init over our
+    // own wrapper would dispatch every request twice, once per layer.
+    const calls: string[] = [];
+    const fetchMock = vi.fn(() => Promise.resolve(new Response("ok")));
+    // The shared beforeEach already patched; start from a clean global.
+    destroyNetworkHook();
+    window.fetch = fetchMock as unknown as typeof window.fetch;
+    initNetworkHook();
+    onBeforeRequest((ctx) => { calls.push(ctx.url); });
+
+    const patched = window.fetch;
+    Object.defineProperty(window, "fetch", { value: patched, writable: false, configurable: true });
+    destroyNetworkHook();
+    initNetworkHook();
+    onBeforeRequest((ctx) => { calls.push(ctx.url); });
+
+    await window.fetch("https://example.com/once");
+
+    expect(calls).toEqual(["https://example.com/once"]);
+    Object.defineProperty(window, "fetch", { value: fetchMock, writable: true, configurable: true });
+    destroyNetworkHook();
+  });
+});

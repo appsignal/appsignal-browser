@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, pruneRecordForJson, applyHook, attemptCleanup } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -184,27 +184,25 @@ export function initBreadcrumbs(
 }
 
 export function addBreadcrumb(breadcrumb: Breadcrumb): void {
-  const result = applyBeforeBreadcrumb(breadcrumb);
+  // A null return drops the breadcrumb from every downstream payload, the
+  // error context and the periodic events flush alike.
+  const result = applyHook(beforeBreadcrumbHook, breadcrumb);
   if (!result) return;
+  // Only a hook can make this data anything but SDK strings and numbers.
+  if (beforeBreadcrumbHook) pruneData(result);
   sessionBuffer.push(result);
   if (ERROR_BUFFER_CATEGORIES.has(result.category)) {
     errorBuffer.push(result);
   }
 }
 
-// beforeBreadcrumb decides whether the breadcrumb enters either buffer.
-// A null return drops it from every downstream payload (error and periodic
-// events flush alike). A thrown callback shouldn't break the SDK — treat
-// it as passthrough rather than drop, so a bug in user code doesn't
-// silently swallow breadcrumbs.
-function applyBeforeBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
-  // Hot path: every network request, click, console call. Skip the hook
-  // entirely when none is configured, rather than running it as identity.
-  if (!beforeBreadcrumbHook) return breadcrumb;
-  try {
-    return beforeBreadcrumbHook(breadcrumb);
-  } catch {
-    return breadcrumb;
+/** Replace `data` with a copy JSON can serialize. Host code and a
+ * beforeBreadcrumb hook both put framework objects here, and breadcrumb data
+ * reaches the wire as metadata. Runs after the hook, so what the hook returns
+ * is pruned too. */
+function pruneData(breadcrumb: Breadcrumb): void {
+  if (breadcrumb.data) {
+    breadcrumb.data = pruneRecordForJson(breadcrumb.data);
   }
 }
 
@@ -216,13 +214,14 @@ export function addManualBreadcrumb(input: {
   // Host-supplied breadcrumbs bypass the error-buffer allowlist — the host
   // called addBreadcrumb() intentionally for debugging, so the breadcrumb
   // belongs in error context regardless of its category name.
-  const result = applyBeforeBreadcrumb({
+  const result = applyHook(beforeBreadcrumbHook, {
     timestamp: Date.now(),
     category: input.category,
     message: input.message,
     data: input.data,
   });
   if (!result) return;
+  pruneData(result);
   sessionBuffer.push(result);
   errorBuffer.push(result);
 }
@@ -1084,17 +1083,22 @@ function initTabLifecycle(): void {
 // --- Destroy ---
 
 export function destroyBreadcrumbs(): void {
-  for (const fn of cleanups) fn();
+  // Clear the registry first so a throwing foreign/browser cleanup cannot
+  // leave the module believing the remaining callbacks are still installed.
+  const pendingCleanups = cleanups;
   cleanups = [];
+  for (const fn of pendingCleanups) attemptCleanup("breadcrumb collector", fn);
   // Restore the handler we captured (may be a foreign wrapper), not native — and
   // only if our wrapper is still on top, else we'd clobber whatever patched over us.
   if (navigationHookInstalled) {
     for (const method of NAV_METHODS) {
-      const current = history[method] as NavPatchedFn<History["pushState"]>;
-      if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
+      attemptCleanup("history patch", () => {
+        const current = history[method] as NavPatchedFn<History["pushState"]>;
+        if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
+      });
     }
     if (popstateHandler) {
-      window.removeEventListener("popstate", popstateHandler);
+      attemptCleanup("popstate listener", () => window.removeEventListener("popstate", popstateHandler!));
       popstateHandler = null;
     }
     navigationHookInstalled = false;

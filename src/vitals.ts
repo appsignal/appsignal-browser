@@ -1,5 +1,5 @@
 import type { EventVital } from "./types.js";
-import { scrubPageUrl, stripTrailingSlash, timeOrigin } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, timeOrigin, attemptCleanup } from "./utils.js";
 import { onFCP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
@@ -305,8 +305,14 @@ function resetRouteVitals(): void {
   inpLastTs = 0;
   inpEmittedValue = -1;
   // Capture the route's page_url now (route start), so a flush after the URL
-  // later advances still attributes this route's metrics to this route.
-  routePageUrl = resolvePageUrl();
+  // later advances still attributes this route's metrics to this route. The
+  // URL read is the only step here that can throw, so it recovers on its own
+  // rather than leaving the caller to guess what already ran.
+  try {
+    routePageUrl = resolvePageUrl();
+  } catch {
+    routePageUrl = "";
+  }
 }
 
 function normalizeRouteTemplate(template: string | null): string {
@@ -340,9 +346,9 @@ export function destroyVitals(): void {
   loadRoute = null;
   pendingLoad = [];
   resetRouteVitals();
-  clsObserver?.disconnect();
-  inpObserver?.disconnect();
-  firstInputObserver?.disconnect();
+  attemptCleanup("cls observer", () => clsObserver?.disconnect());
+  attemptCleanup("inp observer", () => inpObserver?.disconnect());
+  attemptCleanup("first input observer", () => firstInputObserver?.disconnect());
   clsObserver = null;
   inpObserver = null;
   firstInputObserver = null;

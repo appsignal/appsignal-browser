@@ -5,6 +5,8 @@
 // left pointing at an orphaned wrapper. One patch with subscribers is the
 // same pattern the navigation hook in breadcrumbs.ts already uses.
 
+import { attemptCleanup } from "./utils.js";
+
 export interface RequestContext {
   url: string;
   method: string;
@@ -70,12 +72,23 @@ export function initNetworkHook(): void {
 
 export function destroyNetworkHook(): void {
   if (!installed) return;
-  window.fetch = origFetch;
-  XMLHttpRequest.prototype.open = origXhrOpen;
-  XMLHttpRequest.prototype.send = origXhrSend;
+  // Drop the subscriber references first, so a failed restore does not retain
+  // them. `installed` says our patch is on the globals, so it goes down only
+  // for the ones we put back: a later init must not wrap our own wrapper,
+  // which would dispatch every request twice and grow with each cycle.
   beforeListeners = [];
   afterListeners = [];
-  installed = false;
+  let restored = true;
+  if (origFetch) {
+    restored = attemptCleanup("fetch patch", () => { window.fetch = origFetch; }) && restored;
+  }
+  if (origXhrOpen) {
+    restored = attemptCleanup("xhr open patch", () => { XMLHttpRequest.prototype.open = origXhrOpen; }) && restored;
+  }
+  if (origXhrSend) {
+    restored = attemptCleanup("xhr send patch", () => { XMLHttpRequest.prototype.send = origXhrSend; }) && restored;
+  }
+  installed = !restored;
 }
 
 function patchFetch(): void {

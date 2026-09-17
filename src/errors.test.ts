@@ -4,6 +4,7 @@ import {
   destroyErrors,
   getLastErrorTimestamp,
   onErrorReported,
+  reportError,
 } from "./errors.js";
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
@@ -704,5 +705,52 @@ describe("errors", () => {
 
       expect(sendErrorMock).toHaveBeenCalledTimes(8);
     });
+  });
+
+  it("prunes a context that points back at itself before subscribers see it", () => {
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
+    const subscriber = vi.fn();
+    onErrorReported(subscriber);
+
+    // Stimulus hands its own controller to captureError; a controller reaches
+    // itself through its application. Keeping the reference would also pin the
+    // host's object graph in the SDK until the error is sent.
+    const controller: Record<string, unknown> = { identifier: "dropdown" };
+    controller.self = controller;
+
+    expect(() => reportError(new Error("controller failed"), controller)).not.toThrow();
+
+    const event = subscriber.mock.calls[0][0];
+    expect(event.context).toEqual({ identifier: "dropdown", self: "[Circular]" });
+  });
+
+  it("gives beforeError the host's own context object", () => {
+    // The hook inspects class instances (`context.request instanceof Request`),
+    // so it must see the original, not the pruned copy.
+    const seen: unknown[] = [];
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, (event) => {
+      seen.push(event.context);
+      return event;
+    });
+
+    const controller: Record<string, unknown> = { identifier: "dropdown" };
+    controller.self = controller;
+
+    reportError(new Error("controller failed"), controller);
+
+    expect(seen[0]).toBe(controller);
+  });
+
+  it("reports the error when beforeError throws", () => {
+    // A bug in host code must not swallow the error, and must not surface in
+    // whoever called captureError.
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, () => {
+      throw new Error("hook is broken");
+    });
+
+    expect(() => reportError(new Error("real failure"))).not.toThrow();
+
+    expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    expect(sendErrorMock.mock.calls[0][0].error.message).toBe("real failure");
   });
 });
