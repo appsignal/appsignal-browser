@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafeRecord, applyHook, attempt } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, pruneRecordForJson, applyHook, attemptCleanup } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -202,7 +202,7 @@ export function addBreadcrumb(breadcrumb: Breadcrumb): void {
  * is pruned too. */
 function pruneData(breadcrumb: Breadcrumb): void {
   if (breadcrumb.data) {
-    breadcrumb.data = jsonSafeRecord(breadcrumb.data);
+    breadcrumb.data = pruneRecordForJson(breadcrumb.data);
   }
 }
 
@@ -1087,18 +1087,18 @@ export function destroyBreadcrumbs(): void {
   // leave the module believing the remaining callbacks are still installed.
   const pendingCleanups = cleanups;
   cleanups = [];
-  for (const fn of pendingCleanups) attempt("collector", fn);
+  for (const fn of pendingCleanups) attemptCleanup("breadcrumb collector", fn);
   // Restore the handler we captured (may be a foreign wrapper), not native — and
   // only if our wrapper is still on top, else we'd clobber whatever patched over us.
   if (navigationHookInstalled) {
     for (const method of NAV_METHODS) {
-      attempt("history patch", () => {
+      attemptCleanup("history patch", () => {
         const current = history[method] as NavPatchedFn<History["pushState"]>;
         if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
       });
     }
     if (popstateHandler) {
-      attempt("popstate listener", () => window.removeEventListener("popstate", popstateHandler!));
+      attemptCleanup("popstate listener", () => window.removeEventListener("popstate", popstateHandler!));
       popstateHandler = null;
     }
     navigationHookInstalled = false;

@@ -1,5 +1,5 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
-import { logError, attempt } from "./utils.js";
+import { logError, attemptCleanup } from "./utils.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -59,13 +59,13 @@ export function destroyTransport(): void {
   if (retryDrainTimer) {
     const timer = retryDrainTimer;
     retryDrainTimer = null;
-    attempt("retry drain timer", () => clearTimeout(timer));
+    attemptCleanup("retry drain timer", () => clearTimeout(timer));
   }
-  for (const t of pendingRetries) attempt("retry timer", () => clearTimeout(t));
+  for (const t of pendingRetries) attemptCleanup("retry timer", () => clearTimeout(t));
   pendingRetries.clear();
   if (listeningForOnline) {
     listeningForOnline = false;
-    attempt("online listener", () => window.removeEventListener("online", flushOnline));
+    attemptCleanup("online listener", () => window.removeEventListener("online", flushOnline));
   }
   retryQueue = [];
   retryQueueBytes = 0;
@@ -84,7 +84,7 @@ function contentTypeFor(kind: Kind): string {
   return kind === "error" ? "application/json" : "text/plain";
 }
 
-/** Serialize a payload without letting the failure reach host code. `jsonSafe`
+/** Serialize a payload without letting the failure reach host code. `pruneForJson`
  * prunes host values at capture, so a throw here means one got past it. A
  * dropped payload is bad. A throw out of `sendError` into the caller of
  * `captureError` is worse. */

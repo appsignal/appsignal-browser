@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe, jsonSafeRecord, logError, attempt } from "./utils.js";
+import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, pruneForJson, pruneRecordForJson, logError, attemptCleanup } from "./utils.js";
 
 describe("logError", () => {
   afterEach(() => {
@@ -99,7 +99,6 @@ describe("storage helper", () => {
       });
       expect(() => storage.setJSON("local", "k", { a: 1 })).not.toThrow();
     });
-
 
     it("keeps a refused write in memory, so ids stay coherent", () => {
       // Safari's old private mode throws on every setItem while getItem keeps
@@ -500,12 +499,12 @@ describe("randomBytes fallback", () => {
   });
 });
 
-describe("jsonSafe", () => {
+describe("pruneForJson", () => {
   it("replaces a back-reference so the value can be serialized", () => {
     const controller: Record<string, unknown> = { identifier: "dropdown" };
     controller.self = controller;
 
-    const safe = jsonSafe(controller);
+    const safe = pruneForJson(controller);
 
     expect(safe).toEqual({ identifier: "dropdown", self: "[Circular]" });
     expect(() => JSON.stringify(safe)).not.toThrow();
@@ -514,23 +513,23 @@ describe("jsonSafe", () => {
   it("keeps a repeated sibling reference, which is not circular", () => {
     const shared = { id: 1 };
 
-    expect(jsonSafe({ a: shared, b: shared })).toEqual({ a: { id: 1 }, b: { id: 1 } });
+    expect(pruneForJson({ a: shared, b: shared })).toEqual({ a: { id: 1 }, b: { id: 1 } });
   });
 
   it("caps depth and entry count", () => {
     const deep = { a: { b: { c: { d: { e: "too far" } } } } };
-    expect(jsonSafe(deep)).toEqual({ a: { b: { c: { d: "[Object]" } } } });
+    expect(pruneForJson(deep)).toEqual({ a: { b: { c: { d: "[Object]" } } } });
 
     const wide: Record<string, number> = {};
     for (let i = 0; i < 80; i++) wide[`k${i}`] = i;
-    expect(Object.keys(jsonSafe(wide) as object)).toHaveLength(50);
+    expect(Object.keys(pruneForJson(wide) as object)).toHaveLength(50);
 
     const long = Array.from({ length: 80 }, (_, i) => i);
-    expect(jsonSafe(long)).toHaveLength(50);
+    expect(pruneForJson(long)).toHaveLength(50);
   });
 
   it("drops what JSON has no place for, and coerces what it chokes on", () => {
-    const safe = jsonSafe({
+    const safe = pruneForJson({
       keep: "yes",
       fn: () => "no",
       big: 10n,
@@ -551,29 +550,29 @@ describe("jsonSafe", () => {
       get boom(): never { throw new Error("detached"); },
     };
 
-    expect(jsonSafe(hostile)).toEqual({ ok: 1 });
+    expect(pruneForJson(hostile)).toEqual({ ok: 1 });
   });
 
   it("asks toJSON first, as JSON.stringify does", () => {
-    expect(jsonSafe({ when: new Date("2026-09-17T00:00:00Z") })).toEqual({
+    expect(pruneForJson({ when: new Date("2026-09-17T00:00:00Z") })).toEqual({
       when: "2026-09-17T00:00:00.000Z",
     });
     // A Luxon DateTime or a Moment keeps the string the host used to see.
     const custom = { internal: 1, toJSON: () => "rendered" };
-    expect(jsonSafe({ custom })).toEqual({ custom: "rendered" });
+    expect(pruneForJson({ custom })).toEqual({ custom: "rendered" });
   });
 
   it("does not throw on an invalid Date", () => {
     // toISOString throws RangeError here; toJSON answers null.
-    expect(() => jsonSafe({ when: new Date("nope") })).not.toThrow();
-    expect(jsonSafe({ when: new Date("nope") })).toEqual({ when: null });
+    expect(() => pruneForJson({ when: new Date("nope") })).not.toThrow();
+    expect(pruneForJson({ when: new Date("nope") })).toEqual({ when: null });
   });
 
   it("marks a subtree it cannot read, and keeps the rest", () => {
     const revocable = Proxy.revocable({ a: 1 }, {});
     revocable.revoke();
 
-    expect(jsonSafe({ keep: "yes", gone: revocable.proxy })).toEqual({
+    expect(pruneForJson({ keep: "yes", gone: revocable.proxy })).toEqual({
       keep: "yes",
       gone: "[Unserializable]",
     });
@@ -585,23 +584,23 @@ describe("jsonSafe", () => {
 
     // A top-level value that prunes to a marker still ships as an object,
     // because breadcrumb metadata and error context are records on the wire.
-    expect(jsonSafeRecord(revocable.proxy as Record<string, unknown>)).toEqual({
+    expect(pruneRecordForJson(revocable.proxy as Record<string, unknown>)).toEqual({
       value: "[Unserializable]",
     });
-    expect(jsonSafeRecord({ a: 1 })).toEqual({ a: 1 });
+    expect(pruneRecordForJson({ a: 1 })).toEqual({ a: 1 });
   });
 
   it("bounds the whole walk, not just each level", () => {
     // 50 entries over 4 levels reaches millions of nodes. A React fiber or a
     // Vue component instance gets there, and this runs on the error path.
-    const wide = (depth) => {
+    const wide = (depth: number): unknown => {
       if (depth === 0) return "leaf";
-      const level = {};
+      const level: Record<string, unknown> = {};
       for (let i = 0; i < 50; i++) level[`k${i}`] = wide(depth - 1);
       return level;
     };
 
-    const safe = jsonSafe(wide(4));
+    const safe = pruneForJson(wide(4));
 
     const encoded = JSON.stringify(safe);
     expect(encoded).toContain("[Truncated]");
@@ -611,16 +610,16 @@ describe("jsonSafe", () => {
   });
 });
 
-describe("attempt", () => {
+describe("attemptCleanup", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("answers whether the step ran, and logs the one that did not", () => {
     const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    expect(attempt("clean step", () => {})).toBe(true);
+    expect(attemptCleanup("clean step", () => {})).toBe(true);
     expect(logSpy).not.toHaveBeenCalled();
 
-    expect(attempt("hostile step", () => { throw new Error("refused"); })).toBe(false);
+    expect(attemptCleanup("hostile step", () => { throw new Error("refused"); })).toBe(false);
     expect(logSpy.mock.calls[0][0]).toContain("hostile step cleanup failed");
   });
 });

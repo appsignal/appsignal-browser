@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord, applyHook, logError, attempt } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -125,12 +125,12 @@ export function destroyErrors(): void {
   if (errorHandler) {
     const handler = errorHandler;
     errorHandler = null;
-    attempt("error listener", () => window.removeEventListener("error", handler));
+    attemptCleanup("error listener", () => window.removeEventListener("error", handler));
   }
   if (rejectionHandler) {
     const handler = rejectionHandler;
     rejectionHandler = null;
-    attempt("rejection listener", () => window.removeEventListener("unhandledrejection", handler));
+    attemptCleanup("rejection listener", () => window.removeEventListener("unhandledrejection", handler));
   }
   dedupeWindow = [];
   rateWindowStart = 0;
@@ -253,7 +253,7 @@ function handleError(
     // guard already gates getSessionContext, and after the dedupe gate. The
     // beforeError hook has run by now and saw the host's own objects.
     if (payload.context) {
-      payload.context = jsonSafeRecord(payload.context);
+      payload.context = pruneRecordForJson(payload.context);
     }
     for (const l of errorListeners) {
       try { l(payload); } catch { /* don't break the chain */ }

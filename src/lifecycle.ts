@@ -3,7 +3,7 @@
 // consolidating here cuts the registration/teardown surface and keeps
 // the firing order consistent across modules.
 
-import { attempt } from "./utils.js";
+import { attemptCleanup } from "./utils.js";
 
 type VisListener = (state: DocumentVisibilityState) => void;
 type PageHideListener = (persisted: boolean) => void;
@@ -55,20 +55,23 @@ function ensureInstalled(): void {
 
 export function destroyLifecycle(): void {
   if (!installed) return;
-  const visibility = visHandler;
-  const pageHide = pageHideHandler;
-  visHandler = null;
-  pageHideHandler = null;
   visListeners = [];
   pageHideListeners = [];
   // `installed` says our listeners are on the globals, so it goes down only
   // when they are off. A later ensureInstalled must not attach a second pair.
-  let detached = true;
-  if (visibility) {
-    detached = attempt("visibility listener", () => document.removeEventListener("visibilitychange", visibility)) && detached;
+  // A handler stays referenced until its detach succeeds, so a later destroy
+  // can retry it, the way the network hook keeps the original fetch.
+  if (visHandler) {
+    const handler = visHandler;
+    if (attemptCleanup("visibility listener", () => document.removeEventListener("visibilitychange", handler))) {
+      visHandler = null;
+    }
   }
-  if (pageHide) {
-    detached = attempt("pagehide listener", () => window.removeEventListener("pagehide", pageHide as EventListener)) && detached;
+  if (pageHideHandler) {
+    const handler = pageHideHandler;
+    if (attemptCleanup("pagehide listener", () => window.removeEventListener("pagehide", handler as EventListener))) {
+      pageHideHandler = null;
+    }
   }
-  installed = !detached;
+  installed = visHandler !== null || pageHideHandler !== null;
 }

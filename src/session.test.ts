@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, setTags, clearTags, getTags, getSessionContext, touchActivity, endSession, destroySession, stopSessionTracking } from "./session.js";
+import { initSession, getSessionId, getTabId, getAnonymousId, setUser, clearUser, setTags, clearTags, getTags, getSessionContext, touchActivity, endSession, stopSessionTracking } from "./session.js";
 
 describe("session", () => {
   beforeEach(() => {
@@ -274,7 +274,7 @@ describe("session", () => {
         close() {}
       };
       vi.stubGlobal("BroadcastChannel", FakeBC);
-      destroySession(); // reset module-level tabChannel from any prior test
+      stopSessionTracking(); // reset module-level tabChannel from any prior test
 
       initSession(1800000);
       const initialTabId = getTabId();
@@ -306,7 +306,7 @@ describe("session", () => {
         close() {}
       };
       vi.stubGlobal("BroadcastChannel", FakeBC);
-      destroySession(); // reset module-level tabChannel from any prior test
+      stopSessionTracking(); // reset module-level tabChannel from any prior test
 
       initSession(1800000);
       const initialTabId = getTabId();

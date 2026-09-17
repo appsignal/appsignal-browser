@@ -9,7 +9,7 @@ import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_P
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
-import { logError, attempt } from "./utils.js";
+import { logError, attemptCleanup } from "./utils.js";
 
 export type { BrowserConfig } from "./types.js";
 
@@ -47,7 +47,7 @@ export function init(config: BrowserConfig): void {
     // here runs before their own code and takes the page down with it. The
     // flag stays down, so every public method no-ops instead of running
     // against state that startCollection never finished to build.
-    teardown();
+    detachAll();
     logError("init failed; the SDK is inactive", error);
     return;
   }
@@ -161,9 +161,9 @@ export const destroy = /* @__PURE__ */ guard("destroy", (): void => {
     // Disable callbacks before detaching them. Even if the final flush or an
     // individual cleanup fails, destroy still leaves the SDK inert.
     initialized = false;
-    teardown();
+    detachAll();
     // Unlike a rollback, an explicit destroy ends the visitor's session.
-    attempt("session", sessionEndSession);
+    attemptCleanup("session", sessionEndSession);
   }
 });
 
@@ -191,10 +191,10 @@ function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (..
  * Each step is guarded on its own, so a throw in one still leaves the rest
  * torn down. The visitor's stored session, user and tags survive: they are not
  * this page load's to delete. `destroy` ends them separately. */
-function teardown(): void {
-  attempt("collection", stopCollection);
-  attempt("session tracking", stopSessionTracking);
-  attempt("transport", destroyTransport);
+function detachAll(): void {
+  attemptCleanup("collection", stopCollection);
+  attemptCleanup("session tracking", stopSessionTracking);
+  attemptCleanup("transport", destroyTransport);
   clientConfig = null;
   resolved = null;
 }
@@ -295,21 +295,21 @@ function startCollection(endpoint: string): void {
 function stopCollection(): void {
   // Unregister listeners before tearing down the hook so the hook doesn't
   // call into half-destroyed modules during in-flight requests.
-  attempt("tracing", destroyTracing);
-  attempt("breadcrumbs", destroyBreadcrumbs);
-  attempt("errors", destroyErrors);
-  attempt("vitals", destroyVitals);
-  attempt("network hook", destroyNetworkHook);
+  attemptCleanup("tracing", destroyTracing);
+  attemptCleanup("breadcrumbs", destroyBreadcrumbs);
+  attemptCleanup("errors", destroyErrors);
+  attemptCleanup("vitals", destroyVitals);
+  attemptCleanup("network hook", destroyNetworkHook);
 
   if (flushTimer) {
     const timer = flushTimer;
     flushTimer = null;
-    attempt("flush timer", () => clearInterval(timer));
+    attemptCleanup("flush timer", () => clearInterval(timer));
   }
   const unsubscribers = lifecycleUnsubscribers;
   lifecycleUnsubscribers = [];
-  for (const unsub of unsubscribers) attempt("lifecycle subscription", unsub);
-  attempt("lifecycle", destroyLifecycle);
+  for (const unsub of unsubscribers) attemptCleanup("lifecycle subscription", unsub);
+  attemptCleanup("lifecycle", destroyLifecycle);
 }
 
 function flushEvents({

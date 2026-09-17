@@ -95,7 +95,7 @@ const MAX_JSON_NODES = 1000;
  * Pruning at capture keeps the rest of the payload, and releases the host's
  * object graph. The caps bound the copy, because one controller reaches most
  * of the application through its own properties. */
-export function jsonSafe(value: unknown): unknown {
+export function pruneForJson(value: unknown): unknown {
   return copyValue(value, 0, [], { left: MAX_JSON_NODES });
 }
 
@@ -166,12 +166,12 @@ function copyValue(value: unknown, depth: number, ancestors: object[], budget: N
   }
 }
 
-/** `jsonSafe` for a value that has to stay a record: breadcrumb `data` and
+/** `pruneForJson` for a value that has to stay a record: breadcrumb `data` and
  * error `context` both ship as objects. A top-level marker string, or a
  * `toJSON` that answers a primitive, keeps its value under a key instead of
  * replacing the record with a string. */
-export function jsonSafeRecord(value: Record<string, unknown>): Record<string, unknown> {
-  const safe = jsonSafe(value);
+export function pruneRecordForJson(value: Record<string, unknown>): Record<string, unknown> {
+  const safe = pruneForJson(value);
   if (safe !== null && typeof safe === "object" && !Array.isArray(safe)) {
     return safe as Record<string, unknown>;
   }
@@ -200,7 +200,7 @@ export function logError(message: string, error?: unknown): void {
  * Answers whether the step ran, for the callers that keep an "installed" flag:
  * that flag says our patch is on the global, so it may only go down for the
  * ones that came off. */
-export function attempt(name: string, fn: () => void): boolean {
+export function attemptCleanup(name: string, fn: () => void): boolean {
   try {
     fn();
     return true;
@@ -322,7 +322,6 @@ export function globMatch(pattern: string, input: string): boolean {
   return new RegExp(`^${regex}$`).test(input);
 }
 
-
 // --- Identifiers ---
 
 /** N bytes of randomness. Reaching the generator is not guaranteed: Firefox
@@ -376,15 +375,12 @@ export function uuidv4(): string {
   return formatUuid(bytes);
 }
 
-
-
 /** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
  * can't drift in output shape. */
 function formatUuid(bytes: Uint8Array): string {
   const hex = toHex(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-
 
 /** RFC 9562 §5.7 v7: 48-bit big-endian Unix-ms timestamp, then version +
  * variant bits, then 74 random bits. Lex-sort of v7 strings matches

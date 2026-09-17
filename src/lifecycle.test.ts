@@ -56,3 +56,35 @@ describe("lifecycle", () => {
     expect(b).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("lifecycle teardown that the browser refuses", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    destroyLifecycle();
+  });
+
+  it("keeps the handler so a later destroy can retry the detach", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    onVisibilityChange(() => {});
+    const docRemove = vi.spyOn(document, "removeEventListener").mockImplementationOnce(() => {
+      throw new Error("foreign listener cleanup failed");
+    });
+    const docAdd = vi.spyOn(document, "addEventListener");
+
+    destroyLifecycle();
+
+    // Still installed: a new subscriber must not attach a second listener,
+    // because the first one is still on the document and still dispatches.
+    onVisibilityChange(() => {});
+    expect(docAdd.mock.calls.filter(([type]) => type === "visibilitychange")).toHaveLength(0);
+
+    // The retry detaches the same handler the first attempt could not.
+    destroyLifecycle();
+    const removals = docRemove.mock.calls.filter(([type]) => type === "visibilitychange");
+    expect(removals).toHaveLength(2);
+    expect(removals[0][1]).toBe(removals[1][1]);
+
+    onVisibilityChange(() => {});
+    expect(docAdd.mock.calls.filter(([type]) => type === "visibilitychange")).toHaveLength(1);
+  });
+});

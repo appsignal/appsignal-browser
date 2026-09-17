@@ -1,5 +1,5 @@
 import type { ErrorTags, SessionContext, UserContext } from "./types.js";
-import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7, attempt } from "./utils.js";
+import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7, attemptCleanup } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
@@ -293,11 +293,6 @@ function startActivityTracking(): void {
   window.addEventListener("storage", storageHandler);
 }
 
-export function destroySession(): void {
-  endSession();
-  stopSessionTracking();
-}
-
 /** Detach the listeners that initSession attached, and keep the visitor's
  * stored session, user and tags. A failed init rolls back with this: the
  * session id, the user and the tags are the visitor's own state, which this
@@ -307,18 +302,18 @@ export function stopSessionTracking(): void {
     const handler = activityHandler;
     activityHandler = null;
     for (const event of ACTIVITY_EVENTS) {
-      attempt("activity listener", () => document.removeEventListener(event, handler, { capture: true }));
+      attemptCleanup("activity listener", () => document.removeEventListener(event, handler, { capture: true }));
     }
   }
   if (unsubVisibility) {
     const unsubscribe = unsubVisibility;
     unsubVisibility = null;
-    attempt("visibility subscription", unsubscribe);
+    attemptCleanup("visibility subscription", unsubscribe);
   }
   if (storageHandler) {
     const handler = storageHandler;
     storageHandler = null;
-    attempt("storage listener", () => window.removeEventListener("storage", handler));
+    attemptCleanup("storage listener", () => window.removeEventListener("storage", handler));
   }
   if (tabChannel) {
     const channel = tabChannel;
@@ -326,9 +321,9 @@ export function stopSessionTracking(): void {
     if (tabChannelHandler) {
       const handler = tabChannelHandler;
       tabChannelHandler = null;
-      attempt("tab channel listener", () => channel.removeEventListener("message", handler));
+      attemptCleanup("tab channel listener", () => channel.removeEventListener("message", handler));
     }
-    attempt("tab channel", () => channel.close());
+    attemptCleanup("tab channel", () => channel.close());
   }
   // The timer outlives the listeners it was armed alongside.
   clearActivityTimer();
@@ -338,7 +333,7 @@ export function stopSessionTracking(): void {
 
 // Stable for the lifetime of a page; cached lazily on first read so we don't
 // recompute Intl.DateTimeFormat on every payload (errors, event flushes,
-// replay chunks). Reset on destroySession so a re-init picks up changes
+// replay chunks). Reset on stopSessionTracking so a re-init picks up changes
 // (test reloads, jsdom env mutations).
 interface StaticContextFields {
   referrer: string;
