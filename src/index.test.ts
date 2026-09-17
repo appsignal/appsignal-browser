@@ -443,4 +443,26 @@ describe("SDK integration", () => {
 
     expect(consoleSpy.mock.calls[0][0]).toContain("captureError");
   });
+
+  it("keeps its own failures out of the host's error stream", () => {
+    // isOwnError matches "@appsignal/browser" against the stack. A bundler
+    // renames the file to /assets/index-a1b2c3.js and minifies the frames, so
+    // the SDK cannot recognise its own throw there. Catching at the
+    // registration site means the throw never reaches window.onerror, where
+    // the SDK would report it as the customer's own error.
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key", privacy: { dom: { blockElement: [".secret"] } } });
+    // Stands in for any bug inside the click collector.
+    vi.spyOn(Element.prototype, "closest").mockImplementation(() => {
+      throw new Error("SDK bug");
+    });
+
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    expect(() => button.click()).not.toThrow();
+
+    expect(sentPayloads.filter(p => p.url.includes("/errors"))).toHaveLength(0);
+    expect(consoleSpy.mock.calls[0][0]).toContain("click failed");
+    button.remove();
+  });
 });

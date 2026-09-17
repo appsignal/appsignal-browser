@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafeRecord, applyHook } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafeRecord, applyHook, guarded } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -130,7 +130,7 @@ function ensureNavigationHook(): void {
 
   // Remove previous popstate handler before adding a new one (reinit safety)
   if (popstateHandler) window.removeEventListener("popstate", popstateHandler);
-  popstateHandler = () => { dispatchPre(); dispatchPost(); };
+  popstateHandler = guarded("popstate", () => { dispatchPre(); dispatchPost(); });
   window.addEventListener("popstate", popstateHandler);
 }
 
@@ -162,7 +162,7 @@ export function initBreadcrumbs(
   if (document.readyState === "complete") {
     recordDocumentLoad();
   } else {
-    window.addEventListener("load", () => recordDocumentLoad(), { once: true });
+    window.addEventListener("load", guarded("document load", () => recordDocumentLoad()), { once: true });
   }
   initResourceTimingObserver();
   cleanups.push(
@@ -273,7 +273,7 @@ function clickDistance(a: ClickRecord, b: ClickRecord): number {
 }
 
 function initClicks(): void {
-  const handler = (e: MouseEvent) => {
+  const handler = guarded("click", (e: MouseEvent) => {
       if (!config.clicks) return;
       const target = e.target as Element;
       // Suppress the entire click pipeline (click + rage/dead/error) when the
@@ -332,7 +332,7 @@ function initClicks(): void {
 
       // Error click detection: click followed by a JS error within 1 second
       detectErrorClick(selector, now, x, y);
-  };
+  });
   document.addEventListener("click", handler, { capture: true, passive: true });
   cleanups.push(() => document.removeEventListener("click", handler, { capture: true }));
 }
@@ -657,7 +657,7 @@ function initResourceTimingObserver(): void {
   if (typeof PerformanceObserver === "undefined") return;
 
   try {
-    const observer = new PerformanceObserver((list) => {
+    const observer = new PerformanceObserver(guarded("resource timing", (list) => {
       const now = Date.now();
       for (const entry of list.getEntries()) {
         const rt = entry as PerformanceResourceTiming;
@@ -673,7 +673,7 @@ function initResourceTimingObserver(): void {
       resourceTimings = resourceTimings
         .filter((t) => now - t.addedAt <= TIMING_MAX_AGE_MS)
         .slice(-TIMING_MAX_ENTRIES);
-    });
+    }));
     // `buffered: true` replays entries recorded before the observer registered,
     // covering the gap between initNetworkHook (which starts producing network
     // breadcrumbs) and this observer. Requests that finished before the hook was
@@ -908,7 +908,7 @@ function initLongTasks(): void {
 
   // Try Long Animation Frame API first (Chrome 123+) — has script attribution
   try {
-    const observer = new PerformanceObserver((list) => {
+    const observer = new PerformanceObserver(guarded("long task", (list) => {
       if (!config.longTasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
@@ -942,7 +942,7 @@ function initLongTasks(): void {
           });
         }
       }
-    });
+    }));
     observer.observe({ type: "long-animation-frame", buffered: true });
     cleanups.push(() => observer.disconnect());
     return;
@@ -952,7 +952,7 @@ function initLongTasks(): void {
 
   // Fallback: basic longtask observer (no attribution)
   try {
-    const observer = new PerformanceObserver((list) => {
+    const observer = new PerformanceObserver(guarded("long task", (list) => {
       if (!config.longTasks) return;
       for (const entry of list.getEntries()) {
         if (entry.duration > 50) {
@@ -964,7 +964,7 @@ function initLongTasks(): void {
           });
         }
       }
-    });
+    }));
     observer.observe({ entryTypes: ["longtask"] });
     cleanups.push(() => observer.disconnect());
   } catch {
@@ -1019,7 +1019,7 @@ function initScrollDepth(): void {
   // viewport scroll position which reflects the page-level reading depth.
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
   let lastScrollTarget: EventTarget | null = null;
-  const scrollHandler = (e: Event) => {
+  const scrollHandler = guarded("scroll", (e: Event) => {
     if (!config.scrollDepth) return;
     lastScrollTarget = e.target;
     if (throttleTimer) return;
@@ -1028,7 +1028,7 @@ function initScrollDepth(): void {
       const pct = getScrollPercent(lastScrollTarget);
       if (pct > maxScrollPercent) maxScrollPercent = pct;
     }, 200);
-  };
+  });
   document.addEventListener("scroll", scrollHandler, { capture: true, passive: true });
 
   onBeforeNavigation(flushScrollDepth);
