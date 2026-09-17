@@ -351,4 +351,41 @@ describe("SDK integration", () => {
     expect(errorPayloads.length).toBeGreaterThan(0);
     expect(errorPayloads[0].tags).toEqual({});
   });
+
+  it("stays inactive when startCollection throws, instead of taking the host down", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A config whose getter throws stands in for anything that can fail inside
+    // startCollection — a blocked storage global, an RNG that refuses.
+    expect(() =>
+      init({
+        key: "test-key",
+        get beforeBreadcrumb(): undefined { throw new Error("boom"); },
+      }),
+    ).not.toThrow();
+
+    expect(consoleSpy).toHaveBeenCalled();
+    // Rolled back: the public API no-ops rather than running against state
+    // startCollection never finished building, and nothing is sent.
+    expect(() => captureError(new Error("after failed init"))).not.toThrow();
+    expect(() => setTags({ plan: "pro" })).not.toThrow();
+    expect(() => addBreadcrumb({ category: "test", message: "hi" })).not.toThrow();
+    expect(sentPayloads).toHaveLength(0);
+  });
+
+  it("reports an error after a breadcrumb whose data points back at itself", () => {
+    init({ key: "test-key" });
+
+    const node: Record<string, unknown> = { tag: "div" };
+    node.parent = node;
+    addBreadcrumb({ category: "dom", message: "mounted", data: node });
+
+    expect(() => captureError(new Error("later failure"))).not.toThrow();
+
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/errors"));
+    expect(errorPayloads).toHaveLength(1);
+    const body = JSON.parse(errorPayloads[0].body);
+    const crumb = body.breadcrumbs.find((b: { message: string }) => b.message === "mounted");
+    expect(crumb.metadata).toEqual({ tag: "div", parent: "[Circular]" });
+  });
 });

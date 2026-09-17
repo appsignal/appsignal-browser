@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafe } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -220,7 +220,7 @@ export function addManualBreadcrumb(input: {
     timestamp: Date.now(),
     category: input.category,
     message: input.message,
-    data: input.data,
+    data: input.data ? (jsonSafe(input.data) as Record<string, unknown>) : undefined,
   });
   if (!result) return;
   sessionBuffer.push(result);

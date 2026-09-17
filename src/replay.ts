@@ -54,14 +54,14 @@ const chunkIndexKey = (sessionId: string, tabId: string) =>
 
 function nextChunkIndex(sessionId: string, tabId: string): number {
   const key = chunkIndexKey(sessionId, tabId);
-  const current = Number(storage.getString(sessionStorage, key) || "0");
-  storage.setString(sessionStorage, key, String(current + 1));
+  const current = Number(storage.getString("session", key) || "0");
+  storage.setString("session", key, String(current + 1));
   return current;
 }
 
 /** Clear chunk counter on session end so keys don't pile up in long-lived tabs. */
 export function clearChunkIndex(sessionId: string, tabId: string): void {
-  storage.remove(sessionStorage, chunkIndexKey(sessionId, tabId));
+  storage.remove("session", chunkIndexKey(sessionId, tabId));
 }
 
 export function initReplay(

@@ -33,13 +33,38 @@ export function init(config: BrowserConfig): void {
   // (e.g. `active: import.meta.env.PROD`) so dev/test/CI never sends data.
   // Public methods already guard on `initialized`, so they stay safe no-ops.
   if (config.active === false) return;
-  initialized = true;
-  clientConfig = config;
-  resolved = resolveConfig(config);
 
-  const endpoint = resolveEndpoint(config);
-  initTransport(endpoint, config.key);
-  startCollection(endpoint);
+  try {
+    clientConfig = config;
+    resolved = resolveConfig(config);
+
+    const endpoint = resolveEndpoint(config);
+    initTransport(endpoint, config.key);
+    startCollection(endpoint);
+  } catch (error) {
+    // Hosts import this module at the top of their entry bundle, so a throw
+    // here runs before their own code and takes the page down with it. The
+    // flag stays down, so every public method no-ops instead of running
+    // against state that startCollection never finished to build.
+    rollbackInit();
+    // eslint-disable-next-line no-console
+    console.error("[appsignal] init failed; the SDK is inactive", error);
+    return;
+  }
+
+  // Last, not first: the flag says that collection runs.
+  initialized = true;
+}
+
+/** Undo what a failed init built: patched fetch/XHR, listeners, observers.
+ * Each teardown is guarded, because it can run against a module that was
+ * never initialised. */
+function rollbackInit(): void {
+  try { stopCollection(); } catch { /* best effort */ }
+  try { destroySession(); } catch { /* best effort */ }
+  try { destroyTransport(); } catch { /* best effort */ }
+  clientConfig = null;
+  resolved = null;
 }
 
 /** Identify the current user (`id`, `email`, `name`). Rides the session/journey

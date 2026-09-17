@@ -4,6 +4,7 @@ import {
   destroyErrors,
   getLastErrorTimestamp,
   onErrorReported,
+  reportError,
 } from "./errors.js";
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
@@ -704,5 +705,22 @@ describe("errors", () => {
 
       expect(sendErrorMock).toHaveBeenCalledTimes(8);
     });
+  });
+
+  it("prunes a context that points back at itself before subscribers see it", () => {
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
+    const subscriber = vi.fn();
+    onErrorReported(subscriber);
+
+    // Stimulus hands its own controller to captureError; a controller reaches
+    // itself through its application. Keeping the reference would also pin the
+    // host's object graph in the SDK until the error is sent.
+    const controller: Record<string, unknown> = { identifier: "dropdown" };
+    controller.self = controller;
+
+    expect(() => reportError(new Error("controller failed"), controller)).not.toThrow();
+
+    const event = subscriber.mock.calls[0][0];
+    expect(event.context).toEqual({ identifier: "dropdown", self: "[Circular]" });
   });
 });

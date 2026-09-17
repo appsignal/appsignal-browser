@@ -293,4 +293,15 @@ describe("transport", () => {
     await vi.advanceTimersByTimeAsync(31_000);
     expect(fetchSpy).toHaveBeenCalledTimes(5);
   });
+
+  it("drops an unserializable payload instead of throwing at the caller", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const payload = errorPayload() as unknown as Record<string, unknown>;
+    payload.self = payload;
+
+    expect(() => sendError(payload as unknown as FrontendTransaction)).not.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalled();
+  });
 });

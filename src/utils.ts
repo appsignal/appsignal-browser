@@ -1,29 +1,112 @@
-// Defensive wrappers around the Web Storage API. `Storage` is the DOM
-// interface implemented by `localStorage` and `sessionStorage` (defined in
-// lib.dom.d.ts). Direct calls throw when storage is disabled (Safari private
-// mode in older versions, corporate policy, sandboxed iframes) or when quota
-// is exceeded. Every storage operation in this SDK should go through these
-// so a single failed write can't crash init or a flush.
+// Defensive wrappers around the Web Storage API, addressed by area name
+// rather than by a `Storage` object: reading the `localStorage` global is
+// itself a throwing operation — SecurityError when the origin's site data is
+// blocked (browser setting, corporate policy, sandboxed iframe), ReferenceError
+// when the global is absent — so the area has to be resolved inside the guard
+// or it throws past the call site. Individual operations throw too, when
+// storage is disabled or quota is exceeded. Every storage operation in this
+// SDK should go through these so a single failed read can't crash init or a
+// flush.
+export type StorageArea = "local" | "session";
+
+// Stands in for an unreachable area so anonymous_id / tab_id / session_id stay
+// coherent for the page lifetime instead of being empty. Not persisted, so
+// these visitors look like a new session on every page load.
+const fallback: Record<StorageArea, Map<string, string>> = {
+  local: new Map(),
+  session: new Map(),
+};
+
+function resolveArea(area: StorageArea): Storage | null {
+  try {
+    return (area === "local" ? localStorage : sessionStorage) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export const storage = {
-  getString(area: Storage, key: string): string | null {
-    try { return area.getItem(key); } catch { return null; }
+  getString(area: StorageArea, key: string): string | null {
+    const store = resolveArea(area);
+    if (!store) return fallback[area].get(key) ?? null;
+    try { return store.getItem(key); } catch { return null; }
   },
-  setString(area: Storage, key: string, value: string): void {
-    try { area.setItem(key, value); } catch { /* ignore */ }
+  setString(area: StorageArea, key: string, value: string): void {
+    const store = resolveArea(area);
+    if (!store) { fallback[area].set(key, value); return; }
+    try { store.setItem(key, value); } catch { /* ignore */ }
   },
-  remove(area: Storage, key: string): void {
-    try { area.removeItem(key); } catch { /* ignore */ }
+  remove(area: StorageArea, key: string): void {
+    const store = resolveArea(area);
+    if (!store) { fallback[area].delete(key); return; }
+    try { store.removeItem(key); } catch { /* ignore */ }
   },
-  getJSON<T>(area: Storage, key: string): T | null {
-    try {
-      const raw = area.getItem(key);
-      return raw ? (JSON.parse(raw) as T) : null;
-    } catch { return null; }
+  getJSON<T>(area: StorageArea, key: string): T | null {
+    const raw = storage.getString(area, key);
+    if (!raw) return null;
+    try { return JSON.parse(raw) as T; } catch { return null; }
   },
-  setJSON(area: Storage, key: string, value: unknown): void {
-    try { area.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+  setJSON(area: StorageArea, key: string, value: unknown): void {
+    // JSON.stringify throws on circular structures and BigInt values.
+    try { storage.setString(area, key, JSON.stringify(value)); } catch { /* ignore */ }
   },
 };
+
+const MAX_JSON_DEPTH = 4;
+const MAX_JSON_ENTRIES = 50;
+
+/** Copy a host-supplied value into a shape `JSON.stringify` can serialize.
+ *
+ * Breadcrumb `data` and error `context` hold whatever host code passes: a
+ * framework controller, a React element, a DOM node. Those point back at
+ * themselves, and a circular structure makes `JSON.stringify` throw inside
+ * `sendError`, where the throw reaches the caller of `captureError`.
+ *
+ * Pruning at capture keeps the rest of the payload, and releases the host's
+ * object graph. The caps bound the copy, because one controller reaches most
+ * of the application through its own properties. */
+export function jsonSafe(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+  if (value === null) return null;
+
+  const type = typeof value;
+  if (type === "string" || type === "number" || type === "boolean") return value;
+  if (type === "bigint") return String(value);
+  if (type !== "object") return undefined;
+
+  const object = value as object;
+  if (seen.has(object)) return "[Circular]";
+  if (object instanceof Date) return object.toISOString();
+  if (depth >= MAX_JSON_DEPTH) return Array.isArray(object) ? "[Array]" : "[Object]";
+
+  seen.add(object);
+  try {
+    if (Array.isArray(object)) {
+      return object.slice(0, MAX_JSON_ENTRIES).map((entry) => jsonSafe(entry, depth + 1, seen));
+    }
+
+    const copy: Record<string, unknown> = {};
+    let entries = 0;
+    for (const key of Object.keys(object)) {
+      if (entries >= MAX_JSON_ENTRIES) break;
+      let entry: unknown;
+      // A getter can throw (a detached DOM node, a framework proxy), and
+      // reading it is the first time we find out.
+      try {
+        entry = (object as Record<string, unknown>)[key];
+      } catch {
+        continue;
+      }
+      const safe = jsonSafe(entry, depth + 1, seen);
+      if (safe === undefined) continue;
+      copy[key] = safe;
+      entries++;
+    }
+    return copy;
+  } finally {
+    // Siblings that share a reference aren't circular — only ancestors are.
+    seen.delete(object);
+  }
+}
 
 export function safeUrl(url: string): URL | null {
   try {
@@ -140,6 +223,26 @@ export function seededRandom(seed: string): number {
   return (h >>> 0) / 0x100000000;
 }
 
+/** N bytes of randomness. Reaching the generator is not guaranteed: Firefox
+ * raises `OperationError` when it fails, and `crypto` is absent in some
+ * embedded webviews. The UUID helpers run during init, so an unguarded throw
+ * takes the whole SDK down at import.
+ *
+ * `Math.random` is the fallback. These IDs correlate a visitor, a tab and a
+ * session. They carry no secret, so a weaker source costs collision odds, not
+ * security. */
+export function randomBytes(numBytes: number): Uint8Array {
+  const bytes = new Uint8Array(numBytes);
+  try {
+    crypto.getRandomValues(bytes);
+  } catch {
+    for (let i = 0; i < numBytes; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return bytes;
+}
+
 /** RFC 9562 §5.4 v4: 122 random bits. Use for IDs whose lex order must
  * NOT leak generation time — primarily `anonymous_id`, which persists in
  * localStorage and would otherwise expose first-visit timestamp.
@@ -155,10 +258,9 @@ export function seededRandom(seed: string): number {
  *   2. Browsers older than Chrome 92 / Safari 15.4, where it doesn't exist.
  *
  * `getRandomValues` has neither restriction — no secure-context gate, and
- * Chrome 11+. */
+ * Chrome 11+ — but it can still throw, hence `randomBytes`. */
 export function uuidv4(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
+  const bytes = randomBytes(16);
   // Bits 48..51: version 4 (0b0100).
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   // Bits 64..65: variant 10.
@@ -225,8 +327,7 @@ export function timeOrigin(): number {
  * chronologically without peeking into the data. */
 export function uuidv7(): string {
   const ts = Date.now();
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
+  const bytes = randomBytes(16);
   // Bits 0..47: timestamp, big-endian. Date.now() fits in 48 bits until year
   // 10889, so the divide/and dance below loses no precision in practice.
   bytes[0] = (ts / 0x10000000000) & 0xff;

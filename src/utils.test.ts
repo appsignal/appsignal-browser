@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
+import { storage, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe } from "./utils.js";
 
 describe("storage helper", () => {
   beforeEach(() => {
@@ -13,41 +13,41 @@ describe("storage helper", () => {
 
   describe("happy path", () => {
     it("getString / setString round-trip", () => {
-      storage.setString(localStorage, "k", "v");
-      expect(storage.getString(localStorage, "k")).toBe("v");
+      storage.setString("local", "k", "v");
+      expect(storage.getString("local", "k")).toBe("v");
     });
 
     it("getString returns null for missing keys", () => {
-      expect(storage.getString(localStorage, "missing")).toBeNull();
+      expect(storage.getString("local", "missing")).toBeNull();
     });
 
     it("remove deletes a key", () => {
-      storage.setString(localStorage, "k", "v");
-      storage.remove(localStorage, "k");
-      expect(storage.getString(localStorage, "k")).toBeNull();
+      storage.setString("local", "k", "v");
+      storage.remove("local", "k");
+      expect(storage.getString("local", "k")).toBeNull();
     });
 
     it("getJSON / setJSON round-trip preserves shape", () => {
       const value = { id: "u1", nested: { count: 3 }, list: [1, 2] };
-      storage.setJSON(localStorage, "k", value);
-      expect(storage.getJSON(localStorage, "k")).toEqual(value);
+      storage.setJSON("local", "k", value);
+      expect(storage.getJSON("local", "k")).toEqual(value);
     });
 
     it("getJSON returns null for missing keys", () => {
-      expect(storage.getJSON(localStorage, "missing")).toBeNull();
+      expect(storage.getJSON("local", "missing")).toBeNull();
     });
 
     it("getJSON returns null for malformed JSON", () => {
       // Write garbage directly so getJSON has something to choke on.
       localStorage.setItem("k", "{not valid json");
-      expect(storage.getJSON(localStorage, "k")).toBeNull();
+      expect(storage.getJSON("local", "k")).toBeNull();
     });
 
-    it("works with sessionStorage as the area argument", () => {
-      storage.setString(sessionStorage, "k", "v");
-      expect(storage.getString(sessionStorage, "k")).toBe("v");
+    it("keeps the two areas independent", () => {
+      storage.setString("session", "k", "v");
+      expect(storage.getString("session", "k")).toBe("v");
       // sessionStorage and localStorage are independent.
-      expect(storage.getString(localStorage, "k")).toBeNull();
+      expect(storage.getString("local", "k")).toBeNull();
     });
   });
 
@@ -61,35 +61,69 @@ describe("storage helper", () => {
       vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
         throw new DOMException("QuotaExceeded", "QuotaExceededError");
       });
-      expect(() => storage.setString(localStorage, "k", "v")).not.toThrow();
+      expect(() => storage.setString("local", "k", "v")).not.toThrow();
     });
 
     it("getString returns null when getItem throws", () => {
       vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
         throw new Error("storage disabled");
       });
-      expect(storage.getString(localStorage, "k")).toBeNull();
+      expect(storage.getString("local", "k")).toBeNull();
     });
 
     it("remove swallows exceptions", () => {
       vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
         throw new Error("storage disabled");
       });
-      expect(() => storage.remove(localStorage, "k")).not.toThrow();
+      expect(() => storage.remove("local", "k")).not.toThrow();
     });
 
     it("setJSON swallows exceptions from setItem", () => {
       vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
         throw new DOMException("QuotaExceeded", "QuotaExceededError");
       });
-      expect(() => storage.setJSON(localStorage, "k", { a: 1 })).not.toThrow();
+      expect(() => storage.setJSON("local", "k", { a: 1 })).not.toThrow();
     });
 
     it("getJSON returns null when getItem throws", () => {
       vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
         throw new Error("storage disabled");
       });
-      expect(storage.getJSON(localStorage, "k")).toBeNull();
+      expect(storage.getJSON("local", "k")).toBeNull();
+    });
+  });
+
+  describe("falls back to memory when the area itself is unreachable", () => {
+    // Reading the `localStorage` global throws a SecurityError when the origin
+    // has site data blocked, and a ReferenceError where the global is absent.
+    // That happens before any method call, so it has to be caught by the
+    // wrapper — otherwise it escapes into init() and kills all telemetry.
+    const blockArea = (name: "localStorage" | "sessionStorage", error: unknown) => {
+      vi.spyOn(globalThis, name, "get").mockImplementation(() => {
+        throw error;
+      });
+    };
+
+    it("survives a SecurityError and still round-trips values", () => {
+      blockArea("localStorage", new DOMException("The operation is insecure.", "SecurityError"));
+      expect(() => storage.setString("local", "k", "v")).not.toThrow();
+      expect(storage.getString("local", "k")).toBe("v");
+      storage.remove("local", "k");
+      expect(storage.getString("local", "k")).toBeNull();
+    });
+
+    it("survives a missing global", () => {
+      blockArea("localStorage", new ReferenceError("Can't find variable: localStorage"));
+      storage.setJSON("local", "user", { id: "u1" });
+      expect(storage.getJSON("local", "user")).toEqual({ id: "u1" });
+    });
+
+    it("keeps a blocked area separate from a working one", () => {
+      blockArea("sessionStorage", new DOMException("The operation is insecure.", "SecurityError"));
+      storage.setString("session", "k", "from-memory");
+      storage.setString("local", "k", "from-storage");
+      expect(storage.getString("session", "k")).toBe("from-memory");
+      expect(localStorage.getItem("k")).toBe("from-storage");
     });
   });
 });
@@ -359,5 +393,95 @@ describe("uuidv4", () => {
     expect(firstByteA).toBeGreaterThanOrEqual(0);
     expect(firstByteB).toBeGreaterThanOrEqual(0);
     expect(ids[0]).not.toBe(ids[1]);
+  });
+});
+
+describe("randomBytes fallback", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("still produces valid, distinct UUIDs when the RNG throws", () => {
+    // Firefox raises OperationError when its generator fails; session.ts calls
+    // these during init, so a throw here used to take the SDK down at import.
+    vi.spyOn(crypto, "getRandomValues").mockImplementation(() => {
+      throw new DOMException("The operation failed for an operation-specific reason", "OperationError");
+    });
+
+    const v4 = new Set<string>();
+    const v7 = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      const four = uuidv4();
+      const seven = uuidv7();
+      expect(four).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(seven).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      v4.add(four);
+      v7.add(seven);
+    }
+    expect(v4.size).toBe(50);
+    expect(v7.size).toBe(50);
+  });
+
+  it("survives a missing crypto global", () => {
+    vi.spyOn(globalThis, "crypto", "get").mockImplementation(() => {
+      throw new ReferenceError("crypto is not defined");
+    });
+
+    expect(() => uuidv4()).not.toThrow();
+  });
+});
+
+describe("jsonSafe", () => {
+  it("replaces a back-reference so the value can be serialized", () => {
+    const controller: Record<string, unknown> = { identifier: "dropdown" };
+    controller.self = controller;
+
+    const safe = jsonSafe(controller);
+
+    expect(safe).toEqual({ identifier: "dropdown", self: "[Circular]" });
+    expect(() => JSON.stringify(safe)).not.toThrow();
+  });
+
+  it("keeps a repeated sibling reference, which is not circular", () => {
+    const shared = { id: 1 };
+
+    expect(jsonSafe({ a: shared, b: shared })).toEqual({ a: { id: 1 }, b: { id: 1 } });
+  });
+
+  it("caps depth and entry count", () => {
+    const deep = { a: { b: { c: { d: { e: "too far" } } } } };
+    expect(jsonSafe(deep)).toEqual({ a: { b: { c: { d: "[Object]" } } } });
+
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < 80; i++) wide[`k${i}`] = i;
+    expect(Object.keys(jsonSafe(wide) as object)).toHaveLength(50);
+
+    const long = Array.from({ length: 80 }, (_, i) => i);
+    expect(jsonSafe(long)).toHaveLength(50);
+  });
+
+  it("drops what JSON has no place for, and coerces what it chokes on", () => {
+    const safe = jsonSafe({
+      keep: "yes",
+      fn: () => "no",
+      big: 10n,
+      when: new Date("2026-09-17T00:00:00Z"),
+      nothing: undefined,
+    });
+
+    expect(safe).toEqual({
+      keep: "yes",
+      big: "10",
+      when: "2026-09-17T00:00:00.000Z",
+    });
+  });
+
+  it("skips a property whose getter throws", () => {
+    const hostile = {
+      ok: 1,
+      get boom(): never { throw new Error("detached"); },
+    };
+
+    expect(jsonSafe(hostile)).toEqual({ ok: 1 });
   });
 });

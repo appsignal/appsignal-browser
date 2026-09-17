@@ -82,8 +82,23 @@ function contentTypeFor(kind: Kind): string {
   return kind === "error" ? "application/json" : "text/plain";
 }
 
+/** Serialize a payload without letting the failure reach host code. `jsonSafe`
+ * prunes host values at capture, so a throw here means one got past it. A
+ * dropped payload is bad. A throw out of `sendError` into the caller of
+ * `captureError` is worse. */
+function serialize(payload: unknown): string | null {
+  try {
+    return JSON.stringify(payload);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("[appsignal] payload could not be serialized; dropped", error);
+    return null;
+  }
+}
+
 export function sendError(payload: FrontendTransaction): void {
-  const body = JSON.stringify(payload);
+  const body = serialize(payload);
+  if (body === null) return;
   // Mid-unload (visibility hidden), the fetch is at risk of cancellation —
   // navigating away aborts in-flight requests. sendBeacon survives unload.
   if (typeof document !== "undefined" && document.visibilityState === "hidden") {
@@ -94,11 +109,14 @@ export function sendError(payload: FrontendTransaction): void {
 }
 
 export function sendEvents(payload: EventPayload): void {
-  send(JSON.stringify(payload), "events");
+  const body = serialize(payload);
+  if (body === null) return;
+  send(body, "events");
 }
 
 export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
-  const body = JSON.stringify(payload);
+  const body = serialize(payload);
+  if (body === null) return;
   if (useBeacon) {
     flushOnUnload(body, "events");
   } else {
@@ -110,7 +128,9 @@ export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
  * than the beacon cap are dropped rather than attempted — the keepalive fetch
  * fallback shares the same cap and silently rejects oversize bodies anyway. */
 export function sendBeaconEvents(payload: EventPayload): void {
-  flushOnUnload(JSON.stringify(payload), "events");
+  const body = serialize(payload);
+  if (body === null) return;
+  flushOnUnload(body, "events");
 }
 
 /** Send a payload during page unload using sendBeacon. Bounded to

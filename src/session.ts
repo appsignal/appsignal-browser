@@ -41,8 +41,8 @@ export function initSession(timeoutMs: number, allowlist: string[] = []): void {
 }
 
 function ensureTabId(): void {
-  if (!storage.getString(sessionStorage, TAB_KEY)) {
-    storage.setString(sessionStorage, TAB_KEY, uuidv7());
+  if (!storage.getString("session", TAB_KEY)) {
+    storage.setString("session", TAB_KEY, uuidv7());
   }
   startTabCollisionWatch();
 }
@@ -66,7 +66,7 @@ function startTabCollisionWatch(): void {
       if (tabInstanceTag > msg.tag) {
         // We lose the tiebreak — regenerate so the other tab keeps the id.
         const fresh = uuidv7();
-        storage.setString(sessionStorage, TAB_KEY, fresh);
+        storage.setString("session", TAB_KEY, fresh);
         // Re-announce with the new id so any third duplicate also resolves.
         tabChannel?.postMessage({ tabId: fresh, tag: tabInstanceTag });
       }
@@ -79,20 +79,20 @@ function startTabCollisionWatch(): void {
 }
 
 export function getTabId(): string {
-  return storage.getString(sessionStorage, TAB_KEY) || "";
+  return storage.getString("session", TAB_KEY) || "";
 }
 
 function ensureAnonymousId(): void {
-  if (!storage.getString(localStorage, ANON_KEY)) {
+  if (!storage.getString("local", ANON_KEY)) {
     // v4 (not v7) — anonymous_id persists in localStorage and a v7's
     // 48-bit timestamp prefix would leak first-visit time across sessions.
-    storage.setString(localStorage, ANON_KEY, uuidv4());
+    storage.setString("local", ANON_KEY, uuidv4());
   }
 }
 
 function restoreOrCreateSession(): void {
-  const stored = storage.getString(localStorage, SESSION_KEY);
-  lastActivityMs = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
+  const stored = storage.getString("local", SESSION_KEY);
+  lastActivityMs = Number(storage.getString("local", LAST_ACTIVITY_KEY) || "0");
   const now = Date.now();
 
   if (stored && now - lastActivityMs < inactivityTimeoutMs) {
@@ -105,10 +105,10 @@ function restoreOrCreateSession(): void {
 
 function newSession(): void {
   currentSessionId = uuidv7();
-  storage.setString(localStorage, SESSION_KEY, currentSessionId);
+  storage.setString("local", SESSION_KEY, currentSessionId);
   // Don't call touchActivity() here — it could recurse back into newSession().
   lastActivityMs = Date.now();
-  storage.setString(localStorage, LAST_ACTIVITY_KEY, String(lastActivityMs));
+  storage.setString("local", LAST_ACTIVITY_KEY, String(lastActivityMs));
   resetInactivityTimer();
 }
 
@@ -116,7 +116,7 @@ export function getSessionId(): string {
   if (!currentSessionId) {
     restoreOrCreateSession();
   }
-  const stored = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
+  const stored = Number(storage.getString("local", LAST_ACTIVITY_KEY) || "0");
   if (stored > lastActivityMs) lastActivityMs = stored;
 
   if (isInactive()) newSession();
@@ -133,7 +133,7 @@ function isInactive(): boolean {
 }
 
 export function getAnonymousId(): string {
-  return storage.getString(localStorage, ANON_KEY) || "";
+  return storage.getString("local", ANON_KEY) || "";
 }
 
 const USER_KEY = "appsignal_user";
@@ -144,17 +144,17 @@ const MAX_TAGS = 32;
 
 export function setUser(user: UserContext): void {
   currentUser = user;
-  storage.setJSON(localStorage, USER_KEY, user);
+  storage.setJSON("local", USER_KEY, user);
 }
 
 export function clearUser(): void {
   currentUser = null;
-  storage.remove(localStorage, USER_KEY);
+  storage.remove("local", USER_KEY);
 }
 
 function restoreUser(): void {
   if (currentUser) return;
-  const stored = storage.getJSON<UserContext>(localStorage, USER_KEY);
+  const stored = storage.getJSON<UserContext>("local", USER_KEY);
   if (stored) currentUser = stored;
 }
 
@@ -168,12 +168,12 @@ export function setTags(tags: Record<string, unknown>): void {
     else merged[key] = String(value);
   }
   currentTags = capTags(merged);
-  storage.setJSON(localStorage, TAGS_KEY, currentTags);
+  storage.setJSON("local", TAGS_KEY, currentTags);
 }
 
 export function clearTags(): void {
   currentTags = {};
-  storage.remove(localStorage, TAGS_KEY);
+  storage.remove("local", TAGS_KEY);
 }
 
 /** The error tags set via `setTags` (restored from localStorage on init), as a
@@ -183,7 +183,7 @@ export function getTags(): ErrorTags {
 }
 
 function restoreTags(): void {
-  currentTags = sanitizeTags(storage.getJSON<unknown>(localStorage, TAGS_KEY));
+  currentTags = sanitizeTags(storage.getJSON<unknown>("local", TAGS_KEY));
 }
 
 /** Coerce an untrusted value (from localStorage, or a cross-tab storage event)
@@ -214,10 +214,10 @@ export function endSession(): void {
   currentUser = null;
   currentTags = {};
   lastActivityMs = 0;
-  storage.remove(localStorage, SESSION_KEY);
-  storage.remove(localStorage, LAST_ACTIVITY_KEY);
-  storage.remove(localStorage, USER_KEY);
-  storage.remove(localStorage, TAGS_KEY);
+  storage.remove("local", SESSION_KEY);
+  storage.remove("local", LAST_ACTIVITY_KEY);
+  storage.remove("local", USER_KEY);
+  storage.remove("local", TAGS_KEY);
   if (activityTimer) {
     clearTimeout(activityTimer);
     activityTimer = null;
@@ -228,7 +228,7 @@ export function touchActivity(): void {
   if (isInactive()) newSession();
   const now = Date.now();
   lastActivityMs = now;
-  storage.setString(localStorage, LAST_ACTIVITY_KEY, String(now));
+  storage.setString("local", LAST_ACTIVITY_KEY, String(now));
   resetInactivityTimer();
 }
 
@@ -257,10 +257,10 @@ function startActivityTracking(): void {
     if (state === "hidden") {
       currentSessionId = null;
     } else if (state === "visible") {
-      lastActivityMs = Number(storage.getString(localStorage, LAST_ACTIVITY_KEY) || "0");
+      lastActivityMs = Number(storage.getString("local", LAST_ACTIVITY_KEY) || "0");
       if (Date.now() - lastActivityMs >= inactivityTimeoutMs) {
         currentSessionId = null;
-        storage.remove(localStorage, SESSION_KEY);
+        storage.remove("local", SESSION_KEY);
       }
     }
   });

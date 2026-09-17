@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafe } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -195,7 +195,9 @@ function handleError(
     lineno,
     colno,
     stack,
-    context,
+    // A host object can point back at itself. Prune it here, before it
+    // reaches the payload, the beforeError hook and the subscribers.
+    context: context ? (jsonSafe(context) as Record<string, unknown>) : undefined,
   };
   const hookResult = beforeErrorHook ? beforeErrorHook(incoming) : incoming;
 
