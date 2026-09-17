@@ -1,5 +1,5 @@
 import type { EventVital } from "./types.js";
-import { scrubPageUrl, stripTrailingSlash, timeOrigin } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, timeOrigin, attempt } from "./utils.js";
 import { onFCP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
@@ -346,9 +346,9 @@ export function destroyVitals(): void {
   loadRoute = null;
   pendingLoad = [];
   resetRouteVitals();
-  try { clsObserver?.disconnect(); } catch { /* continue teardown */ }
-  try { inpObserver?.disconnect(); } catch { /* continue teardown */ }
-  try { firstInputObserver?.disconnect(); } catch { /* continue teardown */ }
+  attempt("cls observer", () => clsObserver?.disconnect());
+  attempt("inp observer", () => inpObserver?.disconnect());
+  attempt("first input observer", () => firstInputObserver?.disconnect());
   clsObserver = null;
   inpObserver = null;
   firstInputObserver = null;

@@ -1,5 +1,5 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
-import { logError } from "./utils.js";
+import { logError, attempt } from "./utils.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -59,15 +59,13 @@ export function destroyTransport(): void {
   if (retryDrainTimer) {
     const timer = retryDrainTimer;
     retryDrainTimer = null;
-    try { clearTimeout(timer); } catch { /* continue teardown */ }
+    attempt("retry drain timer", () => clearTimeout(timer));
   }
-  for (const t of pendingRetries) {
-    try { clearTimeout(t); } catch { /* continue cancelling the rest */ }
-  }
+  for (const t of pendingRetries) attempt("retry timer", () => clearTimeout(t));
   pendingRetries.clear();
   if (listeningForOnline) {
     listeningForOnline = false;
-    try { window.removeEventListener("online", flushOnline); } catch { /* continue teardown */ }
+    attempt("online listener", () => window.removeEventListener("online", flushOnline));
   }
   retryQueue = [];
   retryQueueBytes = 0;

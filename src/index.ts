@@ -9,7 +9,7 @@ import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_P
 import { initTracing, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
-import { logError } from "./utils.js";
+import { logError, attempt } from "./utils.js";
 
 export type { BrowserConfig } from "./types.js";
 
@@ -163,7 +163,7 @@ export const destroy = /* @__PURE__ */ guard("destroy", (): void => {
     initialized = false;
     teardown();
     // Unlike a rollback, an explicit destroy ends the visitor's session.
-    cleanup("session", sessionEndSession);
+    attempt("session", sessionEndSession);
   }
 });
 
@@ -187,24 +187,14 @@ function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (..
   };
 }
 
-/** Cleanup is a postcondition, not an all-or-nothing sequence. One hostile
- * browser API or foreign wrapper must not prevent the remaining steps. */
-function cleanup(name: string, fn: () => void): void {
-  try {
-    fn();
-  } catch (error) {
-    logError(`${name} cleanup failed`, error);
-  }
-}
-
 /** Undo what init built: patched fetch/XHR, listeners, observers, timers.
  * Each step is guarded on its own, so a throw in one still leaves the rest
  * torn down. The visitor's stored session, user and tags survive: they are not
  * this page load's to delete. `destroy` ends them separately. */
 function teardown(): void {
-  cleanup("collection", stopCollection);
-  cleanup("session tracking", stopSessionTracking);
-  cleanup("transport", destroyTransport);
+  attempt("collection", stopCollection);
+  attempt("session tracking", stopSessionTracking);
+  attempt("transport", destroyTransport);
   clientConfig = null;
   resolved = null;
 }
@@ -305,21 +295,21 @@ function startCollection(endpoint: string): void {
 function stopCollection(): void {
   // Unregister listeners before tearing down the hook so the hook doesn't
   // call into half-destroyed modules during in-flight requests.
-  cleanup("tracing", destroyTracing);
-  cleanup("breadcrumbs", destroyBreadcrumbs);
-  cleanup("errors", destroyErrors);
-  cleanup("vitals", destroyVitals);
-  cleanup("network hook", destroyNetworkHook);
+  attempt("tracing", destroyTracing);
+  attempt("breadcrumbs", destroyBreadcrumbs);
+  attempt("errors", destroyErrors);
+  attempt("vitals", destroyVitals);
+  attempt("network hook", destroyNetworkHook);
 
   if (flushTimer) {
     const timer = flushTimer;
     flushTimer = null;
-    cleanup("flush timer", () => clearInterval(timer));
+    attempt("flush timer", () => clearInterval(timer));
   }
   const unsubscribers = lifecycleUnsubscribers;
   lifecycleUnsubscribers = [];
-  for (const unsub of unsubscribers) cleanup("lifecycle subscription", unsub);
-  cleanup("lifecycle", destroyLifecycle);
+  for (const unsub of unsubscribers) attempt("lifecycle subscription", unsub);
+  attempt("lifecycle", destroyLifecycle);
 }
 
 function flushEvents({

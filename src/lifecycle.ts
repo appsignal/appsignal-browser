@@ -3,6 +3,8 @@
 // consolidating here cuts the registration/teardown surface and keeps
 // the firing order consistent across modules.
 
+import { attempt } from "./utils.js";
+
 type VisListener = (state: DocumentVisibilityState) => void;
 type PageHideListener = (persisted: boolean) => void;
 
@@ -63,10 +65,10 @@ export function destroyLifecycle(): void {
   // when they are off. A later ensureInstalled must not attach a second pair.
   let detached = true;
   if (visibility) {
-    try { document.removeEventListener("visibilitychange", visibility); } catch { detached = false; }
+    detached = attempt("visibility listener", () => document.removeEventListener("visibilitychange", visibility)) && detached;
   }
   if (pageHide) {
-    try { window.removeEventListener("pagehide", pageHide as EventListener); } catch { detached = false; }
+    detached = attempt("pagehide listener", () => window.removeEventListener("pagehide", pageHide as EventListener)) && detached;
   }
   installed = !detached;
 }

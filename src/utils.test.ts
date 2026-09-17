@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe, jsonSafeRecord, logError } from "./utils.js";
+import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe, jsonSafeRecord, logError, attempt } from "./utils.js";
 
 describe("logError", () => {
   afterEach(() => {
@@ -608,5 +608,19 @@ describe("jsonSafe", () => {
     // Every copied value costs a node, leaves included. Charging containers
     // alone would leave the real bound at 1000 x 50 values.
     expect(encoded.length).toBeLessThan(20_000);
+  });
+});
+
+describe("attempt", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("answers whether the step ran, and logs the one that did not", () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(attempt("clean step", () => {})).toBe(true);
+    expect(logSpy).not.toHaveBeenCalled();
+
+    expect(attempt("hostile step", () => { throw new Error("refused"); })).toBe(false);
+    expect(logSpy.mock.calls[0][0]).toContain("hostile step cleanup failed");
   });
 });

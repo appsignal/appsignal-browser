@@ -5,6 +5,8 @@
 // left pointing at an orphaned wrapper. One patch with subscribers is the
 // same pattern the navigation hook in breadcrumbs.ts already uses.
 
+import { attempt } from "./utils.js";
+
 export interface RequestContext {
   url: string;
   method: string;
@@ -77,15 +79,15 @@ export function destroyNetworkHook(): void {
   beforeListeners = [];
   afterListeners = [];
   let restored = true;
-  try {
-    if (origFetch) window.fetch = origFetch;
-  } catch { restored = false; }
-  try {
-    if (origXhrOpen) XMLHttpRequest.prototype.open = origXhrOpen;
-  } catch { restored = false; }
-  try {
-    if (origXhrSend) XMLHttpRequest.prototype.send = origXhrSend;
-  } catch { restored = false; }
+  if (origFetch) {
+    restored = attempt("fetch patch", () => { window.fetch = origFetch; }) && restored;
+  }
+  if (origXhrOpen) {
+    restored = attempt("xhr open patch", () => { XMLHttpRequest.prototype.open = origXhrOpen; }) && restored;
+  }
+  if (origXhrSend) {
+    restored = attempt("xhr send patch", () => { XMLHttpRequest.prototype.send = origXhrSend; }) && restored;
+  }
   installed = !restored;
 }
 

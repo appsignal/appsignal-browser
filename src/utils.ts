@@ -193,6 +193,23 @@ export function logError(message: string, error?: unknown): void {
   } catch { /* best effort */ }
 }
 
+/** Run one teardown step. Cleanup is a postcondition, not an all-or-nothing
+ * sequence: one hostile browser API or foreign wrapper must not prevent the
+ * remaining steps, and the failure belongs in the console.
+ *
+ * Answers whether the step ran, for the callers that keep an "installed" flag:
+ * that flag says our patch is on the global, so it may only go down for the
+ * ones that came off. */
+export function attempt(name: string, fn: () => void): boolean {
+  try {
+    fn();
+    return true;
+  } catch (error) {
+    logError(`${name} cleanup failed`, error);
+    return false;
+  }
+}
+
 /** Run a host hook. A null return drops the value. A throwing hook is a bug in
  * host code, and must break neither the SDK nor the call it came from, so a
  * throw is a passthrough. Shared by beforeError and beforeBreadcrumb. */

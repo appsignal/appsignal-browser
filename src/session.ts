@@ -1,5 +1,5 @@
 import type { ErrorTags, SessionContext, UserContext } from "./types.js";
-import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
+import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7, attempt } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
@@ -307,20 +307,18 @@ export function stopSessionTracking(): void {
     const handler = activityHandler;
     activityHandler = null;
     for (const event of ACTIVITY_EVENTS) {
-      try {
-        document.removeEventListener(event, handler, { capture: true });
-      } catch { /* continue detaching the other session listeners */ }
+      attempt("activity listener", () => document.removeEventListener(event, handler, { capture: true }));
     }
   }
   if (unsubVisibility) {
     const unsubscribe = unsubVisibility;
     unsubVisibility = null;
-    try { unsubscribe(); } catch { /* continue teardown */ }
+    attempt("visibility subscription", unsubscribe);
   }
   if (storageHandler) {
     const handler = storageHandler;
     storageHandler = null;
-    try { window.removeEventListener("storage", handler); } catch { /* continue teardown */ }
+    attempt("storage listener", () => window.removeEventListener("storage", handler));
   }
   if (tabChannel) {
     const channel = tabChannel;
@@ -328,9 +326,9 @@ export function stopSessionTracking(): void {
     if (tabChannelHandler) {
       const handler = tabChannelHandler;
       tabChannelHandler = null;
-      try { channel.removeEventListener("message", handler); } catch { /* continue teardown */ }
+      attempt("tab channel listener", () => channel.removeEventListener("message", handler));
     }
-    try { channel.close(); } catch { /* continue teardown */ }
+    attempt("tab channel", () => channel.close());
   }
   // The timer outlives the listeners it was armed alongside.
   clearActivityTimer();

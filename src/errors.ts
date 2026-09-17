@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord, applyHook, logError } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord, applyHook, logError, attempt } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -125,12 +125,12 @@ export function destroyErrors(): void {
   if (errorHandler) {
     const handler = errorHandler;
     errorHandler = null;
-    try { window.removeEventListener("error", handler); } catch { /* continue teardown */ }
+    attempt("error listener", () => window.removeEventListener("error", handler));
   }
   if (rejectionHandler) {
     const handler = rejectionHandler;
     rejectionHandler = null;
-    try { window.removeEventListener("unhandledrejection", handler); } catch { /* continue teardown */ }
+    attempt("rejection listener", () => window.removeEventListener("unhandledrejection", handler));
   }
   dedupeWindow = [];
   rateWindowStart = 0;

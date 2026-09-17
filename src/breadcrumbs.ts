@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafeRecord, applyHook } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafeRecord, applyHook, attempt } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -1087,20 +1087,18 @@ export function destroyBreadcrumbs(): void {
   // leave the module believing the remaining callbacks are still installed.
   const pendingCleanups = cleanups;
   cleanups = [];
-  for (const fn of pendingCleanups) {
-    try { fn(); } catch { /* continue tearing down the other collectors */ }
-  }
+  for (const fn of pendingCleanups) attempt("collector", fn);
   // Restore the handler we captured (may be a foreign wrapper), not native — and
   // only if our wrapper is still on top, else we'd clobber whatever patched over us.
   if (navigationHookInstalled) {
     for (const method of NAV_METHODS) {
-      try {
+      attempt("history patch", () => {
         const current = history[method] as NavPatchedFn<History["pushState"]>;
         if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
-      } catch { /* keep tearing down */ }
+      });
     }
     if (popstateHandler) {
-      try { window.removeEventListener("popstate", popstateHandler); } catch { /* keep tearing down */ }
+      attempt("popstate listener", () => window.removeEventListener("popstate", popstateHandler!));
       popstateHandler = null;
     }
     navigationHookInstalled = false;
