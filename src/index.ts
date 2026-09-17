@@ -56,6 +56,24 @@ export function init(config: BrowserConfig): void {
   initialized = true;
 }
 
+/** Wrap a public entry point so nothing the SDK exports can throw into the
+ * host page. The host calls these from its own code paths: a React render, a
+ * router effect, a catch block. A failure inside the SDK is the SDK's problem,
+ * so log it and return.
+ *
+ * `init` is not wrapped: it needs its own handler, to roll back what it built.
+ * Registered callbacks and listeners are guarded where they are dispatched. */
+function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (...args: A) => void {
+  return (...args: A): void => {
+    try {
+      fn(...args);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(`[appsignal] ${name} failed`, error);
+    }
+  };
+}
+
 /** Undo what init built: patched fetch/XHR, listeners, observers, timers.
  * Each step is guarded, because a failed init can leave a module that was
  * never initialised. The visitor's stored session, user and tags survive:
@@ -72,37 +90,37 @@ function teardown(): void {
  * stream as user context. Does not tag errors — for error-filtering metadata
  * (and to put user info on errors), use {@link setTags}. Call {@link clearUser}
  * on logout to drop identity. */
-export function setUser(user: UserContext): void {
+export const setUser = guard("setUser", (user: UserContext): void => {
   if (!initialized) return;
   sessionSetUser(user);
-}
+});
 
-export function clearUser(): void {
+export const clearUser = guard("clearUser", (): void => {
   if (!initialized) return;
   sessionClearUser();
-}
+});
 
 /** Attach arbitrary string tags to every subsequent error payload, for
  * filtering/searching errors in the UI — e.g.
  * `setTags({ plan: "pro", org_id: "acme" })`. Merges with any existing tags;
  * pass an empty value to drop a key. Values are coerced to strings and the set
  * is capped. Use {@link clearTags} to reset. */
-export function setTags(tags: Record<string, unknown>): void {
+export const setTags = guard("setTags", (tags: Record<string, unknown>): void => {
   if (!initialized) return;
   sessionSetTags(tags);
-}
+});
 
-export function clearTags(): void {
+export const clearTags = guard("clearTags", (): void => {
   if (!initialized) return;
   sessionClearTags();
-}
+});
 
 /** End the current browser session. Flushes pending events and replay chunks
  * under the current session_id, then clears session and user state so the next
  * captured event starts a fresh session. Typical use: call on user logout —
  * the flush uses sendBeacon since logout is often followed immediately by a
  * navigation that would cancel a plain fetch. */
-export function endSession(): void {
+export const endSession = guard("endSession", (): void => {
   if (!initialized) return;
   // touchActivity below may rotate the session if the inactivity window has
   // already elapsed (app woke from long sleep). In that case the buffered
@@ -113,25 +131,25 @@ export function endSession(): void {
   touchActivity();
   flushEvents({ beacon: true });
   sessionEndSession();
-}
+});
 
 /** Report a caught error manually. Used by framework plugins and try/catch blocks. */
-export function captureError(
+export const captureError = guard("captureError", (
   error: Error,
   context?: { componentName?: string; [key: string]: unknown },
-): void {
+): void => {
   if (!initialized) return;
   reportError(error, context);
-}
+});
 
-export function addBreadcrumb(breadcrumb: {
+export const addBreadcrumb = guard("addBreadcrumb", (breadcrumb: {
   category: string;
   message: string;
   data?: Record<string, unknown>;
-}): void {
+}): void => {
   if (!initialized) return;
   addManualBreadcrumb(breadcrumb);
-}
+});
 
 /** Tell the SDK which route template the user is currently on — typically
  * a router-shaped string like `/users/:id` or `/orders/[id]/items`.
@@ -160,24 +178,24 @@ export function addBreadcrumb(breadcrumb: {
  *   appsignal.setRouteTemplate(usePathname()); // e.g. "/users/[id]"
  * }, [pathname]);
  */
-export function setRouteTemplate(template: string | null): void {
+export const setRouteTemplate = guard("setRouteTemplate", (template: string | null): void => {
   if (!initialized) return;
   setVitalsRouteTemplate(template);
-}
+});
 
-export function flush(): void {
+export const flush = guard("flush", (): void => {
   flushEvents();
-}
+});
 
 /** Tear down the SDK. Flushes remaining data and stops all collection. */
-export function destroy(): void {
+export const destroy = guard("destroy", (): void => {
   if (!initialized) return;
   flushEvents({ beacon: true });
   teardown();
   // Unlike a rollback, an explicit destroy ends the visitor's session.
   sessionEndSession();
   initialized = false;
-}
+});
 
 // --- Internal ---
 

@@ -427,4 +427,20 @@ describe("SDK integration", () => {
     const crumb = body.breadcrumbs.find((b: { message: string }) => b.message === "enriched");
     expect(crumb.metadata.controller).toEqual({ identifier: "dropdown", self: "[Circular]" });
   });
+
+  it("does not throw into host code when a public method fails", () => {
+    // The host calls these from its own code paths: a React render, a router
+    // effect, a catch block. A failure inside the SDK is the SDK's problem.
+    init({ key: "test-key" });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const hostile = {
+      name: "Error",
+      stack: "",
+      get message(): string { throw new Error("boom"); },
+    } as unknown as Error;
+
+    expect(() => captureError(hostile)).not.toThrow();
+
+    expect(consoleSpy.mock.calls[0][0]).toContain("captureError");
+  });
 });

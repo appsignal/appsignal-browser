@@ -153,6 +153,18 @@ export function reportError(
   );
 }
 
+/** beforeError decides whether the error goes on. A null return drops it. A
+ * throwing callback should not break the SDK or the host's call, so treat it
+ * as passthrough, the same rule applyBeforeBreadcrumb follows. */
+function applyBeforeError(incoming: IncomingError): IncomingError | null {
+  if (!beforeErrorHook) return incoming;
+  try {
+    return beforeErrorHook(incoming);
+  } catch {
+    return incoming;
+  }
+}
+
 function handleError(
   message: string,
   filename?: string,
@@ -197,7 +209,7 @@ function handleError(
     stack,
     context,
   };
-  const hookResult = beforeErrorHook ? beforeErrorHook(incoming) : incoming;
+  const hookResult = applyBeforeError(incoming);
 
   // beforeError is sync only. A Promise return would otherwise pass the
   // truthy check and the SDK would proceed treating the Promise as fields —

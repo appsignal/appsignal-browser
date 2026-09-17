@@ -740,4 +740,17 @@ describe("errors", () => {
 
     expect(seen[0]).toBe(controller);
   });
+
+  it("reports the error when beforeError throws", () => {
+    // A bug in host code must not swallow the error, and must not surface in
+    // whoever called captureError.
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, () => {
+      throw new Error("hook is broken");
+    });
+
+    expect(() => reportError(new Error("real failure"))).not.toThrow();
+
+    expect(sendErrorMock).toHaveBeenCalledTimes(1);
+    expect(sendErrorMock.mock.calls[0][0].error.message).toBe("real failure");
+  });
 });
