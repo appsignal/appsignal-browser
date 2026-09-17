@@ -1,5 +1,5 @@
 import type { EventVital } from "./types.js";
-import { scrubPageUrl, stripTrailingSlash, timeOrigin } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, timeOrigin, guarded } from "./utils.js";
 import { onFCP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
@@ -134,7 +134,7 @@ let clsEmittedValue = -1; // last CLS value shipped for this route-view (-1 = no
 
 function observeLayoutShifts(): void {
   if (!supportsEntry("layout-shift")) return;
-  clsObserver = new PerformanceObserver((list) => processShiftEntries(list.getEntries() as LayoutShiftEntry[]));
+  clsObserver = new PerformanceObserver(guarded("cls", (list) => processShiftEntries(list.getEntries() as LayoutShiftEntry[])));
   clsObserver.observe({ type: "layout-shift", buffered: true });
 }
 
@@ -185,7 +185,7 @@ let inpEmittedValue = -1; // last INP value shipped for this route-view (-1 = no
 
 function observeInteractions(): void {
   if (!supportsEntry("event")) return;
-  inpObserver = new PerformanceObserver((list) => processEventEntries(list.getEntries() as InteractionEntry[]));
+  inpObserver = new PerformanceObserver(guarded("inp", (list) => processEventEntries(list.getEntries() as InteractionEntry[])));
   inpObserver.observe({ type: "event", buffered: true, durationThreshold: 40 } as PerformanceObserverInit);
   // first-input catches a fast first interaction the `event` observer's 40ms
   // threshold would miss. In modern Chromium the first interaction is delivered
@@ -193,7 +193,7 @@ function observeInteractions(): void {
   // so key it by that id (recordInteraction takes the max, no double count) and
   // only fall back to a sentinel when no interactionId is present.
   if (supportsEntry("first-input")) {
-    firstInputObserver = new PerformanceObserver((list) => processFirstInputEntries(list.getEntries() as InteractionEntry[]));
+    firstInputObserver = new PerformanceObserver(guarded("first input", (list) => processFirstInputEntries(list.getEntries() as InteractionEntry[])));
     firstInputObserver.observe({ type: "first-input", buffered: true });
   }
 }

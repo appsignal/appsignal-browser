@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord, applyHook, logError } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord, applyHook, logError, guarded } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -88,7 +88,7 @@ export function initErrors(
   appVersion = version;
   beforeErrorHook = beforeError;
 
-  errorHandler = (event: ErrorEvent) => {
+  errorHandler = guarded("error handler", (event: ErrorEvent) => {
     handleError(
       event.message,
       event.filename,
@@ -98,10 +98,10 @@ export function initErrors(
       undefined,
       event.error?.name,
     );
-  };
+  });
   window.addEventListener("error", errorHandler);
 
-  rejectionHandler = (event: PromiseRejectionEvent) => {
+  rejectionHandler = guarded("rejection handler", (event: PromiseRejectionEvent) => {
     const reason = event.reason;
     // errorLike, not `instanceof Error`, so a rejection carrying an error from
     // another realm keeps its message, class and stack instead of collapsing to
@@ -117,7 +117,7 @@ export function initErrors(
       undefined,
       asError?.name,
     );
-  };
+  });
   window.addEventListener("unhandledrejection", rejectionHandler);
 }
 

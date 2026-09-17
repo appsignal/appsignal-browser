@@ -181,6 +181,28 @@ export function logError(message: string, error?: unknown): void {
   console.error(`[appsignal] ${message}`, error);
 }
 
+/** Wrap a callback the SDK registers with the browser: an event listener, a
+ * PerformanceObserver, a timer, a promise continuation.
+ *
+ * A throw in one of these does not break the host's control flow, because the
+ * browser isolates the task. It does something worse: it reaches
+ * `window.onerror`, where the SDK's own error handler reports it into the
+ * customer's error stream, against their quota, attributed to their
+ * application. `isOwnError` cannot recognise it, because a bundled build has
+ * no `@appsignal/browser` frame to match on.
+ *
+ * Catching at the registration site keeps an SDK bug in the console, where it
+ * belongs. */
+export function guarded<A extends unknown[]>(name: string, fn: (...args: A) => void): (...args: A) => void {
+  return (...args: A): void => {
+    try {
+      fn(...args);
+    } catch (error) {
+      logError(`${name} failed`, error);
+    }
+  };
+}
+
 /** Run a host hook. A null return drops the value. A throwing hook is a bug in
  * host code, and must break neither the SDK nor the call it came from, so a
  * throw is a passthrough. Shared by beforeError and beforeBreadcrumb. */

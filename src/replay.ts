@@ -8,6 +8,7 @@ import type { ReplayConfig, ReplayPrivacyDom } from "./types.js";
 import { getSessionId, getTabId } from "./session.js";
 import { sendReplayChunk } from "./transport.js";
 import { onBeforeNavigation } from "./breadcrumbs.js";
+import { guarded } from "./utils.js";
 import { storage, seededRandom } from "./utils.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 import { onErrorReported } from "./errors.js";
@@ -148,10 +149,10 @@ export function onError(): void {
   // captures the immediate aftermath.
   if (errorReplayTimer !== null) return;
   hadError = true;
-  errorReplayTimer = setTimeout(() => {
+  errorReplayTimer = setTimeout(guarded("replay after error", () => {
     hadError = false;
     errorReplayTimer = null;
-  }, POST_ERROR_TAIL_MS);
+  }), POST_ERROR_TAIL_MS);
   flushChunk();
 }
 
@@ -205,11 +206,11 @@ async function startRecording(): Promise<void> {
     }
     isRecording = true;
 
-    flushTimer = setInterval(flushChunk, FLUSH_INTERVAL_MS);
+    flushTimer = setInterval(guarded("replay flush", flushChunk), FLUSH_INTERVAL_MS);
 
     // Clear any existing timeout from a previous start (pause→resume)
     if (maxRecordingTimer) clearTimeout(maxRecordingTimer);
-    maxRecordingTimer = setTimeout(() => stopReplay(), config.max_duration_ms);
+    maxRecordingTimer = setTimeout(guarded("replay max duration", () => stopReplay()), config.max_duration_ms);
   } catch {
     // rrweb not available — skip silently
   }
@@ -242,8 +243,8 @@ function resumeRecording(reason: PauseReason): void {
   startRecording();
 }
 
-const pauseForOffline = (): void => pauseRecording("offline");
-const resumeForOffline = (): void => resumeRecording("offline");
+const pauseForOffline = guarded("replay offline", (): void => pauseRecording("offline"));
+const resumeForOffline = guarded("replay online", (): void => resumeRecording("offline"));
 
 function flushChunk(useBeacon = false): void {
   if (eventBuffer.length === 0) return;

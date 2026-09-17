@@ -1,5 +1,5 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
-import { logError } from "./utils.js";
+import { logError, guarded } from "./utils.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -200,12 +200,12 @@ let retryDrainTimer: ReturnType<typeof setTimeout> | null = null;
 // timer restarts whenever fresh retry work appears.
 function scheduleRetryDrain(): void {
   if (retryDrainTimer) return;
-  retryDrainTimer = setTimeout(() => {
+  retryDrainTimer = setTimeout(guarded("retry drain", () => {
     retryDrainTimer = null;
     if (retryQueue.length === 0) return;
     if (navigator.onLine) drainQueue();
     if (retryQueue.length > 0) scheduleRetryDrain();
-  }, RETRY_DRAIN_INTERVAL_MS);
+  }), RETRY_DRAIN_INTERVAL_MS);
 }
 
 function drainQueue(): void {
@@ -260,9 +260,9 @@ function doFetch(body: string, attempt: number, kind: Kind): void {
 }
 
 function scheduleRetry(body: string, attempt: number, is429: boolean, kind: Kind): void {
-  const timer = setTimeout(() => {
+  const timer = setTimeout(guarded("retry", () => {
     pendingRetries.delete(timer);
     doFetch(body, attempt, kind);
-  }, retryDelay(attempt - 1, is429));
+  }), retryDelay(attempt - 1, is429));
   pendingRetries.add(timer);
 }

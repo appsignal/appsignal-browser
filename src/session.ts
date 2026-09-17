@@ -1,5 +1,5 @@
 import type { ErrorTags, SessionContext, UserContext } from "./types.js";
-import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7 } from "./utils.js";
+import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7, guarded } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
 
 const SESSION_KEY = "appsignal_session_id";
@@ -58,7 +58,7 @@ function startTabCollisionWatch(): void {
   if (tabChannel) return;
   try {
     tabChannel = new BroadcastChannel(TAB_CHANNEL);
-    tabChannelHandler = (e: MessageEvent) => {
+    tabChannelHandler = guarded("tab collision", (e: MessageEvent) => {
       const msg = e.data as { tabId?: string; tag?: string } | undefined;
       if (!msg?.tabId || !msg.tag) return;
       const myId = getTabId();
@@ -70,7 +70,7 @@ function startTabCollisionWatch(): void {
         // Re-announce with the new id so any third duplicate also resolves.
         tabChannel?.postMessage({ tabId: fresh, tag: tabInstanceTag });
       }
-    };
+    });
     tabChannel.addEventListener("message", tabChannelHandler);
     tabChannel.postMessage({ tabId: getTabId(), tag: tabInstanceTag });
   } catch {
@@ -249,7 +249,7 @@ let storageHandler: ((e: StorageEvent) => void) | null = null;
 const ACTIVITY_EVENTS = ["click", "keydown", "scroll"];
 
 function startActivityTracking(): void {
-  activityHandler = () => touchActivity();
+  activityHandler = guarded("activity", () => touchActivity());
   for (const event of ACTIVITY_EVENTS) {
     document.addEventListener(event, activityHandler, {
       passive: true,
