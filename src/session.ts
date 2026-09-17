@@ -51,8 +51,13 @@ function ensureTabId(): void {
  * tabs end up with the same tab_id. Detect that via BroadcastChannel: each
  * tab announces (tab_id, tabInstanceTag); on receiving an announce that
  * matches our tab_id from a different tag, the tab with the lexically
- * larger tag regenerates. Both tabs reach the same conclusion since the
- * comparison is symmetric. */
+ * larger tag regenerates.
+ *
+ * The tab that keeps the id answers with its own announce. Each tab announces
+ * once, when it starts, so the older tab's announce went out before the
+ * duplicate existed. Without the answer only the duplicate hears the
+ * collision, and it resolves the half of the cases where the older tab holds
+ * the larger tag. */
 function startTabCollisionWatch(): void {
   if (typeof BroadcastChannel === "undefined") return;
   if (tabChannel) return;
@@ -69,6 +74,12 @@ function startTabCollisionWatch(): void {
         storage.setString(sessionStorage, TAB_KEY, fresh);
         // Re-announce with the new id so any third duplicate also resolves.
         tabChannel?.postMessage({ tabId: fresh, tag: tabInstanceTag });
+      } else {
+        // We keep the id, and the other tab holds the larger tag. Answer, so
+        // it learns of the collision and regenerates. Its answer to this
+        // message carries a new id, which no longer matches ours, so the
+        // exchange stops here.
+        tabChannel?.postMessage({ tabId: myId, tag: tabInstanceTag });
       }
     };
     tabChannel.addEventListener("message", tabChannelHandler);
