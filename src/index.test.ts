@@ -407,4 +407,24 @@ describe("SDK integration", () => {
     expect(localStorage.getItem("appsignal_user")).toBe(JSON.stringify({ id: "u1" }));
     expect(localStorage.getItem("appsignal_tags")).toBe(JSON.stringify({ plan: "pro" }));
   });
+
+  it("prunes what a beforeBreadcrumb hook puts into the data", () => {
+    init({
+      key: "test-key",
+      beforeBreadcrumb: (crumb) => {
+        const controller: Record<string, unknown> = { identifier: "dropdown" };
+        controller.self = controller;
+        return { ...crumb, data: { ...crumb.data, controller } };
+      },
+    });
+
+    addBreadcrumb({ category: "test", message: "enriched" });
+
+    expect(() => captureError(new Error("later failure"))).not.toThrow();
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/errors"));
+    expect(errorPayloads).toHaveLength(1);
+    const body = JSON.parse(errorPayloads[0].body);
+    const crumb = body.breadcrumbs.find((b: { message: string }) => b.message === "enriched");
+    expect(crumb.metadata.controller).toEqual({ identifier: "dropdown", self: "[Circular]" });
+  });
 });

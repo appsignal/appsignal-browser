@@ -17,54 +17,50 @@ const fallback: Record<StorageArea, Map<string, string>> = {
   session: new Map(),
 };
 
-// Set when an area first refuses. A quota error on a write is not a one-off:
-// Safari's old private mode throws on every setItem while getItem keeps
-// returning nothing. Reading from the real area and writing to the fallback
-// would then report an empty id on the next read, so the whole area moves to
-// memory at the first refusal and stays there.
-const unusable: Record<StorageArea, boolean> = { local: false, session: false };
-
 function resolveArea(area: StorageArea): Storage | null {
-  if (unusable[area]) return null;
   try {
     return (area === "local" ? localStorage : sessionStorage) ?? null;
   } catch {
-    unusable[area] = true;
     return null;
   }
 }
 
-/** Drop the in-memory fallback and the refusal latch. The latch describes the
- * browser, which does not change while the page lives, so nothing in the SDK
- * calls this. Tests do, because the state outlives one example. */
+/** Drop the in-memory fallback. Nothing in the SDK calls this, because what
+ * the map stands in for lasts as long as the page. Tests do, because the map
+ * outlives one example. */
 export function resetStorageFallback(): void {
-  unusable.local = false;
-  unusable.session = false;
   fallback.local.clear();
   fallback.session.clear();
 }
 
 export const storage = {
+  // The memory map answers first. It holds a key only after a write to the
+  // real area failed, which makes it the newer value of the two.
   getString(area: StorageArea, key: string): string | null {
+    const remembered = fallback[area].get(key);
+    if (remembered !== undefined) return remembered;
     const store = resolveArea(area);
-    if (store) {
-      try { return store.getItem(key); } catch { unusable[area] = true; }
-    }
-    return fallback[area].get(key) ?? null;
+    if (!store) return null;
+    try { return store.getItem(key); } catch { return null; }
   },
   setString(area: StorageArea, key: string, value: string): void {
     const store = resolveArea(area);
     if (store) {
-      try { store.setItem(key, value); return; } catch { unusable[area] = true; }
+      try {
+        store.setItem(key, value);
+        // The real area holds the value again, so drop the older copy.
+        fallback[area].delete(key);
+        return;
+      } catch { /* the area refused this write */ }
     }
     fallback[area].set(key, value);
   },
   remove(area: StorageArea, key: string): void {
-    const store = resolveArea(area);
-    if (store) {
-      try { store.removeItem(key); return; } catch { unusable[area] = true; }
-    }
     fallback[area].delete(key);
+    const store = resolveArea(area);
+    if (!store) return;
+    // A quota error stops a write, not a delete, so always try the real area.
+    try { store.removeItem(key); } catch { /* ignore */ }
   },
   getJSON<T>(area: StorageArea, key: string): T | null {
     const raw = storage.getString(area, key);
@@ -121,7 +117,7 @@ function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknow
     // `toISOString` would throw.
     const toJSON = (object as { toJSON?: unknown }).toJSON;
     if (typeof toJSON === "function") {
-      return jsonSafe((toJSON as () => unknown).call(object), depth, seen);
+      return jsonSafe((toJSON as () => unknown).call(object), depth + 1, seen);
     }
 
     if (Array.isArray(object)) {
@@ -150,6 +146,18 @@ function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknow
     // Siblings that share a reference aren't circular — only ancestors are.
     seen.delete(object);
   }
+}
+
+/** `jsonSafe` for a value that has to stay a record: breadcrumb `data` and
+ * error `context` both ship as objects. A top-level marker string, or a
+ * `toJSON` that answers a primitive, keeps its value under a key instead of
+ * replacing the record with a string. */
+export function jsonSafeRecord(value: Record<string, unknown>): Record<string, unknown> {
+  const safe = jsonSafe(value);
+  if (safe !== null && typeof safe === "object" && !Array.isArray(safe)) {
+    return safe as Record<string, unknown>;
+  }
+  return { value: safe };
 }
 
 export function safeUrl(url: string): URL | null {

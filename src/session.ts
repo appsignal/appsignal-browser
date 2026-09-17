@@ -321,6 +321,13 @@ export function stopSessionTracking(): void {
     tabChannel.close();
     tabChannel = null;
   }
+  // The inactivity timer outlives the listeners. endSession clears it too,
+  // but a rollback of a failed init stops the tracking without ending the
+  // visitor's session.
+  if (activityTimer) {
+    clearTimeout(activityTimer);
+    activityTimer = null;
+  }
   activityTrackingStarted = false;
   staticContextFields = null;
 }

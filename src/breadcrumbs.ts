@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { consumeTraceId } from "./tracing.js";
-import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafe } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, jsonSafeRecord } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -186,6 +186,12 @@ export function initBreadcrumbs(
 export function addBreadcrumb(breadcrumb: Breadcrumb): void {
   const result = applyBeforeBreadcrumb(breadcrumb);
   if (!result) return;
+  // The SDK builds its own data from strings and numbers. A beforeBreadcrumb
+  // hook can put a host object in its place, and that object reaches the wire
+  // as breadcrumb metadata, so prune what the hook returns.
+  if (beforeBreadcrumbHook && result.data) {
+    result.data = jsonSafeRecord(result.data);
+  }
   sessionBuffer.push(result);
   if (ERROR_BUFFER_CATEGORIES.has(result.category)) {
     errorBuffer.push(result);
@@ -220,9 +226,14 @@ export function addManualBreadcrumb(input: {
     timestamp: Date.now(),
     category: input.category,
     message: input.message,
-    data: input.data ? (jsonSafe(input.data) as Record<string, unknown>) : undefined,
+    data: input.data,
   });
   if (!result) return;
+  // Prune after the hook, as the error path does, so a hook that replaces or
+  // enriches the data cannot put a host object back.
+  if (result.data) {
+    result.data = jsonSafeRecord(result.data);
+  }
   sessionBuffer.push(result);
   errorBuffer.push(result);
 }

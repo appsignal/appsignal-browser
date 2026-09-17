@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe } from "./utils.js";
+import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe, jsonSafeRecord } from "./utils.js";
 
 describe("storage helper", () => {
   beforeEach(() => {
@@ -87,7 +87,7 @@ describe("storage helper", () => {
     });
 
 
-    it("moves the area to memory when a method refuses, so ids stay coherent", () => {
+    it("keeps a refused write in memory, so ids stay coherent", () => {
       // Safari's old private mode throws on every setItem while getItem keeps
       // answering nothing. A write that lands nowhere would hand out a new id
       // on every read.
@@ -98,6 +98,46 @@ describe("storage helper", () => {
       storage.setString("local", "appsignal_anonymous_id", "anon-1");
 
       expect(storage.getString("local", "appsignal_anonymous_id")).toBe("anon-1");
+    });
+
+    it("still reads the values that the area holds after a write refuses", () => {
+      // The quota fills up while the page runs: the ids written at init are
+      // intact, and only the new write has nowhere to go.
+      storage.setString("local", "appsignal_anonymous_id", "anon-1");
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("QuotaExceeded", "QuotaExceededError");
+      });
+
+      storage.setString("local", "appsignal_last_activity", "123");
+
+      expect(storage.getString("local", "appsignal_anonymous_id")).toBe("anon-1");
+      expect(storage.getString("local", "appsignal_last_activity")).toBe("123");
+    });
+
+    it("still deletes from the area after a write refuses", () => {
+      // A logout must clear the user, and a quota error stops a write, not a
+      // delete.
+      storage.setString("local", "appsignal_user", "{\"id\":\"u1\"}");
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("QuotaExceeded", "QuotaExceededError");
+      });
+      storage.setString("local", "appsignal_tags", "{}");
+
+      storage.remove("local", "appsignal_user");
+
+      expect(localStorage.getItem("appsignal_user")).toBeNull();
+      expect(storage.getString("local", "appsignal_user")).toBeNull();
+    });
+
+    it("prefers the newer memory value over the stale one in the area", () => {
+      storage.setString("local", "k", "old");
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("QuotaExceeded", "QuotaExceededError");
+      });
+
+      storage.setString("local", "k", "new");
+
+      expect(storage.getString("local", "k")).toBe("new");
     });
 
     it("getJSON returns null when getItem throws", () => {
@@ -523,5 +563,17 @@ describe("jsonSafe", () => {
       keep: "yes",
       gone: "[Unserializable]",
     });
+  });
+
+  it("keeps a record a record", () => {
+    const revocable = Proxy.revocable({ a: 1 }, {});
+    revocable.revoke();
+
+    // A top-level value that prunes to a marker still ships as an object,
+    // because breadcrumb metadata and error context are records on the wire.
+    expect(jsonSafeRecord(revocable.proxy as Record<string, unknown>)).toEqual({
+      value: "[Unserializable]",
+    });
+    expect(jsonSafeRecord({ a: 1 })).toEqual({ a: 1 });
   });
 });

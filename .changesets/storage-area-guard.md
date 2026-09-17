@@ -9,7 +9,8 @@ the origin has cookies or site data blocked, a `ReferenceError` where the global
 is absent — and it happened outside the storage wrapper's guard, so it escaped
 `init` and no telemetry was sent at all.
 
-The area is now resolved inside the guard, and falls back to an in-memory store
-so the anonymous, tab and session IDs stay coherent for the page. An area that
-refuses one method, such as a write that exceeds the quota, moves to the same
-store. These visitors start a new session on every page load.
+The area is now resolved inside the guard, and a write that the area refuses,
+such as a write that exceeds the quota, is kept in an in-memory store. The
+anonymous, tab and session IDs stay coherent for the page. Reads still answer
+from the real area, and deletes still reach it. Visitors with blocked site data
+start a new session on every page load.

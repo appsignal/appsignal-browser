@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafe } from "./utils.js";
+import { scrubPageUrl, stripTrailingSlash, errorLike, jsonSafeRecord } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -215,11 +215,12 @@ function handleError(
   if (!hookResult) return;
   const effective: IncomingError = hookResult;
 
-  // A host object can point back at itself, and JSON.stringify then throws in
-  // sendError, where the throw reaches the caller of captureError. Prune after
-  // beforeError, so the hook still sees the host's own objects.
+  // `context` does not reach the wire: toFrontendTransaction leaves it out.
+  // It does reach the onErrorReported subscribers, and the SDK holds the
+  // host's object graph until then. Prune after beforeError, so the hook still
+  // sees the host's own objects.
   if (effective.context) {
-    effective.context = jsonSafe(effective.context) as Record<string, unknown>;
+    effective.context = jsonSafeRecord(effective.context);
   }
 
   const now = Date.now();
