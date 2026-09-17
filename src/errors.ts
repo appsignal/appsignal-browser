@@ -195,9 +195,7 @@ function handleError(
     lineno,
     colno,
     stack,
-    // A host object can point back at itself. Prune it here, before it
-    // reaches the payload, the beforeError hook and the subscribers.
-    context: context ? (jsonSafe(context) as Record<string, unknown>) : undefined,
+    context,
   };
   const hookResult = beforeErrorHook ? beforeErrorHook(incoming) : incoming;
 
@@ -216,6 +214,13 @@ function handleError(
   }
   if (!hookResult) return;
   const effective: IncomingError = hookResult;
+
+  // A host object can point back at itself, and JSON.stringify then throws in
+  // sendError, where the throw reaches the caller of captureError. Prune after
+  // beforeError, so the hook still sees the host's own objects.
+  if (effective.context) {
+    effective.context = jsonSafe(effective.context) as Record<string, unknown>;
+  }
 
   const now = Date.now();
   lastErrorTimestamp = now;

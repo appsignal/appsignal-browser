@@ -388,4 +388,23 @@ describe("SDK integration", () => {
     const crumb = body.breadcrumbs.find((b: { message: string }) => b.message === "mounted");
     expect(crumb.metadata).toEqual({ tag: "div", parent: "[Circular]" });
   });
+
+  it("keeps the visitor's stored session, user and tags when init fails", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    localStorage.setItem("appsignal_session_id", "session-from-earlier-page");
+    localStorage.setItem("appsignal_last_activity", String(Date.now()));
+    localStorage.setItem("appsignal_user", JSON.stringify({ id: "u1" }));
+    localStorage.setItem("appsignal_tags", JSON.stringify({ plan: "pro" }));
+
+    init({
+      key: "test-key",
+      get beforeBreadcrumb(): undefined { throw new Error("boom"); },
+    });
+
+    // The rollback undoes what this init built. The stored session, user and
+    // tags are the visitor's own state from an earlier page load.
+    expect(localStorage.getItem("appsignal_session_id")).toBe("session-from-earlier-page");
+    expect(localStorage.getItem("appsignal_user")).toBe(JSON.stringify({ id: "u1" }));
+    expect(localStorage.getItem("appsignal_tags")).toBe(JSON.stringify({ plan: "pro" }));
+  });
 });

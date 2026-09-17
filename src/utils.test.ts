@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe } from "./utils.js";
+import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe } from "./utils.js";
 
 describe("storage helper", () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    resetStorageFallback();
   });
 
   afterEach(() => {
@@ -83,6 +84,20 @@ describe("storage helper", () => {
         throw new DOMException("QuotaExceeded", "QuotaExceededError");
       });
       expect(() => storage.setJSON("local", "k", { a: 1 })).not.toThrow();
+    });
+
+
+    it("moves the area to memory when a method refuses, so ids stay coherent", () => {
+      // Safari's old private mode throws on every setItem while getItem keeps
+      // answering nothing. A write that lands nowhere would hand out a new id
+      // on every read.
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new DOMException("QuotaExceeded", "QuotaExceededError");
+      });
+
+      storage.setString("local", "appsignal_anonymous_id", "anon-1");
+
+      expect(storage.getString("local", "appsignal_anonymous_id")).toBe("anon-1");
     });
 
     it("getJSON returns null when getItem throws", () => {
@@ -483,5 +498,30 @@ describe("jsonSafe", () => {
     };
 
     expect(jsonSafe(hostile)).toEqual({ ok: 1 });
+  });
+
+  it("asks toJSON first, as JSON.stringify does", () => {
+    expect(jsonSafe({ when: new Date("2026-09-17T00:00:00Z") })).toEqual({
+      when: "2026-09-17T00:00:00.000Z",
+    });
+    // A Luxon DateTime or a Moment keeps the string the host used to see.
+    const custom = { internal: 1, toJSON: () => "rendered" };
+    expect(jsonSafe({ custom })).toEqual({ custom: "rendered" });
+  });
+
+  it("does not throw on an invalid Date", () => {
+    // toISOString throws RangeError here; toJSON answers null.
+    expect(() => jsonSafe({ when: new Date("nope") })).not.toThrow();
+    expect(jsonSafe({ when: new Date("nope") })).toEqual({ when: null });
+  });
+
+  it("marks a subtree it cannot read, and keeps the rest", () => {
+    const revocable = Proxy.revocable({ a: 1 }, {});
+    revocable.revoke();
+
+    expect(jsonSafe({ keep: "yes", gone: revocable.proxy })).toEqual({
+      keep: "yes",
+      gone: "[Unserializable]",
+    });
   });
 });

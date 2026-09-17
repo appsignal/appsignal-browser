@@ -291,6 +291,14 @@ function startActivityTracking(): void {
 
 export function destroySession(): void {
   endSession();
+  stopSessionTracking();
+}
+
+/** Detach the listeners that initSession attached, and keep the visitor's
+ * stored session, user and tags. A failed init rolls back with this: the
+ * session id, the user and the tags are the visitor's own state, which this
+ * page load did not create and must not delete. */
+export function stopSessionTracking(): void {
   if (activityHandler) {
     for (const event of ACTIVITY_EVENTS) {
       document.removeEventListener(event, activityHandler, { capture: true });

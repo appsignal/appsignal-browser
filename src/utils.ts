@@ -17,29 +17,54 @@ const fallback: Record<StorageArea, Map<string, string>> = {
   session: new Map(),
 };
 
+// Set when an area first refuses. A quota error on a write is not a one-off:
+// Safari's old private mode throws on every setItem while getItem keeps
+// returning nothing. Reading from the real area and writing to the fallback
+// would then report an empty id on the next read, so the whole area moves to
+// memory at the first refusal and stays there.
+const unusable: Record<StorageArea, boolean> = { local: false, session: false };
+
 function resolveArea(area: StorageArea): Storage | null {
+  if (unusable[area]) return null;
   try {
     return (area === "local" ? localStorage : sessionStorage) ?? null;
   } catch {
+    unusable[area] = true;
     return null;
   }
+}
+
+/** Drop the in-memory fallback and the refusal latch. The latch describes the
+ * browser, which does not change while the page lives, so nothing in the SDK
+ * calls this. Tests do, because the state outlives one example. */
+export function resetStorageFallback(): void {
+  unusable.local = false;
+  unusable.session = false;
+  fallback.local.clear();
+  fallback.session.clear();
 }
 
 export const storage = {
   getString(area: StorageArea, key: string): string | null {
     const store = resolveArea(area);
-    if (!store) return fallback[area].get(key) ?? null;
-    try { return store.getItem(key); } catch { return null; }
+    if (store) {
+      try { return store.getItem(key); } catch { unusable[area] = true; }
+    }
+    return fallback[area].get(key) ?? null;
   },
   setString(area: StorageArea, key: string, value: string): void {
     const store = resolveArea(area);
-    if (!store) { fallback[area].set(key, value); return; }
-    try { store.setItem(key, value); } catch { /* ignore */ }
+    if (store) {
+      try { store.setItem(key, value); return; } catch { unusable[area] = true; }
+    }
+    fallback[area].set(key, value);
   },
   remove(area: StorageArea, key: string): void {
     const store = resolveArea(area);
-    if (!store) { fallback[area].delete(key); return; }
-    try { store.removeItem(key); } catch { /* ignore */ }
+    if (store) {
+      try { store.removeItem(key); return; } catch { unusable[area] = true; }
+    }
+    fallback[area].delete(key);
   },
   getJSON<T>(area: StorageArea, key: string): T | null {
     const raw = storage.getString(area, key);
@@ -66,6 +91,17 @@ const MAX_JSON_ENTRIES = 50;
  * object graph. The caps bound the copy, because one controller reaches most
  * of the application through its own properties. */
 export function jsonSafe(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+  try {
+    return copyValue(value, depth, seen);
+  } catch {
+    // A hostile value can still throw: a revoked proxy refuses `Object.keys`,
+    // a `toJSON` can fail. Each level catches its own subtree, so one bad
+    // branch becomes a marker and the rest of the payload survives.
+    return "[Unserializable]";
+  }
+}
+
+function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (value === null) return null;
 
   const type = typeof value;
@@ -75,11 +111,19 @@ export function jsonSafe(value: unknown, depth = 0, seen = new WeakSet<object>()
 
   const object = value as object;
   if (seen.has(object)) return "[Circular]";
-  if (object instanceof Date) return object.toISOString();
   if (depth >= MAX_JSON_DEPTH) return Array.isArray(object) ? "[Array]" : "[Object]";
 
   seen.add(object);
   try {
+    // `JSON.stringify` asks for `toJSON` first, so honour it: a Date, a Luxon
+    // DateTime or a Moment keeps the string the host used to see, instead of
+    // its internal fields. An invalid Date answers `null` here, where
+    // `toISOString` would throw.
+    const toJSON = (object as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") {
+      return jsonSafe((toJSON as () => unknown).call(object), depth, seen);
+    }
+
     if (Array.isArray(object)) {
       return object.slice(0, MAX_JSON_ENTRIES).map((entry) => jsonSafe(entry, depth + 1, seen));
     }

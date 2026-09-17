@@ -1,6 +1,6 @@
 import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
-import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession } from "./session.js";
+import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
@@ -61,7 +61,9 @@ export function init(config: BrowserConfig): void {
  * never initialised. */
 function rollbackInit(): void {
   try { stopCollection(); } catch { /* best effort */ }
-  try { destroySession(); } catch { /* best effort */ }
+  // stopSessionTracking, not destroySession: the stored session id, user and
+  // tags belong to the visitor, and this page load did not create them.
+  try { stopSessionTracking(); } catch { /* best effort */ }
   try { destroyTransport(); } catch { /* best effort */ }
   clientConfig = null;
   resolved = null;

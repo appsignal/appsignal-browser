@@ -723,4 +723,21 @@ describe("errors", () => {
     const event = subscriber.mock.calls[0][0];
     expect(event.context).toEqual({ identifier: "dropdown", self: "[Circular]" });
   });
+
+  it("gives beforeError the host's own context object", () => {
+    // The hook inspects class instances (`context.request instanceof Request`),
+    // so it must see the original, not the pruned copy.
+    const seen: unknown[] = [];
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, (event) => {
+      seen.push(event.context);
+      return event;
+    });
+
+    const controller: Record<string, unknown> = { identifier: "dropdown" };
+    controller.self = controller;
+
+    reportError(new Error("controller failed"), controller);
+
+    expect(seen[0]).toBe(controller);
+  });
 });
