@@ -53,15 +53,17 @@ function ensureInstalled(): void {
 
 export function destroyLifecycle(): void {
   if (!installed) return;
-  if (visHandler) {
-    document.removeEventListener("visibilitychange", visHandler);
-    visHandler = null;
-  }
-  if (pageHideHandler) {
-    window.removeEventListener("pagehide", pageHideHandler as EventListener);
-    pageHideHandler = null;
-  }
+  const visibility = visHandler;
+  const pageHide = pageHideHandler;
+  installed = false;
+  visHandler = null;
+  pageHideHandler = null;
   visListeners = [];
   pageHideListeners = [];
-  installed = false;
+  if (visibility) {
+    try { document.removeEventListener("visibilitychange", visibility); } catch { /* continue */ }
+  }
+  if (pageHide) {
+    try { window.removeEventListener("pagehide", pageHide as EventListener); } catch { /* best effort */ }
+  }
 }

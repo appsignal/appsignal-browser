@@ -177,8 +177,14 @@ export function jsonSafeRecord(value: Record<string, unknown>): Record<string, u
 /** The SDK's own failures go to the console under one prefix, so a host can
  * recognise and filter them. One place to change the channel. */
 export function logError(message: string, error?: unknown): void {
-  // eslint-disable-next-line no-console
-  console.error(`[appsignal] ${message}`, error);
+  // Hosts commonly wrap console methods. Logging is itself part of a failure
+  // path, so a missing console or a wrapper that throws must not reopen the
+  // exception boundary we just closed.
+  try {
+    const target = globalThis.console;
+    const logger = target?.error;
+    if (typeof logger === "function") logger.call(target, `[appsignal] ${message}`, error);
+  } catch { /* best effort */ }
 }
 
 /** Run a host hook. A null return drops the value. A throwing hook is a bug in

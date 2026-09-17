@@ -304,26 +304,33 @@ export function destroySession(): void {
  * page load did not create and must not delete. */
 export function stopSessionTracking(): void {
   if (activityHandler) {
-    for (const event of ACTIVITY_EVENTS) {
-      document.removeEventListener(event, activityHandler, { capture: true });
-    }
+    const handler = activityHandler;
     activityHandler = null;
+    for (const event of ACTIVITY_EVENTS) {
+      try {
+        document.removeEventListener(event, handler, { capture: true });
+      } catch { /* continue detaching the other session listeners */ }
+    }
   }
   if (unsubVisibility) {
-    unsubVisibility();
+    const unsubscribe = unsubVisibility;
     unsubVisibility = null;
+    try { unsubscribe(); } catch { /* continue teardown */ }
   }
   if (storageHandler) {
-    window.removeEventListener("storage", storageHandler);
+    const handler = storageHandler;
     storageHandler = null;
+    try { window.removeEventListener("storage", handler); } catch { /* continue teardown */ }
   }
   if (tabChannel) {
-    if (tabChannelHandler) {
-      tabChannel.removeEventListener("message", tabChannelHandler);
-      tabChannelHandler = null;
-    }
-    tabChannel.close();
+    const channel = tabChannel;
     tabChannel = null;
+    if (tabChannelHandler) {
+      const handler = tabChannelHandler;
+      tabChannelHandler = null;
+      try { channel.removeEventListener("message", handler); } catch { /* continue teardown */ }
+    }
+    try { channel.close(); } catch { /* continue teardown */ }
   }
   // The timer outlives the listeners it was armed alongside.
   clearActivityTimer();

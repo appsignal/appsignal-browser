@@ -1083,17 +1083,24 @@ function initTabLifecycle(): void {
 // --- Destroy ---
 
 export function destroyBreadcrumbs(): void {
-  for (const fn of cleanups) fn();
+  // Clear the registry first so a throwing foreign/browser cleanup cannot
+  // leave the module believing the remaining callbacks are still installed.
+  const pendingCleanups = cleanups;
   cleanups = [];
+  for (const fn of pendingCleanups) {
+    try { fn(); } catch { /* continue tearing down the other collectors */ }
+  }
   // Restore the handler we captured (may be a foreign wrapper), not native — and
   // only if our wrapper is still on top, else we'd clobber whatever patched over us.
   if (navigationHookInstalled) {
     for (const method of NAV_METHODS) {
-      const current = history[method] as NavPatchedFn<History["pushState"]>;
-      if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
+      try {
+        const current = history[method] as NavPatchedFn<History["pushState"]>;
+        if (current.__appsignalOrig) history[method] = current.__appsignalOrig;
+      } catch { /* keep tearing down */ }
     }
     if (popstateHandler) {
-      window.removeEventListener("popstate", popstateHandler);
+      try { window.removeEventListener("popstate", popstateHandler); } catch { /* keep tearing down */ }
       popstateHandler = null;
     }
     navigationHookInstalled = false;

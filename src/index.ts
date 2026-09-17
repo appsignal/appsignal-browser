@@ -29,13 +29,13 @@ const FLUSH_INTERVAL_MS = 30_000;
 
 export function init(config: BrowserConfig): void {
   if (initialized) return;
-  // Master off-switch: `active: false` makes init a complete no-op — nothing
-  // patched, no timers, no network. Consumers gate this on their build env
-  // (e.g. `active: import.meta.env.PROD`) so dev/test/CI never sends data.
-  // Public methods already guard on `initialized`, so they stay safe no-ops.
-  if (config.active === false) return;
 
   try {
+    // Keep every config read inside the boundary: JavaScript callers can pass
+    // a malformed value, and a config property can itself be a throwing getter.
+    // Neither should escape from this public entry point.
+    if (config.active === false) return;
+
     clientConfig = config;
     resolved = resolveConfig(config);
 
@@ -73,14 +73,24 @@ function guard<A extends unknown[]>(name: string, fn: (...args: A) => void): (..
   };
 }
 
+/** Cleanup is a postcondition, not an all-or-nothing sequence. One hostile
+ * browser API or foreign wrapper must not prevent the remaining steps. */
+function cleanup(name: string, fn: () => void): void {
+  try {
+    fn();
+  } catch (error) {
+    logError(`${name} cleanup failed`, error);
+  }
+}
+
 /** Undo what init built: patched fetch/XHR, listeners, observers, timers.
  * Each step is guarded on its own, so a throw in one still leaves the rest
  * torn down. The visitor's stored session, user and tags survive: they are not
  * this page load's to delete. `destroy` ends them separately. */
 function teardown(): void {
-  for (const step of [stopCollection, stopSessionTracking, destroyTransport]) {
-    try { step(); } catch { /* best effort */ }
-  }
+  cleanup("collection", stopCollection);
+  cleanup("session tracking", stopSessionTracking);
+  cleanup("transport", destroyTransport);
   clientConfig = null;
   resolved = null;
 }
@@ -122,9 +132,14 @@ export const endSession = /* @__PURE__ */ guard("endSession", (): void => {
   // the one the caller meant to end; accept this as the documented behavior.
   // The subsequent touchActivity keeps getSessionId() inside flushEvents
   // from rotating again mid-flush.
-  touchActivity();
-  flushEvents({ beacon: true });
-  sessionEndSession();
+  try {
+    touchActivity();
+    flushEvents({ beacon: true });
+  } finally {
+    // Logout semantics are more important than the best-effort final flush:
+    // never retain the old identity because a browser API rejected the send.
+    sessionEndSession();
+  }
 });
 
 /** Report a caught error manually. Used by framework plugins and try/catch blocks. */
@@ -180,11 +195,16 @@ export const flush = /* @__PURE__ */ guard("flush", (): void => {
 
 /** Tear down the SDK. Flushes remaining data and stops all collection. */
 export const destroy = /* @__PURE__ */ guard("destroy", (): void => {
-  flushEvents({ beacon: true });
-  teardown();
-  // Unlike a rollback, an explicit destroy ends the visitor's session.
-  sessionEndSession();
-  initialized = false;
+  try {
+    flushEvents({ beacon: true });
+  } finally {
+    // Disable callbacks before detaching them. Even if the final flush or an
+    // individual cleanup fails, destroy still leaves the SDK inert.
+    initialized = false;
+    teardown();
+    // Unlike a rollback, an explicit destroy ends the visitor's session.
+    cleanup("session", sessionEndSession);
+  }
 });
 
 // --- Internal ---
@@ -285,19 +305,21 @@ function startCollection(endpoint: string): void {
 function stopCollection(): void {
   // Unregister listeners before tearing down the hook so the hook doesn't
   // call into half-destroyed modules during in-flight requests.
-  destroyTracing();
-  destroyBreadcrumbs();
-  destroyErrors();
-  destroyVitals();
-  destroyNetworkHook();
+  cleanup("tracing", destroyTracing);
+  cleanup("breadcrumbs", destroyBreadcrumbs);
+  cleanup("errors", destroyErrors);
+  cleanup("vitals", destroyVitals);
+  cleanup("network hook", destroyNetworkHook);
 
   if (flushTimer) {
-    clearInterval(flushTimer);
+    const timer = flushTimer;
     flushTimer = null;
+    cleanup("flush timer", () => clearInterval(timer));
   }
-  for (const unsub of lifecycleUnsubscribers) unsub();
+  const unsubscribers = lifecycleUnsubscribers;
   lifecycleUnsubscribers = [];
-  destroyLifecycle();
+  for (const unsub of unsubscribers) cleanup("lifecycle subscription", unsub);
+  cleanup("lifecycle", destroyLifecycle);
 }
 
 function flushEvents({

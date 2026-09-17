@@ -70,12 +70,21 @@ export function initNetworkHook(): void {
 
 export function destroyNetworkHook(): void {
   if (!installed) return;
-  window.fetch = origFetch;
-  XMLHttpRequest.prototype.open = origXhrOpen;
-  XMLHttpRequest.prototype.send = origXhrSend;
+  // Reset our state first. Restoring a host-owned property can fail (a frozen
+  // global, a foreign descriptor); that must not make a later init think the
+  // old hook is still healthy or leave subscriber references behind.
+  installed = false;
   beforeListeners = [];
   afterListeners = [];
-  installed = false;
+  try {
+    if (origFetch) window.fetch = origFetch;
+  } catch { /* continue restoring XHR */ }
+  try {
+    if (origXhrOpen) XMLHttpRequest.prototype.open = origXhrOpen;
+  } catch { /* continue restoring XHR.send */ }
+  try {
+    if (origXhrSend) XMLHttpRequest.prototype.send = origXhrSend;
+  } catch { /* best effort */ }
 }
 
 function patchFetch(): void {

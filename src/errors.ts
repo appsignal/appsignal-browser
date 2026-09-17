@@ -123,12 +123,14 @@ export function initErrors(
 
 export function destroyErrors(): void {
   if (errorHandler) {
-    window.removeEventListener("error", errorHandler);
+    const handler = errorHandler;
     errorHandler = null;
+    try { window.removeEventListener("error", handler); } catch { /* continue teardown */ }
   }
   if (rejectionHandler) {
-    window.removeEventListener("unhandledrejection", rejectionHandler);
+    const handler = rejectionHandler;
     rejectionHandler = null;
+    try { window.removeEventListener("unhandledrejection", handler); } catch { /* continue teardown */ }
   }
   dedupeWindow = [];
   rateWindowStart = 0;

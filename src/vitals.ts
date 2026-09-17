@@ -339,10 +339,10 @@ export function destroyVitals(): void {
   currentRouteTemplate = "";
   loadRoute = null;
   pendingLoad = [];
-  resetRouteVitals();
-  clsObserver?.disconnect();
-  inpObserver?.disconnect();
-  firstInputObserver?.disconnect();
+  try { resetRouteVitals(); } catch { routePageUrl = ""; }
+  try { clsObserver?.disconnect(); } catch { /* continue teardown */ }
+  try { inpObserver?.disconnect(); } catch { /* continue teardown */ }
+  try { firstInputObserver?.disconnect(); } catch { /* continue teardown */ }
   clsObserver = null;
   inpObserver = null;
   firstInputObserver = null;

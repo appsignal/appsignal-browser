@@ -1,5 +1,19 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe, jsonSafeRecord } from "./utils.js";
+import { storage, resetStorageFallback, seededRandom, scrubPageUrl, scrubUrl, uuidv4, uuidv7, jsonSafe, jsonSafeRecord, logError } from "./utils.js";
+
+describe("logError", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("does not reopen the exception boundary when a host console wrapper throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("console wrapper failed");
+    });
+
+    expect(() => logError("original failure", new Error("boom"))).not.toThrow();
+  });
+});
 
 describe("storage helper", () => {
   beforeEach(() => {

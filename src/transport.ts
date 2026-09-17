@@ -57,14 +57,17 @@ export function initTransport(endpoint: string, key: string): void {
  * any stray handler firing post-destroy fails closed. */
 export function destroyTransport(): void {
   if (retryDrainTimer) {
-    clearTimeout(retryDrainTimer);
+    const timer = retryDrainTimer;
     retryDrainTimer = null;
+    try { clearTimeout(timer); } catch { /* continue teardown */ }
   }
-  for (const t of pendingRetries) clearTimeout(t);
+  for (const t of pendingRetries) {
+    try { clearTimeout(t); } catch { /* continue cancelling the rest */ }
+  }
   pendingRetries.clear();
   if (listeningForOnline) {
-    window.removeEventListener("online", flushOnline);
     listeningForOnline = false;
+    try { window.removeEventListener("online", flushOnline); } catch { /* continue teardown */ }
   }
   retryQueue = [];
   retryQueueBytes = 0;

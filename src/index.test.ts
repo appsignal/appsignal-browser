@@ -103,6 +103,21 @@ describe("SDK integration", () => {
     expect(eventPayloads[0].url).toContain("api_key=k2");
   });
 
+  it("does not throw when reading active itself throws", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const config = {
+      key: "test-key",
+      get active(): boolean { throw new Error("hostile config"); },
+    };
+
+    expect(() => init(config)).not.toThrow();
+    expect(consoleSpy).toHaveBeenCalled();
+
+    addBreadcrumb({ category: "test", message: "still inactive" });
+    flush();
+    expect(sentPayloads).toHaveLength(0);
+  });
+
   it("sends events to the correct endpoint with ingestion key", () => {
     init({ key: "my-key", endpoint: "https://example.com", session: { enabled: true } });
 
@@ -161,6 +176,46 @@ describe("SDK integration", () => {
     expect(afterPayloads).toHaveLength(0);
   });
 
+  it("destroy still leaves the SDK inert when its final flush throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key", session: { enabled: true } });
+    addBreadcrumb({ category: "before", message: "pending at destroy" });
+    (navigator as unknown as { sendBeacon: () => boolean }).sendBeacon = () => {
+      throw new Error("beacon unavailable");
+    };
+
+    expect(() => destroy()).not.toThrow();
+
+    // If destroy aborted at the flush, these calls would still collect and
+    // send because `initialized` and the collectors would remain active.
+    sentPayloads = [];
+    (navigator as unknown as { sendBeacon: () => boolean }).sendBeacon = () => true;
+    addBreadcrumb({ category: "after", message: "must be ignored" });
+    flush();
+    expect(sentPayloads).toHaveLength(0);
+  });
+
+  it("continues teardown when one collector cleanup throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key" });
+    const patchedFetch = window.fetch;
+    const removeEventListener = document.removeEventListener.bind(document);
+    let firstRemoval = true;
+    vi.spyOn(document, "removeEventListener").mockImplementation((...args) => {
+      if (firstRemoval) {
+        firstRemoval = false;
+        throw new Error("foreign listener cleanup failed");
+      }
+      return removeEventListener(...args);
+    });
+
+    destroy();
+
+    // destroyBreadcrumbs is before destroyNetworkHook. A single unguarded
+    // cleanup failure used to abort stopCollection before fetch was restored.
+    expect(window.fetch).not.toBe(patchedFetch);
+  });
+
   it("captureError sends error payload", () => {
     init({ key: "test-key", session: { enabled: true } });
 
@@ -204,6 +259,24 @@ describe("SDK integration", () => {
     expect(afterPayloads.length).toBeGreaterThan(0);
     expect(afterPayloads[0].session.session_id).not.toBe(sessionBefore);
     expect(afterPayloads[0].session.user_id).toBeUndefined();
+  });
+
+  it("endSession clears identity even when its final flush throws", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    init({ key: "test-key", session: { enabled: true } });
+    setUser({ id: "u1" });
+    setTags({ plan: "pro" });
+    addBreadcrumb({ category: "before", message: "pending at logout" });
+    (navigator as unknown as { sendBeacon: () => boolean }).sendBeacon = () => {
+      throw new Error("beacon unavailable");
+    };
+
+    expect(() => endSession()).not.toThrow();
+
+    expect(localStorage.getItem("appsignal_session_id")).toBeNull();
+    expect(localStorage.getItem("appsignal_last_activity")).toBeNull();
+    expect(localStorage.getItem("appsignal_user")).toBeNull();
+    expect(localStorage.getItem("appsignal_tags")).toBeNull();
   });
 
   it("attaches tab_id to event payloads, distinct from session_id", () => {
