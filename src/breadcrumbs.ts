@@ -186,15 +186,21 @@ export function initBreadcrumbs(
 export function addBreadcrumb(breadcrumb: Breadcrumb): void {
   const result = applyBeforeBreadcrumb(breadcrumb);
   if (!result) return;
-  // The SDK builds its own data from strings and numbers. A beforeBreadcrumb
-  // hook can put a host object in its place, and that object reaches the wire
-  // as breadcrumb metadata, so prune what the hook returns.
-  if (beforeBreadcrumbHook && result.data) {
-    result.data = jsonSafeRecord(result.data);
-  }
+  // Only a hook can make this data anything but SDK strings and numbers.
+  if (beforeBreadcrumbHook) pruneData(result);
   sessionBuffer.push(result);
   if (ERROR_BUFFER_CATEGORIES.has(result.category)) {
     errorBuffer.push(result);
+  }
+}
+
+/** Replace `data` with a copy JSON can serialize. Host code and a
+ * beforeBreadcrumb hook both put framework objects here, and breadcrumb data
+ * reaches the wire as metadata. Runs after the hook, so what the hook returns
+ * is pruned too. */
+function pruneData(breadcrumb: Breadcrumb): void {
+  if (breadcrumb.data) {
+    breadcrumb.data = jsonSafeRecord(breadcrumb.data);
   }
 }
 
@@ -229,11 +235,7 @@ export function addManualBreadcrumb(input: {
     data: input.data,
   });
   if (!result) return;
-  // Prune after the hook, as the error path does, so a hook that replaces or
-  // enriches the data cannot put a host object back.
-  if (result.data) {
-    result.data = jsonSafeRecord(result.data);
-  }
+  pruneData(result);
   sessionBuffer.push(result);
   errorBuffer.push(result);
 }

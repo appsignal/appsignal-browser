@@ -75,6 +75,11 @@ export const storage = {
 
 const MAX_JSON_DEPTH = 4;
 const MAX_JSON_ENTRIES = 50;
+// Depth and entry count bound each level, not the total: 50 entries over 4
+// levels reaches 6 million nodes. A React fiber or a Vue component instance
+// gets there without trying, and the copy runs on the error path, where the
+// SDK must stay out of the host's way. This caps the whole walk.
+const MAX_JSON_NODES = 1000;
 
 /** Copy a host-supplied value into a shape `JSON.stringify` can serialize.
  *
@@ -86,9 +91,15 @@ const MAX_JSON_ENTRIES = 50;
  * Pruning at capture keeps the rest of the payload, and releases the host's
  * object graph. The caps bound the copy, because one controller reaches most
  * of the application through its own properties. */
-export function jsonSafe(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+export function jsonSafe(value: unknown): unknown {
+  return copySafely(value, 0, [], { left: MAX_JSON_NODES });
+}
+
+interface NodeBudget { left: number }
+
+function copySafely(value: unknown, depth: number, ancestors: object[], budget: NodeBudget): unknown {
   try {
-    return copyValue(value, depth, seen);
+    return copyValue(value, depth, ancestors, budget);
   } catch {
     // A hostile value can still throw: a revoked proxy refuses `Object.keys`,
     // a `toJSON` can fail. Each level catches its own subtree, so one bad
@@ -97,7 +108,7 @@ export function jsonSafe(value: unknown, depth = 0, seen = new WeakSet<object>()
   }
 }
 
-function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+function copyValue(value: unknown, depth: number, ancestors: object[], budget: NodeBudget): unknown {
   if (value === null) return null;
 
   const type = typeof value;
@@ -106,10 +117,14 @@ function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknow
   if (type !== "object") return undefined;
 
   const object = value as object;
-  if (seen.has(object)) return "[Circular]";
+  // Ancestors, not every object seen: siblings that share a reference are not
+  // circular. The list is never longer than MAX_JSON_DEPTH.
+  if (ancestors.includes(object)) return "[Circular]";
   if (depth >= MAX_JSON_DEPTH) return Array.isArray(object) ? "[Array]" : "[Object]";
+  if (budget.left <= 0) return "[Truncated]";
+  budget.left--;
 
-  seen.add(object);
+  ancestors.push(object);
   try {
     // `JSON.stringify` asks for `toJSON` first, so honour it: a Date, a Luxon
     // DateTime or a Moment keeps the string the host used to see, instead of
@@ -117,11 +132,13 @@ function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknow
     // `toISOString` would throw.
     const toJSON = (object as { toJSON?: unknown }).toJSON;
     if (typeof toJSON === "function") {
-      return jsonSafe((toJSON as () => unknown).call(object), depth + 1, seen);
+      return copySafely((toJSON as () => unknown).call(object), depth + 1, ancestors, budget);
     }
 
     if (Array.isArray(object)) {
-      return object.slice(0, MAX_JSON_ENTRIES).map((entry) => jsonSafe(entry, depth + 1, seen));
+      return object
+        .slice(0, MAX_JSON_ENTRIES)
+        .map((entry) => copySafely(entry, depth + 1, ancestors, budget));
     }
 
     const copy: Record<string, unknown> = {};
@@ -136,15 +153,14 @@ function copyValue(value: unknown, depth: number, seen: WeakSet<object>): unknow
       } catch {
         continue;
       }
-      const safe = jsonSafe(entry, depth + 1, seen);
+      const safe = copySafely(entry, depth + 1, ancestors, budget);
       if (safe === undefined) continue;
       copy[key] = safe;
       entries++;
     }
     return copy;
   } finally {
-    // Siblings that share a reference aren't circular — only ancestors are.
-    seen.delete(object);
+    ancestors.pop();
   }
 }
 
@@ -349,8 +365,14 @@ export function errorLike(
 
 /** 16 bytes → canonical 8-4-4-4-12 hex form. Shared so the two generators
  * can't drift in output shape. */
+/** Lowercase hex for N bytes. Shared by the UUID format and the W3C
+ * traceparent ids. */
+export function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const hex = toHex(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 

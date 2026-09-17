@@ -576,4 +576,20 @@ describe("jsonSafe", () => {
     });
     expect(jsonSafeRecord({ a: 1 })).toEqual({ a: 1 });
   });
+
+  it("bounds the whole walk, not just each level", () => {
+    // 50 entries over 4 levels reaches millions of nodes. A React fiber or a
+    // Vue component instance gets there, and this runs on the error path.
+    const wide = (depth) => {
+      if (depth === 0) return "leaf";
+      const level = {};
+      for (let i = 0; i < 50; i++) level[`k${i}`] = wide(depth - 1);
+      return level;
+    };
+
+    const safe = jsonSafe(wide(4));
+
+    const markers = JSON.stringify(safe).match(/\[Truncated\]/g) || [];
+    expect(markers.length).toBeGreaterThan(0);
+  });
 });

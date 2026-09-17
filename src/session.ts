@@ -218,10 +218,7 @@ export function endSession(): void {
   storage.remove("local", LAST_ACTIVITY_KEY);
   storage.remove("local", USER_KEY);
   storage.remove("local", TAGS_KEY);
-  if (activityTimer) {
-    clearTimeout(activityTimer);
-    activityTimer = null;
-  }
+  clearActivityTimer();
 }
 
 export function touchActivity(): void {
@@ -232,8 +229,15 @@ export function touchActivity(): void {
   resetInactivityTimer();
 }
 
+function clearActivityTimer(): void {
+  if (activityTimer) {
+    clearTimeout(activityTimer);
+    activityTimer = null;
+  }
+}
+
 function resetInactivityTimer(): void {
-  if (activityTimer) clearTimeout(activityTimer);
+  clearActivityTimer();
   activityTimer = setTimeout(() => {
     currentSessionId = null;
   }, inactivityTimeoutMs);
@@ -321,13 +325,9 @@ export function stopSessionTracking(): void {
     tabChannel.close();
     tabChannel = null;
   }
-  // The inactivity timer outlives the listeners. endSession clears it too,
-  // but a rollback of a failed init stops the tracking without ending the
-  // visitor's session.
-  if (activityTimer) {
-    clearTimeout(activityTimer);
-    activityTimer = null;
-  }
+  // The timer outlives the listeners, and a rollback of a failed init stops
+  // the tracking without ending the visitor's session.
+  clearActivityTimer();
   activityTrackingStarted = false;
   staticContextFields = null;
 }

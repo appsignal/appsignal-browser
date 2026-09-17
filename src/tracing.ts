@@ -1,4 +1,4 @@
-import { safeUrl, globMatch, randomBytes } from "./utils.js";
+import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
 import { onBeforeRequest } from "./network-hook.js";
 
 let targets: string[] = [];
@@ -88,5 +88,5 @@ function shouldPropagate(url: string): boolean {
 /** N random bytes encoded as a lowercase hex string. Used for both the
  * 128-bit trace_id and the 64-bit span_id of the W3C traceparent header. */
 function randomHex(numBytes: number): string {
-  return Array.from(randomBytes(numBytes), (b) => b.toString(16).padStart(2, "0")).join("");
+  return toHex(randomBytes(numBytes));
 }

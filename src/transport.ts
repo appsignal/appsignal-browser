@@ -98,7 +98,6 @@ function serialize(payload: unknown): string | null {
 
 export function sendError(payload: FrontendTransaction): void {
   const body = serialize(payload);
-  if (body === null) return;
   // Mid-unload (visibility hidden), the fetch is at risk of cancellation —
   // navigating away aborts in-flight requests. sendBeacon survives unload.
   if (typeof document !== "undefined" && document.visibilityState === "hidden") {
@@ -109,14 +108,11 @@ export function sendError(payload: FrontendTransaction): void {
 }
 
 export function sendEvents(payload: EventPayload): void {
-  const body = serialize(payload);
-  if (body === null) return;
-  send(body, "events");
+  send(serialize(payload), "events");
 }
 
 export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
   const body = serialize(payload);
-  if (body === null) return;
   if (useBeacon) {
     flushOnUnload(body, "events");
   } else {
@@ -128,9 +124,7 @@ export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
  * than the beacon cap are dropped rather than attempted — the keepalive fetch
  * fallback shares the same cap and silently rejects oversize bodies anyway. */
 export function sendBeaconEvents(payload: EventPayload): void {
-  const body = serialize(payload);
-  if (body === null) return;
-  flushOnUnload(body, "events");
+  flushOnUnload(serialize(payload), "events");
 }
 
 /** Send a payload during page unload using sendBeacon. Bounded to
@@ -138,7 +132,8 @@ export function sendBeaconEvents(payload: EventPayload): void {
  * fetch({keepalive:true}) silently reject them. Oversize only happens with
  * session streaming on (a large breadcrumb journey); the default errors+vitals
  * payload is well under the cap. */
-function flushOnUnload(body: string, kind: Kind): void {
+function flushOnUnload(body: string | null, kind: Kind): void {
+  if (body === null) return;
   if (!navigator.onLine) {
     enqueue(body, kind);
     return;
@@ -155,7 +150,8 @@ function flushOnUnload(body: string, kind: Kind): void {
   navigator.sendBeacon(urlFor(kind), blob);
 }
 
-function send(body: string, kind: Kind): void {
+function send(body: string | null, kind: Kind): void {
+  if (body === null) return;
   // Drop payloads that exceed the size limit
   if (body.length > MAX_PAYLOAD_BYTES) return;
 

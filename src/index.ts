@@ -1,6 +1,6 @@
 import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from "./types.js";
 import { resolveConfig } from "./types.js";
-import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, destroySession, stopSessionTracking } from "./session.js";
+import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
@@ -46,7 +46,7 @@ export function init(config: BrowserConfig): void {
     // here runs before their own code and takes the page down with it. The
     // flag stays down, so every public method no-ops instead of running
     // against state that startCollection never finished to build.
-    rollbackInit();
+    teardown();
     // eslint-disable-next-line no-console
     console.error("[appsignal] init failed; the SDK is inactive", error);
     return;
@@ -56,15 +56,14 @@ export function init(config: BrowserConfig): void {
   initialized = true;
 }
 
-/** Undo what a failed init built: patched fetch/XHR, listeners, observers.
- * Each teardown is guarded, because it can run against a module that was
- * never initialised. */
-function rollbackInit(): void {
-  try { stopCollection(); } catch { /* best effort */ }
-  // stopSessionTracking, not destroySession: the stored session id, user and
-  // tags belong to the visitor, and this page load did not create them.
-  try { stopSessionTracking(); } catch { /* best effort */ }
-  try { destroyTransport(); } catch { /* best effort */ }
+/** Undo what init built: patched fetch/XHR, listeners, observers, timers.
+ * Each step is guarded, because a failed init can leave a module that was
+ * never initialised. The visitor's stored session, user and tags survive:
+ * they are not this page load's to delete. `destroy` ends them separately. */
+function teardown(): void {
+  for (const step of [stopCollection, stopSessionTracking, destroyTransport]) {
+    try { step(); } catch { /* best effort */ }
+  }
   clientConfig = null;
   resolved = null;
 }
@@ -174,12 +173,10 @@ export function flush(): void {
 export function destroy(): void {
   if (!initialized) return;
   flushEvents({ beacon: true });
-  stopCollection();
-  destroySession();
-  destroyTransport();
+  teardown();
+  // Unlike a rollback, an explicit destroy ends the visitor's session.
+  sessionEndSession();
   initialized = false;
-  clientConfig = null;
-  resolved = null;
 }
 
 // --- Internal ---

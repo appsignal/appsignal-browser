@@ -215,14 +215,6 @@ function handleError(
   if (!hookResult) return;
   const effective: IncomingError = hookResult;
 
-  // `context` does not reach the wire: toFrontendTransaction leaves it out.
-  // It does reach the onErrorReported subscribers, and the SDK holds the
-  // host's object graph until then. Prune after beforeError, so the hook still
-  // sees the host's own objects.
-  if (effective.context) {
-    effective.context = jsonSafeRecord(effective.context);
-  }
-
   const now = Date.now();
   lastErrorTimestamp = now;
 
@@ -254,6 +246,13 @@ function handleError(
   // so skip it entirely when nobody's listening.
   if (errorListeners.length > 0) {
     payload.session = getSessionContext();
+    // `context` does not reach the wire: toFrontendTransaction leaves it out.
+    // The subscribers are its only readers, so prune it here, where the same
+    // guard already gates getSessionContext, and after the dedupe gate. The
+    // beforeError hook has run by now and saw the host's own objects.
+    if (payload.context) {
+      payload.context = jsonSafeRecord(payload.context);
+    }
     for (const l of errorListeners) {
       try { l(payload); } catch { /* don't break the chain */ }
     }
