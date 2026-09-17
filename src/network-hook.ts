@@ -70,21 +70,23 @@ export function initNetworkHook(): void {
 
 export function destroyNetworkHook(): void {
   if (!installed) return;
-  // Reset our state first. Restoring a host-owned property can fail (a frozen
-  // global, a foreign descriptor); that must not make a later init think the
-  // old hook is still healthy or leave subscriber references behind.
-  installed = false;
+  // Drop the subscriber references first, so a failed restore does not retain
+  // them. `installed` says our patch is on the globals, so it goes down only
+  // for the ones we put back: a later init must not wrap our own wrapper,
+  // which would dispatch every request twice and grow with each cycle.
   beforeListeners = [];
   afterListeners = [];
+  let restored = true;
   try {
     if (origFetch) window.fetch = origFetch;
-  } catch { /* continue restoring XHR */ }
+  } catch { restored = false; }
   try {
     if (origXhrOpen) XMLHttpRequest.prototype.open = origXhrOpen;
-  } catch { /* continue restoring XHR.send */ }
+  } catch { restored = false; }
   try {
     if (origXhrSend) XMLHttpRequest.prototype.send = origXhrSend;
-  } catch { /* best effort */ }
+  } catch { restored = false; }
+  installed = !restored;
 }
 
 function patchFetch(): void {

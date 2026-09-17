@@ -55,15 +55,18 @@ export function destroyLifecycle(): void {
   if (!installed) return;
   const visibility = visHandler;
   const pageHide = pageHideHandler;
-  installed = false;
   visHandler = null;
   pageHideHandler = null;
   visListeners = [];
   pageHideListeners = [];
+  // `installed` says our listeners are on the globals, so it goes down only
+  // when they are off. A later ensureInstalled must not attach a second pair.
+  let detached = true;
   if (visibility) {
-    try { document.removeEventListener("visibilitychange", visibility); } catch { /* continue */ }
+    try { document.removeEventListener("visibilitychange", visibility); } catch { detached = false; }
   }
   if (pageHide) {
-    try { window.removeEventListener("pagehide", pageHide as EventListener); } catch { /* best effort */ }
+    try { window.removeEventListener("pagehide", pageHide as EventListener); } catch { detached = false; }
   }
+  installed = !detached;
 }

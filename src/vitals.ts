@@ -305,8 +305,14 @@ function resetRouteVitals(): void {
   inpLastTs = 0;
   inpEmittedValue = -1;
   // Capture the route's page_url now (route start), so a flush after the URL
-  // later advances still attributes this route's metrics to this route.
-  routePageUrl = resolvePageUrl();
+  // later advances still attributes this route's metrics to this route. The
+  // URL read is the only step here that can throw, so it recovers on its own
+  // rather than leaving the caller to guess what already ran.
+  try {
+    routePageUrl = resolvePageUrl();
+  } catch {
+    routePageUrl = "";
+  }
 }
 
 function normalizeRouteTemplate(template: string | null): string {
@@ -339,7 +345,7 @@ export function destroyVitals(): void {
   currentRouteTemplate = "";
   loadRoute = null;
   pendingLoad = [];
-  try { resetRouteVitals(); } catch { routePageUrl = ""; }
+  resetRouteVitals();
   try { clsObserver?.disconnect(); } catch { /* continue teardown */ }
   try { inpObserver?.disconnect(); } catch { /* continue teardown */ }
   try { firstInputObserver?.disconnect(); } catch { /* continue teardown */ }
