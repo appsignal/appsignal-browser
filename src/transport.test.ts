@@ -69,9 +69,7 @@ describe("transport", () => {
   });
 
   it("sendError uses sendBeacon when document.visibilityState is hidden", () => {
-    // Mid-unload the fetch can be cancelled; beacon survives. The beacon Blob
-    // type is constrained to CORS-safelisted values, so the JSON body ships as
-    // text/plain (which the ingest endpoint reads raw anyway).
+    // Mid-unload the fetch can be cancelled; beacon survives.
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
     const beaconSpy = vi.fn().mockReturnValue(true);
     (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
@@ -84,6 +82,22 @@ describe("transport", () => {
       "http://localhost/ingest/browser/errors?api_key=test-key",
       expect.any(Blob),
     );
+  });
+
+  it("sends the error beacon as text/plain, not application/json", () => {
+    // A beacon is always credentialed, so a non-safelisted type makes it a CORS
+    // request that a wildcard ACAO rejects. It fails silently, returning true.
+    const beaconSpy = vi.fn().mockReturnValue(true);
+    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
+
+    setVisibility("hidden");
+    sendError(errorPayload());
+
+    const blob = beaconSpy.mock.calls[0][1] as Blob;
+    // Only the declared type changes; the body is still JSON and the endpoint
+    // reads it raw, ignoring Content-Type.
+    expect(blob.type).toBe("text/plain");
+    expect(blob.size).toBeGreaterThan(0);
   });
 
   it("sends event payload via fetch", () => {
@@ -139,10 +153,10 @@ describe("transport", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("sendReplayChunk with useBeacon drops bodies larger than the beacon cap", () => {
-    // fetch({keepalive:true}) has the same ~64 KB cap in Chromium, so there
-    // is no rescue path for large bodies on unload. Callers rely on the
-    // periodic flush (every 5 s for replay) having already sent recent data.
+  it("sendReplayChunk with useBeacon queues bodies larger than the beacon cap", () => {
+    // fetch({keepalive:true}) has the same ~64 KB cap in Chromium, so there is
+    // no rescue path on unload. The payload goes to the retry queue instead of
+    // nowhere, which a hidden but live tab can still drain.
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
     const beaconSpy = vi.fn();
     (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
@@ -150,6 +164,47 @@ describe("transport", () => {
     sendReplayChunk(replayPayload(80 * 1024), true); // 80 KB > 64 KB cap
 
     expect(beaconSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // The drain sends it when the tab comes back.
+    window.dispatchEvent(new Event("online"));
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues the payload when sendBeacon refuses it", () => {
+    // sendBeacon returns false when the user agent will not queue the body, for
+    // example when the per-origin budget is spent. Without a check the payload
+    // goes nowhere and nothing reports it.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    const beaconSpy = vi.fn().mockReturnValue(false);
+    (navigator as unknown as { sendBeacon: unknown }).sendBeacon = beaconSpy;
+
+    setVisibility("hidden");
+    sendError(errorPayload());
+
+    expect(beaconSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new Event("online"));
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("measures the payload limit in bytes, not UTF-16 units", () => {
+    // A 3-byte character counts as one UTF-16 unit, so a check on the length
+    // passes a body of three times the limit. The server then answers 413, and
+    // doFetch drops a 4xx without a retry.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+
+    // 4M characters of a 3-byte character is 12 MB, over the limit of 10 MB.
+    const payload = {
+      type: "replay" as const,
+      session_id: "sess",
+      tab_id: "tab",
+      chunk_index: 0,
+      events: ["\u3042".repeat(4 * 1024 * 1024)],
+    };
+    sendReplayChunk(payload);
+
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

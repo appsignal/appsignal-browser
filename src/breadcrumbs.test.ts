@@ -11,6 +11,7 @@ import {
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
+import { consumeTraceId } from "./tracing.js";
 import { timeOrigin } from "./utils.js";
 import type { ResolvedConfig } from "./types.js";
 
@@ -34,6 +35,10 @@ describe("breadcrumbs", () => {
   beforeEach(() => {
     initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
     clearBreadcrumbs();
+    // Nothing else resets this mock, so a return value or a call from one test
+    // would otherwise reach the next one.
+    vi.mocked(consumeTraceId).mockReset();
+    vi.mocked(consumeTraceId).mockReturnValue(undefined);
   });
 
   it("stores and retrieves breadcrumbs", () => {
@@ -311,14 +316,9 @@ describe("breadcrumbs", () => {
       expect(networkCrumb!.data?.error).toBeUndefined();
     });
 
-    it("does not push the breadcrumb until deferred work (body, resource_timing) has settled", async () => {
-      // The fix in 4538dd3 awaits resource-timing lookup before
-      // addBreadcrumb, mirroring the body-capture fix. A regression to the
-      // old setTimeout-and-mutate pattern would re-open a window where a
-      // flush between fetch resolution and the timing entry's arrival
-      // would serialise an incomplete breadcrumb. Catch that by asserting
-      // that draining immediately after the user's fetch resolves returns
-      // no network breadcrumb yet.
+    it("pushes the breadcrumb before the caller's response handler can run", async () => {
+      // Reverses 4538dd3, which waited for the timing first and so buffered
+      // the breadcrumb after any error thrown from the caller's `.then`.
       window.fetch = async () =>
         new Response("{}", {
           status: 200,
@@ -333,19 +333,36 @@ describe("breadcrumbs", () => {
 
       await window.fetch("http://example.com/api/sync");
 
-      // recordNetworkBreadcrumb is suspended on `await response.clone().text()`
-      // (and then the resource-timing await) — the breadcrumb must not be in
-      // the buffer yet.
+      // Buffered synchronously, as the caller's handler resumes.
       const drainedNetwork = drainBreadcrumbs().filter(
         (b) => b.category === "network",
       );
-      expect(drainedNetwork).toHaveLength(0);
+      expect(drainedNetwork).toHaveLength(1);
+      expect(drainedNetwork[0].data?.status).toBe(200);
+    });
 
-      // Past the 150 ms resource-timing await, the breadcrumb lands.
-      await new Promise((r) => setTimeout(r, 200));
-      const eventual = getSnapshot().filter((b) => b.category === "network");
-      expect(eventual).toHaveLength(1);
-      expect(eventual[0].data?.status).toBe(200);
+    it("is in the error buffer by the time the response handler throws", async () => {
+      // The case the whole ordering change exists for: an error raised from a
+      // .then must carry the request that caused it.
+      window.fetch = async () => new Response("{}", { status: 500 });
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      let seen: ReturnType<typeof getErrorBreadcrumbs> = [];
+      await window.fetch("http://example.com/api/checkout").then((response) => {
+        // Exactly where a host would throw, and where captureError would
+        // snapshot the buffer synchronously.
+        if (!response.ok) seen = getErrorBreadcrumbs();
+      });
+
+      const network = seen.filter((b) => b.category === "network");
+      expect(network).toHaveLength(1);
+      expect(network[0].data?.url).toBe("http://example.com/api/checkout");
+      expect(network[0].data?.status).toBe(500);
     });
 
     it("emits '(error)' only for true transport failures", async () => {
@@ -366,6 +383,52 @@ describe("breadcrumbs", () => {
       expect(networkCrumb).toBeDefined();
       expect(networkCrumb!.message).toBe("GET http://example.com/api/down (error)");
       expect(networkCrumb!.data?.error).toBe(true);
+    });
+
+    it("consumes the trace id of a cancelled request and adds no breadcrumb", async () => {
+      // A typeahead cancels on each keystroke. Not failures, but the id must
+      // still leave the queue.
+      vi.mocked(consumeTraceId).mockReturnValue("trace-from-cancelled");
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "http://example.com/api/search");
+      xhr.send();
+      xhr.abort();
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(consumeTraceId).toHaveBeenCalledWith("http://example.com/api/search");
+      expect(getSnapshot().filter((b) => b.category === "network")).toHaveLength(0);
+    });
+
+    it("consumes the trace id on a transport failure too", async () => {
+      // pendingTraces is a FIFO keyed by URL, so an id left there is claimed
+      // by the next request to that URL.
+      vi.mocked(consumeTraceId).mockReturnValue("trace-from-failed-request");
+
+      window.fetch = async () => {
+        throw new TypeError("Network error");
+      };
+
+      initNetworkHook();
+      initBreadcrumbs(
+        { ...defaultBreadcrumbConfig, network: true },
+        ["http://localhost/ingest/browser"],
+      );
+
+      await window.fetch("http://example.com/api/down").catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(consumeTraceId).toHaveBeenCalledWith("http://example.com/api/down");
+
+      const breadcrumb = getSnapshot().find((b) => b.category === "network");
+      expect(breadcrumb!.data?.error).toBe(true);
+      expect(breadcrumb!.data?.trace_id).toBe("trace-from-failed-request");
     });
   });
 
@@ -956,7 +1019,7 @@ describe("network resource timing correlation", () => {
     // only one breadcrumb would get timing; the list keeps both.
     resourceObserver()!.cb({ getEntries: () => [makeResourceEntry(20), makeResourceEntry(40)] });
 
-    // Past the 150ms resource-timing retry in recordNetworkBreadcrumb.
+    // Give the enrichment from the observer callback time to land.
     await new Promise((r) => setTimeout(r, 250));
 
     const network = getSnapshot().filter((b) => b.category === "network");
@@ -991,5 +1054,61 @@ describe("network resource timing correlation", () => {
     const network = getSnapshot().filter((b) => b.category === "network");
     expect(network).toHaveLength(1);
     expect((network[0].data?.resource_timing as { ttfb?: number })?.ttfb).toBe(20);
+  });
+
+  it("enriches the buffered breadcrumb when a beforeBreadcrumb hook is set", () => {
+    // The hook returns another object and pruneData replaces its `data`, so
+    // enriching the original would lose the timing for every host with a hook.
+    window.fetch = async () => new Response("{}", { status: 200 });
+
+    initNetworkHook();
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, network: true },
+      ["http://localhost/ingest/browser"],
+      [],
+      [],
+      { maskText: [], blockElement: [] },
+      // A redacting hook returns a new object, as a host hook would.
+      (breadcrumb) => ({ ...breadcrumb, data: { ...breadcrumb.data } }),
+    );
+
+    return window
+      .fetch("http://example.com/api/timeseries", { method: "POST" })
+      .then(() => {
+        resourceObserver()!.cb({ getEntries: () => [makeResourceEntry(20)] });
+
+        const network = getSnapshot().filter((b) => b.category === "network");
+        expect(network).toHaveLength(1);
+        expect((network[0].data?.resource_timing as { ttfb?: number })?.ttfb).toBe(20);
+      });
+  });
+
+  it("does not let a cross-origin request claim the timing of a later one", async () => {
+    // A zeroed cross-origin entry is still spliced out, so a breadcrumb that
+    // waits on would take the entry of the next request to that URL.
+    window.fetch = async () => new Response("{}", { status: 200 });
+
+    initNetworkHook();
+    initBreadcrumbs(
+      { ...defaultBreadcrumbConfig, network: true },
+      ["http://localhost/ingest/browser"],
+    );
+
+    const url = "http://example.com/api/timeseries";
+    await window.fetch(url, { method: "POST" });
+    // The entry of the first request, with the phases zeroed.
+    const opaque = { ...makeResourceEntry(20), responseStart: 0 } as PerformanceResourceTiming;
+    resourceObserver()!.cb({ getEntries: () => [opaque] });
+
+    await window.fetch(url, { method: "POST" });
+    resourceObserver()!.cb({ getEntries: () => [makeResourceEntry(40)] });
+
+    const network = getSnapshot().filter((b) => b.category === "network");
+    expect(network).toHaveLength(2);
+    const timings = network.map(
+      (b) => (b.data?.resource_timing as { ttfb?: number } | undefined)?.ttfb,
+    );
+    // The second request keeps its own timing. The first has none.
+    expect(timings).toEqual([undefined, 40]);
   });
 });

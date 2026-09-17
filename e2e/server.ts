@@ -104,7 +104,7 @@ const server = createServer(async (req, res) => {
   }
 
   // ── Test API endpoints ─────────────────────────────────────────────────
-  // /api/echo[?status=NNN] — captures method, headers, body. Used to verify
+  // /api/echo[?status=NNN][?delay=NNN] — captures method, headers, body. Used to verify
   // the SDK's instrumented fetch (network breadcrumbs, traceparent injection).
   if (pathname.startsWith("/api/")) {
     const body = req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
@@ -125,8 +125,18 @@ const server = createServer(async (req, res) => {
       receivedAt: Date.now(),
     });
     const status = query.status ? Number(query.status) : 200;
-    res.writeHead(status, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: status < 400 }));
+    // ?delay=NNN keeps the response open, so a test can cancel a request that
+    // is still in flight.
+    const delay = query.delay ? Number(query.delay) : 0;
+    const send = (): void => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: status < 400 }));
+    };
+    if (delay > 0) {
+      setTimeout(send, delay);
+    } else {
+      send();
+    }
     return;
   }
 

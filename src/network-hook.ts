@@ -28,6 +28,9 @@ export interface RequestResult {
    * status code however it wants. Listeners that want to flag 4xx/5xx
    * should inspect `status` themselves. */
   error: boolean;
+  /** The host cancelled it. Still reported, so a listener can release the
+   * trace id, but `error` stays false. */
+  aborted?: boolean;
   /** Set for fetch responses. Listeners must `.clone()` before reading. */
   response?: Response;
   /** Set for XHR responses. */
@@ -44,6 +47,7 @@ let installed = false;
 let origFetch: typeof window.fetch;
 let origXhrOpen: typeof XMLHttpRequest.prototype.open;
 let origXhrSend: typeof XMLHttpRequest.prototype.send;
+let origXhrAbort: typeof XMLHttpRequest.prototype.abort;
 
 /** Register a before-request listener. Returns an unregister fn. */
 export function onBeforeRequest(fn: BeforeRequestListener): () => void {
@@ -87,6 +91,9 @@ export function destroyNetworkHook(): void {
   }
   if (origXhrSend) {
     restored = attemptCleanup("xhr send patch", () => { XMLHttpRequest.prototype.send = origXhrSend; }) && restored;
+  }
+  if (origXhrAbort) {
+    restored = attemptCleanup("xhr abort patch", () => { XMLHttpRequest.prototype.abort = origXhrAbort; }) && restored;
   }
   installed = !restored;
 }
@@ -141,12 +148,15 @@ function patchFetch(): void {
       }
       return response;
     } catch (err) {
+      // A cancelled fetch rejects with AbortError, which is not a failure.
+      const aborted = (err as { name?: string } | null)?.name === "AbortError";
       const result: RequestResult = {
         url,
         method,
         startTime,
         endTime: Date.now(),
-        error: true,
+        error: !aborted,
+        aborted,
       };
       for (const l of afterListeners) {
         try { l(result); } catch { /* swallow */ }
@@ -159,7 +169,55 @@ function patchFetch(): void {
 type TaggedXhr = XMLHttpRequest & {
   _ahMethod?: string;
   _ahUrl?: string;
+  _ahHooked?: boolean;
+  // The request that send() started. The listeners take this record, so a host
+  // that opens the object again for the next request cannot change the report
+  // of the request that is still in flight.
+  _ahPending?: {
+    url: string;
+    method: string;
+    startTime: number;
+    aborted?: boolean;
+  } | null;
 };
+
+/** Registers once per object, in open(): listeners run in registration order
+ * and a host attaches between open() and send(). A host that attaches before
+ * open() still wins; closing that would need a constructor patch. */
+function hookXhr(tagged: TaggedXhr): void {
+  if (tagged._ahHooked) return;
+  tagged._ahHooked = true;
+
+  const emit = (error: boolean) => {
+    const pending = tagged._ahPending;
+    if (!pending) return;
+    // One report per send(), whichever event arrives first.
+    tagged._ahPending = null;
+    const aborted = pending.aborted === true;
+    const result: RequestResult = {
+      url: pending.url,
+      method: pending.method,
+      startTime: pending.startTime,
+      endTime: Date.now(),
+      error: error && !aborted,
+      aborted,
+      xhr: tagged,
+    };
+    if (!error) result.status = tagged.status;
+    for (const l of afterListeners) {
+      try { l(result); } catch { /* swallow */ }
+    }
+  };
+
+  tagged.addEventListener("readystatechange", () => {
+    if (tagged.readyState !== 4) return;
+    // status 0 at DONE is a transport failure. abort() marks the record first,
+    // so emit reports a cancel instead.
+    emit(tagged.status === 0);
+  });
+  tagged.addEventListener("load", () => emit(false));
+  tagged.addEventListener("error", () => emit(true));
+}
 
 function patchXhr(): void {
   origXhrOpen = XMLHttpRequest.prototype.open;
@@ -173,6 +231,7 @@ function patchXhr(): void {
     const tagged = this as TaggedXhr;
     tagged._ahMethod = method;
     tagged._ahUrl = typeof url === "string" ? url : url.href;
+    hookXhr(tagged);
     return origXhrOpen.call(
       this,
       method,
@@ -181,13 +240,27 @@ function patchXhr(): void {
     );
   };
 
+  // abort() reaches readyState 4 with status 0, indistinguishable from a
+  // failure, and fires before the `abort` event. Mark it here.
+  origXhrAbort = XMLHttpRequest.prototype.abort;
+  XMLHttpRequest.prototype.abort = function () {
+    const tagged = this as TaggedXhr;
+    if (tagged._ahPending) tagged._ahPending.aborted = true;
+    return origXhrAbort.call(this);
+  };
+
   XMLHttpRequest.prototype.send = function (
     body?: Document | XMLHttpRequestBodyInit | null,
   ) {
     const xhr = this as TaggedXhr;
     const url = xhr._ahUrl || "";
     const method = (xhr._ahMethod || "GET").toUpperCase();
-    const startTime = Date.now();
+    // Opened before the SDK patched open(), so there is no url to report or
+    // propagate to.
+    if (!url) return origXhrSend.call(this, body);
+
+    hookXhr(xhr);
+    xhr._ahPending = { url, method, startTime: Date.now() };
     const headers = new Headers();
 
     const ctx: RequestContext = { url, method, headers };
@@ -199,35 +272,6 @@ function patchXhr(): void {
     // throw on forbidden headers (Cookie, Host, etc.); ignore those.
     headers.forEach((value, key) => {
       try { xhr.setRequestHeader(key, value); } catch { /* forbidden header */ }
-    });
-
-    xhr.addEventListener("load", () => {
-      const result: RequestResult = {
-        url,
-        method,
-        startTime,
-        endTime: Date.now(),
-        status: xhr.status,
-        error: false,
-        xhr,
-      };
-      for (const l of afterListeners) {
-        try { l(result); } catch { /* swallow */ }
-      }
-    });
-
-    xhr.addEventListener("error", () => {
-      const result: RequestResult = {
-        url,
-        method,
-        startTime,
-        endTime: Date.now(),
-        error: true,
-        xhr,
-      };
-      for (const l of afterListeners) {
-        try { l(result); } catch { /* swallow */ }
-      }
     });
 
     return origXhrSend.call(this, body);

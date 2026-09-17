@@ -15,13 +15,12 @@ export const ERROR_PATH = "/ingest/browser/errors";
 
 type Kind = "events" | "error";
 
-// Chromium-enforced cap on `sendBeacon` bodies. `fetch({keepalive:true})`
-// shares the same cap, so there is no point falling back to keepalive for
-// larger payloads — the browser rejects both silently. Small payloads survive
-// unload via beacon. Larger ones are dropped: on an unload flush the body is
-// the route's accumulated web vitals plus, when session streaming is on, the
-// breadcrumb journey since the last 30s periodic flush.
+// Chromium-enforced cap on `sendBeacon` bodies. `fetch({keepalive:true})` has
+// the same cap, so a fallback to keepalive gives nothing. A body over the cap
+// goes to the retry queue.
 const BEACON_MAX_BYTES = 64 * 1024;
+// The only Content-Type a beacon can carry cross-origin. See flushOnUnload.
+const BEACON_CONTENT_TYPE = "text/plain";
 // Match the server's DefaultBodyLimit in crates/ingest/src/lib.rs. Replay
 // FullSnapshot chunks for rich DOMs routinely exceed 512 KB; dropping them
 // client-side left sessions with no initial snapshot and unplayable replays.
@@ -79,9 +78,16 @@ function urlFor(kind: Kind): string {
 }
 
 function contentTypeFor(kind: Kind): string {
+  // For the fetch path only. The beacon path always uses BEACON_CONTENT_TYPE.
   // Errors go through the legacy frontend_errors pipeline which parses the
   // body as JSON; events ride a CORS-preflight-free text/plain channel.
   return kind === "error" ? "application/json" : "text/plain";
+}
+
+/** Bytes, not `String.length`: a 3-byte character counts as one UTF-16 unit,
+ * so a length check passes a body three times the limit. */
+function byteSize(body: string): number {
+  return new Blob([body]).size;
 }
 
 /** Serialize a payload without letting the failure reach host code. `pruneForJson`
@@ -121,18 +127,14 @@ export function sendReplayChunk(payload: ReplayChunk, useBeacon = false): void {
   }
 }
 
-/** Flush events via sendBeacon for pagehide/visibility-hidden. Bodies larger
- * than the beacon cap are dropped rather than attempted — the keepalive fetch
- * fallback shares the same cap and silently rejects oversize bodies anyway. */
+/** Flush events via sendBeacon for pagehide/visibility-hidden. A body over the
+ * beacon cap goes to the retry queue. */
 export function sendBeaconEvents(payload: EventPayload): void {
   flushOnUnload(serialize(payload), "events");
 }
 
-/** Send a payload during page unload using sendBeacon. Bounded to
- * BEACON_MAX_BYTES: larger bodies are dropped because both sendBeacon and
- * fetch({keepalive:true}) silently reject them. Oversize only happens with
- * session streaming on (a large breadcrumb journey); the default errors+vitals
- * payload is well under the cap. */
+/** Send during unload via sendBeacon. What the beacon cannot take goes to the
+ * retry queue, which only helps a tab that is hidden but still alive. */
 function flushOnUnload(body: string | null, kind: Kind): void {
   if (body === null) return;
   if (!navigator.onLine) {
@@ -140,21 +142,30 @@ function flushOnUnload(body: string | null, kind: Kind): void {
     return;
   }
 
-  if (typeof navigator.sendBeacon !== "function") return;
-  if (body.length > BEACON_MAX_BYTES) return;
+  // A hidden tab is often still alive, so the queue gets another chance.
+  if (typeof navigator.sendBeacon !== "function") {
+    enqueue(body, kind);
+    return;
+  }
+  if (byteSize(body) > BEACON_MAX_BYTES) {
+    // Over the fetch limit it would 413, and a 4xx is dropped, so queueing it
+    // would only evict payloads that can still go.
+    if (byteSize(body) <= MAX_PAYLOAD_BYTES) enqueue(body, kind);
+    return;
+  }
 
-  // application/json triggers a CORS preflight in cross-origin sendBeacon
-  // calls, which the spec disallows — for same-origin /ingest/browser this
-  // works because no preflight is needed. The server accepts application/json
-  // on both fetch and beacon paths.
-  const blob = new Blob([body], { type: contentTypeFor(kind) });
-  navigator.sendBeacon(urlFor(kind), blob);
+  // A beacon is always credentialed, so a type that is not CORS-safelisted
+  // makes it a CORS request that a wildcard ACAO rejects. It fails silently:
+  // sendBeacon still returns true. The endpoint reads the body raw.
+  const blob = new Blob([body], { type: BEACON_CONTENT_TYPE });
+  // false means the user agent refused to queue it, not that it failed to send.
+  if (!navigator.sendBeacon(urlFor(kind), blob)) enqueue(body, kind);
 }
 
 function send(body: string | null, kind: Kind): void {
   if (body === null) return;
   // Drop payloads that exceed the size limit
-  if (body.length > MAX_PAYLOAD_BYTES) return;
+  if (byteSize(body) > MAX_PAYLOAD_BYTES) return;
 
   if (!navigator.onLine) {
     enqueue(body, kind);
@@ -166,14 +177,15 @@ function send(body: string | null, kind: Kind): void {
 function enqueue(body: string, kind: Kind): void {
   // A single body that already exceeds the cap can't ever fit; drop it
   // rather than evicting everything else trying to make room.
-  if (body.length > MAX_QUEUE_BYTES) return;
+  const bytes = byteSize(body);
+  if (bytes > MAX_QUEUE_BYTES) return;
   // Evict oldest entries until the new body fits under the byte cap.
-  while (retryQueue.length > 0 && retryQueueBytes + body.length > MAX_QUEUE_BYTES) {
+  while (retryQueue.length > 0 && retryQueueBytes + bytes > MAX_QUEUE_BYTES) {
     const dropped = retryQueue.shift()!;
-    retryQueueBytes -= dropped.body.length;
+    retryQueueBytes -= byteSize(dropped.body);
   }
   retryQueue.push({ body, kind });
-  retryQueueBytes += body.length;
+  retryQueueBytes += bytes;
   startOnlineListener();
   scheduleRetryDrain();
 }

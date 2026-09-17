@@ -3,7 +3,9 @@ import {
   initNetworkHook,
   destroyNetworkHook,
   onBeforeRequest,
+  onAfterRequest,
 } from "./network-hook.js";
+import { initTracing, consumeTraceId, destroyTracing } from "./tracing.js";
 
 // Capture what origFetch actually receives so we can assert on the headers
 // the wrapper forwards. The real network never runs.
@@ -103,5 +105,96 @@ describe("network-hook teardown that the browser refuses", () => {
     expect(calls).toEqual(["https://example.com/once"]);
     Object.defineProperty(window, "fetch", { value: fetchMock, writable: true, configurable: true });
     destroyNetworkHook();
+  });
+
+  it("notifies after-listeners before a host XHR load handler", () => {
+    // Listeners run in registration order, and a host attaches between open()
+    // and send(), so the SDK must register first.
+    const order: string[] = [];
+    onAfterRequest(() => { order.push("sdk"); });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/api/thing");
+    xhr.addEventListener("load", () => { order.push("host"); });
+    xhr.send();
+    xhr.dispatchEvent(new Event("load"));
+
+    expect(order).toEqual(["sdk", "host"]);
+  });
+
+  it("reports the request that send() started, not a later open()", () => {
+    // A poll loop can re-open the object before the previous load arrives.
+    const seen: { url: string; status?: number }[] = [];
+    onAfterRequest((result) => { seen.push({ url: result.url, status: result.status }); });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/first");
+    xhr.send();
+    // The host starts the next request before the first one reports.
+    xhr.open("GET", "https://example.com/second");
+    xhr.dispatchEvent(new Event("load"));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("https://example.com/first");
+  });
+
+  it("reports once for each send, whichever event arrives first", () => {
+    // readystatechange comes before load, and an error event can follow both.
+    const seen: string[] = [];
+    onAfterRequest((result) => { seen.push(result.url); });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/once");
+    xhr.send();
+    xhr.dispatchEvent(new Event("load"));
+    xhr.dispatchEvent(new Event("error"));
+
+    expect(seen).toEqual(["https://example.com/once"]);
+  });
+
+  it("reports an aborted request as cancelled, not as a failure", () => {
+    // abort() reaches readyState 4 with status 0 and never fires `error`.
+    const seen: { url: string; error: boolean; aborted?: boolean }[] = [];
+    onAfterRequest((result) => {
+      seen.push({ url: result.url, error: result.error, aborted: result.aborted });
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/slow");
+    xhr.send();
+    xhr.abort();
+
+    expect(seen).toEqual([
+      { url: "https://example.com/slow", error: false, aborted: true },
+    ]);
+  });
+
+  it("does not report a request with an unknown url", () => {
+    // Opened before the patch, so there is no url worth a buffer slot.
+    destroyNetworkHook();
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/early");
+
+    initNetworkHook();
+    const seen: string[] = [];
+    onAfterRequest((result) => { seen.push(result.url); });
+
+    xhr.send();
+    xhr.dispatchEvent(new Event("load"));
+
+    expect(seen.filter((u) => u === "")).toHaveLength(0);
+  });
+
+  it("reports a cancelled fetch as cancelled, not as a failure", async () => {
+    const seen: { error: boolean; aborted?: boolean }[] = [];
+    onAfterRequest((result) => { seen.push({ error: result.error, aborted: result.aborted }); });
+
+    const abortError = new Error("The operation was aborted.");
+    abortError.name = "AbortError";
+    fetchMock.mockRejectedValueOnce(abortError);
+
+    await window.fetch("https://example.com/api/search").catch(() => {});
+
+    expect(seen).toEqual([{ error: false, aborted: true }]);
   });
 });
