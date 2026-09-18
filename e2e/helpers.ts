@@ -56,10 +56,9 @@ export async function setConfig(
   /* no-op shim */
 }
 
-/** Force a flush via the SDK's flush() API after waiting long enough for any
- * in-flight network-breadcrumb async work to settle. recordNetworkBreadcrumb
- * awaits the response body and a 150 ms resource-timing settle before the
- * breadcrumb lands in the buffer; 500 ms covers both with margin. */
+/** Force a flush via the SDK's flush() API. The wait covers the resource
+ * timing, which arrives on an observer callback after the breadcrumb is in the
+ * buffer. */
 export async function flush(page: Page): Promise<void> {
   await page.evaluate(async () => {
     await new Promise((r) => setTimeout(r, 500));

@@ -169,11 +169,9 @@ export function initBreadcrumbs(
     onAfterRequest((result) => {
       if (!config.network) return;
       if (isCollectEndpoint(result.url) || isBlocklisted(result.url)) return;
-      // Fire-and-forget — recordNetworkBreadcrumb awaits any deferred work
-      // (body capture) before pushing, so the breadcrumb is complete on
-      // push. The user's fetch promise has already resolved by the time
-      // the after-request listener fires.
-      void recordNetworkBreadcrumb(result);
+      // Runs before the caller's `.then`, so the breadcrumb is buffered
+      // before any error that handler throws.
+      recordNetworkBreadcrumb(result);
     }),
   );
   initConsole();
@@ -183,17 +181,20 @@ export function initBreadcrumbs(
   initTabLifecycle();
 }
 
-export function addBreadcrumb(breadcrumb: Breadcrumb): void {
+/** Returns what went into the buffers, which is not always the given object:
+ * a hook can replace it, and `pruneData` replaces its `data`. */
+export function addBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   // A null return drops the breadcrumb from every downstream payload, the
   // error context and the periodic events flush alike.
   const result = applyHook(beforeBreadcrumbHook, breadcrumb);
-  if (!result) return;
+  if (!result) return null;
   // Only a hook can make this data anything but SDK strings and numbers.
   if (beforeBreadcrumbHook) pruneData(result);
   sessionBuffer.push(result);
   if (ERROR_BUFFER_CATEGORIES.has(result.category)) {
     errorBuffer.push(result);
   }
+  return result;
 }
 
 /** Replace `data` with a copy JSON can serialize. Host code and a
@@ -653,6 +654,55 @@ const TIMING_MAX_AGE_MS = 30_000;
 // drop oldest-first.
 const TIMING_MAX_ENTRIES = 200;
 
+// Breadcrumbs waiting for a resource timing. Bounded like `resourceTimings`:
+// some requests never get an entry.
+// Only the observer callback drains the pending list.
+let resourceObserverInstalled = false;
+
+let pendingTimingEnrichments: {
+  url: string;
+  startTime: number;
+  endTime: number;
+  data: Record<string, unknown>;
+  addedAt: number;
+}[] = [];
+
+function awaitResourceTiming(
+  result: RequestResult,
+  data: Record<string, unknown>,
+): void {
+  pendingTimingEnrichments.push({
+    url: result.url,
+    startTime: result.startTime,
+    endTime: result.endTime,
+    data,
+    addedAt: Date.now(),
+  });
+  if (pendingTimingEnrichments.length > TIMING_MAX_ENTRIES) {
+    pendingTimingEnrichments = pendingTimingEnrichments.slice(-TIMING_MAX_ENTRIES);
+  }
+}
+
+/** Runs on the observer callback, so the wait is one macrotask. This lands
+ * after `beforeBreadcrumb`, so a hook does not see `resource_timing`. */
+function drainTimingEnrichments(now: number): void {
+  if (pendingTimingEnrichments.length === 0) return;
+
+  const stillPending: typeof pendingTimingEnrichments = [];
+  for (const pending of pendingTimingEnrichments) {
+    if (now - pending.addedAt > TIMING_MAX_AGE_MS) continue;
+    const found = getResourceTiming(pending.url, pending.startTime, pending.endTime);
+    if (found.timing) {
+      pending.data.resource_timing = found.timing;
+    } else if (!found.consumed) {
+      // An entry with no usable phases is already spliced out, so waiting on
+      // would take the entry of a later request to the same URL.
+      stillPending.push(pending);
+    }
+  }
+  pendingTimingEnrichments = stillPending;
+}
+
 function initResourceTimingObserver(): void {
   if (typeof PerformanceObserver === "undefined") return;
 
@@ -673,6 +723,8 @@ function initResourceTimingObserver(): void {
       resourceTimings = resourceTimings
         .filter((t) => now - t.addedAt <= TIMING_MAX_AGE_MS)
         .slice(-TIMING_MAX_ENTRIES);
+      // Hand the new timings to the breadcrumbs waiting for them.
+      drainTimingEnrichments(now);
     });
     // `buffered: true` replays entries recorded before the observer registered,
     // covering the gap between initNetworkHook (which starts producing network
@@ -681,6 +733,7 @@ function initResourceTimingObserver(): void {
     // unclaimed and age out — the cap above keeps that bounded. Requires the
     // single-`type` form of observe().
     observer.observe({ type: "resource", buffered: true });
+    resourceObserverInstalled = true;
     cleanups.push(() => observer.disconnect());
   } catch {
     // resource timing not supported
@@ -692,12 +745,19 @@ function initResourceTimingObserver(): void {
 // alone is ambiguous when several requests hit the same endpoint, so the entry
 // whose start is closest to the request start wins and is removed, so a
 // concurrent same-URL request can't claim it too.
+type TimingLookup = {
+  // True when this call took an entry out of the list, whether or not that
+  // entry had usable phases. A caller must not wait for an entry that is gone.
+  consumed: boolean;
+  timing?: Record<string, unknown>;
+};
+
 function getResourceTiming(
   url: string,
   requestStart: number,
   requestEnd: number,
-): Record<string, unknown> | undefined {
-  if (resourceTimings.length === 0) return undefined;
+): TimingLookup {
+  if (resourceTimings.length === 0) return { consumed: false };
 
   // PerformanceResourceTiming times are relative to timeOrigin; lift them to
   // epoch ms to compare against the request's Date.now()-based window. One
@@ -727,17 +787,19 @@ function getResourceTiming(
     }
   }
 
-  if (!best) return undefined;
+  if (!best) return { consumed: false };
 
   resourceTimings.splice(resourceTimings.indexOf(best), 1);
 
   // Cross-origin responses without a Timing-Allow-Origin header have their
   // detailed timing zeroed for privacy. `responseStart === 0` signals that; skip
   // rather than emit all-zero phases that would misleadingly read as "0ms".
-  if (best.entry.responseStart === 0) return undefined;
+  if (best.entry.responseStart === 0) return { consumed: true };
 
   const timing = timingPhases(best.entry);
-  return Object.keys(timing).length > 0 ? timing : undefined;
+  return Object.keys(timing).length > 0
+    ? { consumed: true, timing }
+    : { consumed: true };
 }
 
 // Phase/size breakdown shared by fetch/xhr resource entries and the
@@ -782,17 +844,30 @@ function isCollectEndpoint(url: string): boolean {
   return internalEndpoints.some((e) => url.includes(e));
 }
 
-async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
+function recordNetworkBreadcrumb(result: RequestResult): void {
   const initiator = result.xhr ? "xhr" : "fetch";
   const filteredUrl = scrubUrl(result.url, queryParamsAllowlist);
+  // Before each early return: `pendingTraces` is a FIFO keyed by URL, so an id
+  // left there goes to the next request to the same URL.
+  const traceId = consumeTraceId(result.url);
+
+  // The id is out of the queue now, which is the point of reporting a cancel.
+  if (result.aborted) return;
 
   if (result.error) {
     // Transport failure — no response received.
+    const data: Record<string, unknown> = {
+      initiator,
+      method: result.method,
+      url: filteredUrl,
+      error: true,
+    };
+    if (traceId) data.trace_id = traceId;
     addBreadcrumb({
       timestamp: result.startTime,
       category: "network",
       message: `${result.method} ${filteredUrl} (error)`,
-      data: { initiator, method: result.method, url: filteredUrl, error: true },
+      data,
     });
     return;
   }
@@ -805,29 +880,26 @@ async function recordNetworkBreadcrumb(result: RequestResult): Promise<void> {
     duration: result.endTime - result.startTime,
   };
 
-  const traceId = consumeTraceId(result.url);
   if (traceId) data.trace_id = traceId;
 
-  // Resource timing — the PerformanceObserver may not have flushed yet, so
-  // a sync read often returns nothing right after fetch resolution. Wait
-  // briefly and re-read before pushing, so the breadcrumb is complete on
-  // push (same pattern as body capture above). Without this, a flush
-  // between fetch resolution and the timing entry's arrival serialises
-  // without resource_timing — the case that matters most is a fetch right
-  // before a pagehide, which is exactly when timing detail is wanted.
-  let rt = getResourceTiming(result.url, result.startTime, result.endTime);
-  if (!rt) {
-    await new Promise((r) => setTimeout(r, 150));
-    rt = getResourceTiming(result.url, result.startTime, result.endTime);
-  }
-  if (rt) data.resource_timing = rt;
+  // Buffer now, add the timing when the observer delivers it. Waiting here
+  // would put the breadcrumb after an error thrown from the response handler,
+  // and that error's payload is its only route to the server by default.
+  const found = getResourceTiming(result.url, result.startTime, result.endTime);
+  if (found.timing) data.resource_timing = found.timing;
 
-  addBreadcrumb({
+  const stored = addBreadcrumb({
     timestamp: result.startTime,
     category: "network",
     message: `${result.method} ${filteredUrl} ${result.status}`,
     data,
   });
+
+  // Enrich `stored`, not `data`: a hook can return another object, and
+  // pruneData replaces its `data`. Only wait if an entry can still arrive.
+  if (!found.consumed && resourceObserverInstalled && stored?.data) {
+    awaitResourceTiming(result, stored.data as Record<string, unknown>);
+  }
 
   touchActivity();
 }
@@ -1106,6 +1178,8 @@ export function destroyBreadcrumbs(): void {
   preNavListeners = [];
   postNavListeners = [];
   resourceTimings = [];
+  pendingTimingEnrichments = [];
+  resourceObserverInstalled = false;
   recentClicks = [];
   sessionBuffer = new RingBuffer<Breadcrumb>(SESSION_BUFFER_CAPACITY);
   errorBuffer = new RingBuffer<Breadcrumb>(ERROR_BUFFER_CAPACITY);

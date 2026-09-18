@@ -9,6 +9,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 type WorkerFixtures = {
   serverUrl: string;
+  // A second instance on its own port. The ingest is a different origin in
+  // every real install, and some faults only happen cross-origin.
+  ingestUrl: string;
 };
 
 async function waitForReady(url: string, deadlineMs: number): Promise<void> {
@@ -41,30 +44,41 @@ function waitForExit(proc: ChildProcess, graceMs: number): Promise<void> {
   });
 }
 
+async function withServer(
+  port: number,
+  workerIndex: number,
+  label: string,
+  use: (url: string) => Promise<void>,
+): Promise<void> {
+  const proc = spawn("bun", ["run", "e2e/server.ts"], {
+    env: { ...process.env, E2E_PORT: String(port) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const prefix = `[${label}:${workerIndex}] `;
+  proc.stdout?.on("data", (d: Buffer) => process.stderr.write(prefix + d.toString()));
+  proc.stderr?.on("data", (d: Buffer) => process.stderr.write(prefix + d.toString()));
+
+  try {
+    await waitForReady(`http://localhost:${port}/__captured`, 30_000);
+    await use(`http://localhost:${port}`);
+  } finally {
+    proc.kill("SIGTERM");
+    await waitForExit(proc, 2_000);
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export const test = base.extend<{}, WorkerFixtures>({
   serverUrl: [
     async ({}, use, workerInfo) => {
-      const port = 3210 + workerInfo.workerIndex;
-      const proc = spawn("bun", ["run", "e2e/server.ts"], {
-        env: { ...process.env, E2E_PORT: String(port) },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const prefix = `[server:${workerInfo.workerIndex}] `;
-      proc.stdout?.on("data", (d: Buffer) =>
-        process.stderr.write(prefix + d.toString()),
-      );
-      proc.stderr?.on("data", (d: Buffer) =>
-        process.stderr.write(prefix + d.toString()),
-      );
+      await withServer(3210 + workerInfo.workerIndex, workerInfo.workerIndex, "server", use);
+    },
+    { scope: "worker" },
+  ],
 
-      try {
-        await waitForReady(`http://localhost:${port}/__captured`, 30_000);
-        await use(`http://localhost:${port}`);
-      } finally {
-        proc.kill("SIGTERM");
-        await waitForExit(proc, 2_000);
-      }
+  ingestUrl: [
+    async ({}, use, workerInfo) => {
+      await withServer(3310 + workerInfo.workerIndex, workerInfo.workerIndex, "ingest", use);
     },
     { scope: "worker" },
   ],
