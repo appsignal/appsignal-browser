@@ -3,6 +3,7 @@ import { logError, attemptCleanup } from "./utils.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
+let tracesEndpoint = "";
 
 // Errors POST as FrontendTransaction JSON to /ingest/browser/errors and
 // route through the processor's frontend_errors pipeline (sourcemap
@@ -46,9 +47,31 @@ const pendingRetries = new Set<ReturnType<typeof setTimeout>>();
 
 /** Configure transport. `endpoint` is the BASE origin (no path) — paths and
  * query params are appended internally per payload kind. */
-export function initTransport(endpoint: string, key: string): void {
+export function initTransport(endpoint: string, key: string, tracing?: string): void {
   baseEndpoint = endpoint.replace(/\/$/, "");
   ingestionKey = key;
+  tracesEndpoint = tracing ? tracing.replace(/\/$/, "") : "";
+}
+
+/** Post the spans of one error to the tracing. Fire and forget: the error
+ * itself already left by its own route, and a span that does not arrive costs
+ * the trace view, not the report. */
+export function sendTrace(envelope: unknown): void {
+  if (!tracesEndpoint) return;
+  const body = serialize(envelope);
+  if (body === null) return;
+  // `fetch`, never `sendBeacon`. A beacon is always credentialed, and the
+  // tracing answers a wildcard `Access-Control-Allow-Origin`, which a
+  // credentialed request rejects.
+  void fetch(`${tracesEndpoint}/v1/traces`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "AppSignal-Config-PushApiKey": ingestionKey,
+    },
+    body,
+    keepalive: true,
+  }).catch(() => { /* the error report does not depend on this */ });
 }
 
 /** Stop the periodic retry drain, cancel in-flight retry timers, and detach
@@ -69,6 +92,7 @@ export function destroyTransport(): void {
   retryQueue = [];
   retryQueueBytes = 0;
   baseEndpoint = "";
+  tracesEndpoint = "";
   ingestionKey = "";
 }
 

@@ -1,3 +1,17 @@
+/** Where the browser's spans go, and the identity they carry. */
+export interface TracingConfig {
+  /** Base URL for OTLP over HTTP. The SDK posts to `<endpoint>/v1/traces`,
+   * so anything that speaks OTLP can receive it: AppSignal's own ingest now,
+   * an AppSignal Collector later, without a change here. */
+  endpoint: string;
+  /** The AppSignal app these spans belong to. Without it the collector routes
+   * them to an app of their own rather than the host's. */
+  appName: string;
+  environment: string;
+  /** Names the browser among the services of a trace. Defaults to "Browser". */
+  serviceName?: string;
+}
+
 /** Client-side configuration. Every group is optional; only `key` is
  * required. */
 export interface BrowserConfig {
@@ -12,6 +26,9 @@ export interface BrowserConfig {
    * `active: process.env.NODE_ENV === "production"`. */
   active?: boolean;
   appVersion?: string;
+  /** Send the span describing the navigation an error happened in, as OTLP
+   * over HTTP. */
+  tracing?: TracingConfig;
   user?: UserContext;
   /** Inspect or modify each error at the entry point, before the SDK adds an
    * error breadcrumb, records `lastErrorTimestamp`, or runs deduplication.
