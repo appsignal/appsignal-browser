@@ -1,72 +1,79 @@
-import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
+import { safeUrl, globMatch, randomBytes, toHex, timeOrigin } from "./utils.js";
 import { onBeforeRequest } from "./network-hook.js";
 
-let targets: string[] = [];
-let unregister: (() => void) | null = null;
+const TRACE_ID_BYTES = 16;
+const SPAN_ID_BYTES = 8;
+// Navigations kept after they end, so an error can still name the root of a
+// trace whose requests are still in the breadcrumb buffer.
+const RECENT_NAVIGATIONS = 5;
 
-// FIFO queue keyed by URL, with a global cap on total entries. Concurrent
-// same-URL fetches each push their own trace_id; the breadcrumb wrapper
-// shifts them in the order they were recorded. The global cap bounds memory
-// when a request's breadcrumb never lands (cross-origin opaque responses,
-// fire-and-forget XHR, etc.).
-class KeyedQueue<V> {
-  private readonly buckets = new Map<string, V[]>();
-  private total = 0;
-
-  constructor(private readonly maxTotal: number) {}
-
-  push(key: string, value: V): void {
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      bucket = [];
-      this.buckets.set(key, bucket);
-    }
-    bucket.push(value);
-    this.total++;
-    if (this.total > this.maxTotal) this.evictOldest();
-  }
-
-  shift(key: string): V | undefined {
-    const bucket = this.buckets.get(key);
-    if (!bucket || bucket.length === 0) return undefined;
-    const value = bucket.shift();
-    this.total--;
-    if (bucket.length === 0) this.buckets.delete(key);
-    return value;
-  }
-
-  clear(): void {
-    this.buckets.clear();
-    this.total = 0;
-  }
-
-  private evictOldest(): void {
-    // Map iteration order is insertion order; the first key is the oldest
-    // bucket, and shift() drops the oldest entry within it.
-    const oldestKey = this.buckets.keys().next().value;
-    if (oldestKey === undefined) return;
-    this.shift(oldestKey);
-  }
+/** The root of one navigation's trace. Every request the page makes hangs off
+ * it, so the backend spans have a parent that exists and the trace says which
+ * page asked for them. */
+export interface Navigation {
+  trace_id: string;
+  span_id: string;
+  /** The route, templated when the host declared one. */
+  action: string;
+  start_time: number;
 }
 
-const pendingTraces = new KeyedQueue<string>(200);
+let targets: string[] = [];
+// Names the route. Passed in rather than read from the vitals module, so this
+// module keeps no opinion about where a route lives.
+let resolveRoute: (() => string) | null = null;
+let unregister: (() => void) | null = null;
 
-export function initTracing(tracePropagationTargets: string[]): void {
+let traceId: string | null = null;
+let spanId: string | null = null;
+let startTime = 0;
+let recent: Navigation[] = [];
+
+export function initTracing(
+  tracePropagationTargets: string[],
+  routeName?: () => string,
+): void {
   targets = tracePropagationTargets;
+  resolveRoute = routeName ?? null;
+  startTime = timeOrigin();
   if (targets.length === 0) return;
 
   unregister = onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
-    const traceId = randomHex(16);
-    const spanId = randomHex(8);
-    pendingTraces.push(ctx.url, traceId);
+
+    // Minted on the first request that propagates, not at navigation start.
+    // Nothing refers to the span before that, and by now the host's router has
+    // usually declared its route, so the span can carry one.
+    if (traceId === null || spanId === null) {
+      traceId = randomHex(TRACE_ID_BYTES);
+      spanId = randomHex(SPAN_ID_BYTES);
+      remember({
+        trace_id: traceId,
+        span_id: spanId,
+        action: resolveRoute ? resolveRoute() : "",
+        start_time: startTime,
+      });
+    }
+
+    // The navigation span parents every request of the page, so each backend
+    // span has a parent that exists and the page reads as one trace.
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+    ctx.trace = { trace_id: traceId };
   });
 }
 
-/** Get and consume the trace ID generated for a request URL. FIFO per URL. */
-export function consumeTraceId(url: string): string | undefined {
-  return pendingTraces.shift(url);
+/** Start the next navigation's trace. A route change ends the page the trace
+ * describes, and a single-page app would otherwise build one trace that never
+ * ends. */
+export function markTracingNavigation(): void {
+  traceId = null;
+  spanId = null;
+  startTime = Date.now();
+}
+
+/** The navigation a trace belongs to, current or recent. */
+export function getNavigation(forTraceId: string): Navigation | undefined {
+  return recent.find((navigation) => navigation.trace_id === forTraceId);
 }
 
 export function destroyTracing(): void {
@@ -75,7 +82,15 @@ export function destroyTracing(): void {
     unregister = null;
   }
   targets = [];
-  pendingTraces.clear();
+  resolveRoute = null;
+  traceId = null;
+  spanId = null;
+  startTime = 0;
+  recent = [];
+}
+
+function remember(navigation: Navigation): void {
+  recent = [navigation, ...recent].slice(0, RECENT_NAVIGATIONS);
 }
 
 function shouldPropagate(url: string): boolean {

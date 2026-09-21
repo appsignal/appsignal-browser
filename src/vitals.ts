@@ -319,11 +319,11 @@ function normalizeRouteTemplate(template: string | null): string {
   return stripTrailingSlash((template ?? "").trim());
 }
 
-/** The host's most recently declared route template (e.g. "/users/:id"), or ""
- * if none is set. Shared with the errors module so error grouping uses the same
- * route key as vitals attribution. */
-export function getRouteTemplate(): string {
-  return currentRouteTemplate;
+/** The action a payload groups by: the host's route template when it declared
+ * one, the normalised pathname when it did not. One definition, so an error and
+ * the span it belongs to never disagree about which route they are on. */
+export function getRouteAction(): string {
+  return currentRouteTemplate || stripTrailingSlash(location.pathname);
 }
 
 export function setRouteTemplate(template: string | null): void {

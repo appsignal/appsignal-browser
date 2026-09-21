@@ -3,10 +3,10 @@ import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
-import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
+import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate, getRouteAction } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
-import { initTracing, destroyTracing } from "./tracing.js";
+import { initTracing, markTracingNavigation, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 import { logError, attemptCleanup } from "./utils.js";
@@ -40,7 +40,7 @@ export function init(config: BrowserConfig): void {
     resolved = resolveConfig(config);
 
     const endpoint = resolveEndpoint(config);
-    initTransport(endpoint, config.key);
+    initTransport(endpoint, config.key, config.tracing?.endpoint);
     startCollection(endpoint);
   } catch (error) {
     // Hosts import this module at the top of their entry bundle, so a throw
@@ -214,7 +214,13 @@ function startCollection(endpoint: string): void {
   initNetworkHook();
   initBreadcrumbs(
     cfg.breadcrumbs,
-    [endpoint + EVENTS_PATH, endpoint + ERROR_PATH],
+    // The SDK's own posts. Without the tracing here it instruments itself,
+    // and its trace post becomes the last request before every error.
+    [
+      endpoint + EVENTS_PATH,
+      endpoint + ERROR_PATH,
+      ...(clientConfig?.tracing ? [clientConfig.tracing.endpoint] : []),
+    ],
     cfg.privacy.queryParamsAllowlist,
     cfg.privacy.networkBlocklist,
     cfg.privacy.dom,
@@ -225,10 +231,11 @@ function startCollection(endpoint: string): void {
     cfg.privacy.queryParamsAllowlist,
     clientConfig?.appVersion,
     clientConfig?.beforeError,
+    clientConfig?.tracing,
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
-    initTracing(clientConfig.tracePropagationTargets);
+    initTracing(clientConfig.tracePropagationTargets, getRouteAction);
   }
 
   initVitals(cfg.privacy.queryParamsAllowlist);
@@ -278,6 +285,7 @@ function startCollection(endpoint: string): void {
     lastRouteKey = key;
     flushEvents();
     markVitalsNavigation();
+    markTracingNavigation();
   };
   onAfterNavigation(onNavigation);
   // hashchange covers hash-router SPAs, which change the route without

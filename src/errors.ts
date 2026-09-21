@@ -1,6 +1,7 @@
 import type {
   Breadcrumb,
   BrowserError,
+  TracingConfig,
   FrontendTransaction,
   IncomingError,
   ResolvedConfig,
@@ -8,9 +9,10 @@ import type {
 } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
-import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import { buildTraceEnvelope } from "./otlp.js";
+import { sendError, sendTrace } from "./transport.js";
+import { getRouteAction } from "./vitals.js";
+import { scrubPageUrl, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -28,6 +30,7 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
+let tracing: TracingConfig | undefined;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 // Query-param allowlist for scrubbing URLs that ride the error payload. The
 // errors module captures `location.href` for `environment.url`; without this it
@@ -80,12 +83,14 @@ export function initErrors(
   queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
+  tracingConfig?: TracingConfig,
 ): void {
   destroyErrors();
 
   config = resolved;
   allowlist = queryParamsAllowlist;
   appVersion = version;
+  tracing = tracingConfig;
   beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
@@ -231,17 +236,35 @@ function handleError(
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
   if (checkDedupe(dedupeKey, now)) return;
 
+  // Already filtered (UX-only categories excluded) and capped to 25 by
+  // the error-context ring buffer in breadcrumbs.ts.
+  const breadcrumbs = getErrorBreadcrumbs();
   const payload: BrowserError = {
     type: "error",
     timestamp: now,
-    // Already filtered (UX-only categories excluded) and capped to 25 by
-    // the error-context ring buffer in breadcrumbs.ts.
-    breadcrumbs: getErrorBreadcrumbs(),
+    breadcrumbs,
     app_version: appVersion,
     ...effective,
   };
 
   sendError(toFrontendTransaction(payload));
+
+  // Beside the error, not inside it. The error must arrive; its trace is
+  // worth less and costs the payload the beacon size limit.
+  if (tracing) {
+    const envelope = buildTraceEnvelope(breadcrumbs, {
+      name: effective.error_class || "Error",
+      message: effective.message,
+      stack: effective.stack,
+      timestamp: now,
+    }, {
+      serviceName: tracing.serviceName ?? "Browser",
+      revision: appVersion,
+      appName: tracing.appName,
+      environment: tracing.environment,
+    });
+    if (envelope) sendTrace(envelope);
+  }
 
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)
@@ -272,7 +295,7 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     namespace: "browser",
     // The action groups the errors. A template such as "/users/:id" prevents
     // one error group for each ID in the URL.
-    action: getRouteTemplate() || stripTrailingSlash(location.pathname),
+    action: getRouteAction(),
     revision: error.app_version,
     error: {
       name: error.error_class || "Error",
