@@ -2,10 +2,15 @@ import { build } from "esbuild";
 import { gzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 
+const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+
 const shared = {
   bundle: true,
   sourcemap: true,
   target: "es2020",
+  // The OTLP instrumentation scope names the library that produced a span, so
+  // it has to be this package's version rather than the host's build.
+  define: { __SDK_VERSION__: JSON.stringify(version) },
 };
 
 // ESM with code splitting — replay chunk loaded on demand

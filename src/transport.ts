@@ -3,6 +3,7 @@ import { logError, attemptCleanup } from "./utils.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
+let tracesEndpoint = "";
 
 // Errors POST as FrontendTransaction JSON to /ingest/browser/errors and
 // route through the processor's frontend_errors pipeline (sourcemap
@@ -46,9 +47,32 @@ const pendingRetries = new Set<ReturnType<typeof setTimeout>>();
 
 /** Configure transport. `endpoint` is the BASE origin (no path) — paths and
  * query params are appended internally per payload kind. */
-export function initTransport(endpoint: string, key: string): void {
+export function initTransport(endpoint: string, key: string, traces?: string): void {
   baseEndpoint = endpoint.replace(/\/$/, "");
   ingestionKey = key;
+  tracesEndpoint = traces ? traces.replace(/\/$/, "") : "";
+}
+
+/** Post a navigation's span. Fire and forget: the errors it describes left by
+ * their own route, so a span that does not arrive costs the trace view rather
+ * than the report. */
+export function sendTrace(envelope: unknown, useBeacon = false): void {
+  if (!tracesEndpoint) return;
+  const body = serialize(envelope);
+  if (body === null) return;
+  const url = `${tracesEndpoint}/v1/traces`;
+  // A beacon is always credentialed, and an OTLP receiver answers a wildcard
+  // `Access-Control-Allow-Origin`, which a credentialed request rejects. So the
+  // unload path uses keepalive rather than sendBeacon.
+  void fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "AppSignal-Config-PushApiKey": ingestionKey,
+    },
+    body,
+    keepalive: useBeacon,
+  }).catch(() => { /* the error reports do not depend on this */ });
 }
 
 /** Stop the periodic retry drain, cancel in-flight retry timers, and detach
@@ -69,6 +93,7 @@ export function destroyTransport(): void {
   retryQueue = [];
   retryQueueBytes = 0;
   baseEndpoint = "";
+  tracesEndpoint = "";
   ingestionKey = "";
 }
 

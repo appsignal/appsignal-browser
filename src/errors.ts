@@ -9,8 +9,9 @@ import type {
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import { recordException } from "./tracing.js";
+import { getRouteAction } from "./vitals.js";
+import { scrubPageUrl, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -243,6 +244,15 @@ function handleError(
 
   sendError(toFrontendTransaction(payload));
 
+  // The navigation's span carries this as an event, and leaves when the
+  // navigation ends. Nothing is sent here.
+  recordException({
+    name: effective.error_class || "Error",
+    message: effective.message,
+    stack: effective.stack,
+    timestamp: now,
+  });
+
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)
   // so skip it entirely when nobody's listening.
@@ -272,7 +282,7 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     namespace: "browser",
     // The action groups the errors. A template such as "/users/:id" prevents
     // one error group for each ID in the URL.
-    action: getRouteTemplate() || stripTrailingSlash(location.pathname),
+    action: getRouteAction(),
     revision: error.app_version,
     error: {
       name: error.error_class || "Error",

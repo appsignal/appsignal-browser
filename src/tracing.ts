@@ -1,72 +1,110 @@
-import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
+import { safeUrl, globMatch, randomBytes, toHex, timeOrigin } from "./utils.js";
 import { onBeforeRequest } from "./network-hook.js";
 
-let targets: string[] = [];
-let unregister: (() => void) | null = null;
+const TRACE_ID_BYTES = 16;
+const SPAN_ID_BYTES = 8;
+// Errors kept on one navigation. A page that throws in a loop would otherwise
+// grow this without limit.
+const MAX_EXCEPTIONS = 25;
 
-// FIFO queue keyed by URL, with a global cap on total entries. Concurrent
-// same-URL fetches each push their own trace_id; the breadcrumb wrapper
-// shifts them in the order they were recorded. The global cap bounds memory
-// when a request's breadcrumb never lands (cross-origin opaque responses,
-// fire-and-forget XHR, etc.).
-class KeyedQueue<V> {
-  private readonly buckets = new Map<string, V[]>();
-  private total = 0;
-
-  constructor(private readonly maxTotal: number) {}
-
-  push(key: string, value: V): void {
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      bucket = [];
-      this.buckets.set(key, bucket);
-    }
-    bucket.push(value);
-    this.total++;
-    if (this.total > this.maxTotal) this.evictOldest();
-  }
-
-  shift(key: string): V | undefined {
-    const bucket = this.buckets.get(key);
-    if (!bucket || bucket.length === 0) return undefined;
-    const value = bucket.shift();
-    this.total--;
-    if (bucket.length === 0) this.buckets.delete(key);
-    return value;
-  }
-
-  clear(): void {
-    this.buckets.clear();
-    this.total = 0;
-  }
-
-  private evictOldest(): void {
-    // Map iteration order is insertion order; the first key is the oldest
-    // bucket, and shift() drops the oldest entry within it.
-    const oldestKey = this.buckets.keys().next().value;
-    if (oldestKey === undefined) return;
-    this.shift(oldestKey);
-  }
+/** An error that happened during a navigation. It rides the navigation's span
+ * as an event, which is how OpenTelemetry records an error. */
+export interface TracedException {
+  name: string;
+  message: string;
+  stack?: string;
+  timestamp: number;
 }
 
-const pendingTraces = new KeyedQueue<string>(200);
+/** The span for one navigation, ready to export. Every request the page made
+ * hangs off it, so the backend spans have a parent that exists and the trace
+ * says which page asked for them. */
+export interface NavigationSpan {
+  trace_id: string;
+  span_id: string;
+  action: string;
+  start_time: number;
+  end_time: number;
+  exceptions: TracedException[];
+}
 
-export function initTracing(tracePropagationTargets: string[]): void {
+let targets: string[] = [];
+// Names the route. Passed in rather than read from the vitals module, so this
+// module keeps no opinion about where a route lives.
+let resolveRoute: (() => string) | null = null;
+let unregister: (() => void) | null = null;
+
+let traceId: string | null = null;
+let spanId: string | null = null;
+let action = "";
+let startTime = 0;
+let exceptions: TracedException[] = [];
+// A span is exported once, when it ends. Without this a second flush would
+// declare the same span again with a different end time.
+let exported = false;
+
+export function initTracing(
+  tracePropagationTargets: string[],
+  routeName?: () => string,
+): void {
   targets = tracePropagationTargets;
+  resolveRoute = routeName ?? null;
+  startTime = timeOrigin();
   if (targets.length === 0) return;
 
   unregister = onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
-    const traceId = randomHex(16);
-    const spanId = randomHex(8);
-    pendingTraces.push(ctx.url, traceId);
+
+    // Minted on the first request that propagates, not at navigation start.
+    // Nothing refers to the span before that, and by now the host's router has
+    // usually declared its route, so the span can carry one.
+    if (traceId === null || spanId === null) {
+      traceId = randomHex(TRACE_ID_BYTES);
+      spanId = randomHex(SPAN_ID_BYTES);
+      action = resolveRoute ? resolveRoute() : "";
+    }
+
+    // The navigation span parents every request of the page, so each backend
+    // span has a parent that exists and the page reads as one trace.
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+    ctx.trace = { trace_id: traceId };
   });
 }
 
-/** Get and consume the trace ID generated for a request URL. FIFO per URL. */
-export function consumeTraceId(url: string): string | undefined {
-  return pendingTraces.shift(url);
+/** Attach an error to the navigation it happened in. Dropped when the page has
+ * propagated nothing, because then no span exists for it to belong to. */
+export function recordException(exception: TracedException): void {
+  if (traceId === null || exported) return;
+  if (exceptions.length >= MAX_EXCEPTIONS) return;
+  exceptions.push(exception);
+}
+
+/** End the navigation and take its span, or nothing when there is none to
+ * send. A navigation that propagated no request has no span, and one already
+ * exported must not be declared twice. */
+export function endNavigation(): NavigationSpan | undefined {
+  if (traceId === null || spanId === null || exported) return undefined;
+  exported = true;
+  return {
+    trace_id: traceId,
+    span_id: spanId,
+    action,
+    start_time: startTime,
+    end_time: Date.now(),
+    exceptions,
+  };
+}
+
+/** Start the next navigation's trace. A route change ends the page the trace
+ * describes, and a single-page app would otherwise build one trace that never
+ * ends. */
+export function markTracingNavigation(): void {
+  traceId = null;
+  spanId = null;
+  action = "";
+  startTime = Date.now();
+  exceptions = [];
+  exported = false;
 }
 
 export function destroyTracing(): void {
@@ -75,7 +113,13 @@ export function destroyTracing(): void {
     unregister = null;
   }
   targets = [];
-  pendingTraces.clear();
+  resolveRoute = null;
+  traceId = null;
+  spanId = null;
+  action = "";
+  startTime = 0;
+  exceptions = [];
+  exported = false;
 }
 
 function shouldPropagate(url: string): boolean {

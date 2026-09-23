@@ -2,7 +2,6 @@ import type { Breadcrumb, ResolvedConfig } from "./types.js";
 import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
-import { consumeTraceId } from "./tracing.js";
 import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, pruneRecordForJson, applyHook, attemptCleanup } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
@@ -847,11 +846,8 @@ function isCollectEndpoint(url: string): boolean {
 function recordNetworkBreadcrumb(result: RequestResult): void {
   const initiator = result.xhr ? "xhr" : "fetch";
   const filteredUrl = scrubUrl(result.url, queryParamsAllowlist);
-  // Before each early return: `pendingTraces` is a FIFO keyed by URL, so an id
-  // left there goes to the next request to the same URL.
-  const traceId = consumeTraceId(result.url);
+  const traceId = result.trace?.trace_id;
 
-  // The id is out of the queue now, which is the point of reporting a cancel.
   if (result.aborted) return;
 
   if (result.error) {

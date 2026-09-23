@@ -3,10 +3,11 @@ import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
-import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
+import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate, getRouteAction } from "./vitals.js";
 
-import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
-import { initTracing, destroyTracing } from "./tracing.js";
+import { initTransport, sendEvents, sendBeaconEvents, sendTrace, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
+import { initTracing, endNavigation, markTracingNavigation, destroyTracing } from "./tracing.js";
+import { buildTraceEnvelope } from "./otlp.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 import { logError, attemptCleanup } from "./utils.js";
@@ -17,6 +18,8 @@ let clientConfig: BrowserConfig | null = null;
 let resolved: ResolvedConfig | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
+let tracingConfig: BrowserConfig["tracing"];
+let appVersion: string | undefined;
 
 // Lifecycle subscription teardowns
 let lifecycleUnsubscribers: (() => void)[] = [];
@@ -40,7 +43,9 @@ export function init(config: BrowserConfig): void {
     resolved = resolveConfig(config);
 
     const endpoint = resolveEndpoint(config);
-    initTransport(endpoint, config.key);
+    initTransport(endpoint, config.key, config.tracing?.endpoint);
+    tracingConfig = config.tracing;
+    appVersion = config.appVersion;
     startCollection(endpoint);
   } catch (error) {
     // Hosts import this module at the top of their entry bundle, so a throw
@@ -228,7 +233,7 @@ function startCollection(endpoint: string): void {
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
-    initTracing(clientConfig.tracePropagationTargets);
+    initTracing(clientConfig.tracePropagationTargets, getRouteAction);
   }
 
   initVitals(cfg.privacy.queryParamsAllowlist);
@@ -247,13 +252,19 @@ function startCollection(endpoint: string): void {
   // handler and populate collectedVitals before we flush.
   lifecycleUnsubscribers.push(
     onVisibilityChange((state) => {
-      if (state === "hidden") flushEvents({ beacon: true });
+      if (state === "hidden") {
+        flushEvents({ beacon: true });
+        flushNavigationSpan(true);
+      }
     }),
   );
   // Flush on tab close / navigation away
   lifecycleUnsubscribers.push(
     onPageHide((persisted) => {
-      if (!persisted && initialized) flushEvents({ beacon: true });
+      if (!persisted && initialized) {
+        flushEvents({ beacon: true });
+        flushNavigationSpan(true);
+      }
     }),
   );
 
@@ -277,6 +288,8 @@ function startCollection(endpoint: string): void {
     if (key === lastRouteKey) return;
     lastRouteKey = key;
     flushEvents();
+    flushNavigationSpan(false);
+    markTracingNavigation();
     markVitalsNavigation();
   };
   onAfterNavigation(onNavigation);
@@ -310,6 +323,25 @@ function stopCollection(): void {
   lifecycleUnsubscribers = [];
   for (const unsub of unsubscribers) attemptCleanup("lifecycle subscription", unsub);
   attemptCleanup("lifecycle", destroyLifecycle);
+}
+
+/** Export the navigation's span where the events payload already leaves: a
+ * route change, a hidden tab, the page going away. A span is exported once,
+ * when it ends, which is what OpenTelemetry expects and what stops a second
+ * flush declaring the same span with a different end time. */
+function flushNavigationSpan(beacon: boolean): void {
+  if (!tracingConfig) return;
+  const navigation = endNavigation();
+  if (!navigation) return;
+  sendTrace(
+    buildTraceEnvelope(navigation, {
+      serviceName: tracingConfig.serviceName ?? "Browser",
+      revision: appVersion,
+      appName: tracingConfig.appName,
+      environment: tracingConfig.environment,
+    }),
+    beacon,
+  );
 }
 
 function flushEvents({

@@ -326,6 +326,13 @@ export function getRouteTemplate(): string {
   return currentRouteTemplate;
 }
 
+/** The action a payload groups by: the host's route template when it declared
+ * one, the normalised pathname when it did not. One definition, so an error and
+ * the span it belongs to never disagree about which route they are on. */
+export function getRouteAction(): string {
+  return currentRouteTemplate || stripTrailingSlash(location.pathname);
+}
+
 export function setRouteTemplate(template: string | null): void {
   currentRouteTemplate = normalizeRouteTemplate(template);
   // Refresh the active route's page_url so metrics accruing on this route (and
