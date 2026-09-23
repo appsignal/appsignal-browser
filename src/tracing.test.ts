@@ -81,6 +81,7 @@ describe("tracing", () => {
       initNetworkHook();
       initTracing(["localhost/**"]);
       await window.fetch("http://localhost/api/cart");
+      recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
       const first = endNavigation();
       const second = endNavigation();
@@ -112,6 +113,18 @@ describe("tracing", () => {
       expect(endNavigation()).toBeUndefined();
     });
 
+    it("sends nothing for a navigation that went well", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/cart");
+
+      // The backend already described every request it served. A span with no
+      // error on it adds a page name and nothing else.
+      expect(endNavigation()).toBeUndefined();
+    });
+
     it("starts a new trace on a route change", async () => {
       const sent: string[] = [];
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -123,9 +136,11 @@ describe("tracing", () => {
       initTracing(["localhost/**"]);
 
       await window.fetch("http://localhost/api/one");
+      recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
       endNavigation();
       markTracingNavigation();
       await window.fetch("http://localhost/api/two");
+      recordException({ name: "TypeError", message: "again", timestamp: 2000 });
 
       const [first, second] = sent.map((header) => header.split("-"));
       expect(second[1]).not.toBe(first[1]);
@@ -139,6 +154,7 @@ describe("tracing", () => {
       initTracing(["localhost/**"], () => "/checkout");
 
       await window.fetch("http://localhost/api/cart");
+      recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
       expect(endNavigation()?.action).toBe("/checkout");
     });

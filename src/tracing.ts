@@ -80,10 +80,12 @@ export function recordException(exception: TracedException): void {
 }
 
 /** End the navigation and take its span, or nothing when there is none to
- * send. A navigation that propagated no request has no span, and one already
- * exported must not be declared twice. */
+ * send. A navigation that propagated no request has no span, one already
+ * exported must not be declared twice, and one that went well has nothing to
+ * report: the backend already described every request it served. */
 export function endNavigation(): NavigationSpan | undefined {
   if (traceId === null || spanId === null || exported) return undefined;
+  if (exceptions.length === 0) return undefined;
   exported = true;
   return {
     trace_id: traceId,

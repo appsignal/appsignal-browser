@@ -13,6 +13,8 @@ Every request of a page now shares one trace, where before each request made a
 trace of its own. A route change starts the next one, so a single-page app does
 not build one trace that never ends.
 
-The span leaves when the navigation ends, which is a route change, a hidden tab
-or the page going away. It goes once, with the route as its action and every
-error of that navigation as an `exception` event.
+A navigation that throws sends one span, with the route as its action and every
+error of that navigation as an `exception` event. A navigation that goes well
+sends nothing, because the backend already describes each request it served.
+The span leaves at the next flush after the first error, or when the navigation
+ends, and it leaves once.

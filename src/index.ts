@@ -244,7 +244,12 @@ function startCollection(endpoint: string): void {
   // streaming is off (the default) — otherwise it wakes twice a minute for an
   // empty payload that early-returns, burning CPU/battery for nothing.
   if (cfg.session.enabled) {
-    flushTimer = setInterval(() => flushEvents({ includeVitals: false }), FLUSH_INTERVAL_MS);
+    flushTimer = setInterval(() => {
+      flushEvents({ includeVitals: false });
+      // A navigation that has thrown sends its span here rather than waiting
+      // for the page to end, which may be minutes away or may never come.
+      flushNavigationSpan(false);
+    }, FLUSH_INTERVAL_MS);
   }
 
   // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
