@@ -40,8 +40,10 @@ const traceMock = vi.hoisted(() => ({
     | { trace_id: string; span_id: string; start_time: number }
     | undefined,
 }));
+const { markTracingError } = vi.hoisted(() => ({ markTracingError: vi.fn() }));
 vi.mock("./tracing.js", () => ({
   getTraceContext: () => traceMock.context,
+  markTracingError,
 }));
 
 vi.mock("./session.js", () => ({
@@ -95,6 +97,7 @@ describe("errors", () => {
     // each test starts from zero and assertions can use direct counts.
     destroyErrors();
     sendErrorMock.mockClear();
+    markTracingError.mockClear();
     addBreadcrumbMock.mockClear();
     getErrorBreadcrumbsMock.mockReturnValue([]);
     getTagsMock.mockReturnValue({});
@@ -117,6 +120,25 @@ describe("errors", () => {
     expect(payload.tags).toEqual({});
     expect(payload.environment.url).toBe(location.href);
     expect(payload.user_agent).toBe(navigator.userAgent);
+  });
+
+  // The page load span is only sent for a navigation that went wrong, and a
+  // reported error is what makes it so.
+  it("marks the navigation as errored once the error has shipped", () => {
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
+    fireError("Test error");
+
+    expect(markTracingError).toHaveBeenCalledTimes(1);
+    expect(markTracingError.mock.invocationCallOrder[0]).toBeGreaterThan(
+      sendErrorMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not mark the navigation for an error beforeError dropped", () => {
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, () => null);
+    fireError("dropped");
+
+    expect(markTracingError).not.toHaveBeenCalled();
   });
 
   it("ships the host's error tags (from getTags) on the payload", () => {

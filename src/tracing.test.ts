@@ -3,7 +3,9 @@ import {
   initTracing,
   getTraceContext,
   traceIdForUrl,
+  getDeclaredTraceContext,
   markTracingNavigation,
+  markTracingError,
   destroyTracing,
 } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
@@ -180,7 +182,9 @@ describe("tracing", () => {
       expect(getTraceContext()).toBeDefined();
     });
 
-    it("declares the page load span on the first propagated request only", async () => {
+    it("declares nothing for a navigation that goes fine", async () => {
+      // The traceparent still goes out, because the backend records its spans
+      // when the request arrives, but the browser says nothing about its span.
       const sentHeaders: Headers[] = [];
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         sentHeaders.push(new Headers(init?.headers));
@@ -191,9 +195,30 @@ describe("tracing", () => {
       initTracing(["localhost/**"]);
 
       await window.fetch("http://localhost/api/one");
+      await window.fetch("http://localhost/api/two", { method: "POST" });
+
+      expect(sentHeaders[1].get("traceparent")).toMatch(/^00-/);
+      expect(pageLoads).toEqual([]);
+      expect(getDeclaredTraceContext()).toBeUndefined();
+    });
+
+    it("declares the page load span once, when an error is reported", async () => {
+      const sentHeaders: Headers[] = [];
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sentHeaders.push(new Headers(init?.headers));
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/one");
+      markTracingError();
+      markTracingError();
       await window.fetch("http://localhost/api/two");
 
       expect(pageLoads).toHaveLength(1);
+      expect(getDeclaredTraceContext()).toEqual(getTraceContext());
       const [, traceFromHeader, spanFromHeader] = sentHeaders[0]
         .get("traceparent")!
         .split("-");
@@ -219,10 +244,95 @@ describe("tracing", () => {
       initTracing(["localhost/**"], "1.2.3", "checkout");
 
       await window.fetch("http://localhost/api/one");
+      markTracingError();
 
       expect(pageLoads[0].app_version).toBe("1.2.3");
       expect(pageLoads[0].service_name).toBe("checkout");
       expect(pageLoads[0].tags).toEqual({ plan: "pro" });
+    });
+
+    it("declares the span on the next propagated request after an earlier error", async () => {
+      // An error before any traceparent went out had no span to join. The
+      // request that follows is the first thing to refer to one.
+      window.fetch = async () => new Response();
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      markTracingError();
+      expect(pageLoads).toEqual([]);
+
+      await window.fetch("http://localhost/api/one");
+
+      expect(pageLoads).toHaveLength(1);
+      expect(pageLoads[0].trace_id).toBe(getTraceContext()!.trace_id);
+    });
+
+    it("declares the span when a propagated request returns a 5xx", async () => {
+      window.fetch = async () => new Response(null, { status: 500 });
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/orders", { method: "POST" });
+
+      expect(pageLoads).toHaveLength(1);
+    });
+
+    it("declares the span when a propagated request fails outright", async () => {
+      window.fetch = async () => {
+        throw new TypeError("Failed to fetch");
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await expect(window.fetch("http://localhost/api/orders")).rejects.toThrow();
+
+      expect(pageLoads).toHaveLength(1);
+    });
+
+    it("ignores 4xx responses and failures on URLs it does not propagate to", async () => {
+      // A 4xx is usually the app working as intended (validation, auth), and a
+      // failure on a non-target has no backend span that needs a parent.
+      window.fetch = async (input: RequestInfo | URL) =>
+        String(input).includes("other.com")
+          ? new Response(null, { status: 503 })
+          : new Response(null, { status: 422 });
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/orders");
+      await window.fetch("http://other.com/api/orders");
+
+      expect(pageLoads).toEqual([]);
+    });
+
+    it("ignores a cancelled request", async () => {
+      window.fetch = async () => {
+        throw new DOMException("The user aborted a request.", "AbortError");
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await expect(window.fetch("http://localhost/api/search")).rejects.toThrow();
+
+      expect(pageLoads).toEqual([]);
+    });
+
+    it("forgets the error at the next navigation", async () => {
+      window.fetch = async () => new Response();
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      markTracingError();
+      markTracingNavigation();
+      await window.fetch("http://localhost/api/one");
+
+      expect(pageLoads).toEqual([]);
     });
 
     it("declares nothing when no propagation targets are configured", async () => {
@@ -263,13 +373,16 @@ describe("tracing", () => {
       initTracing(["localhost/**"]);
 
       await window.fetch("http://localhost/api/one");
+      markTracingError();
       const firstNavigation = getTraceContext();
 
       markTracingNavigation();
       expect(getTraceContext()).toBeUndefined();
+      expect(getDeclaredTraceContext()).toBeUndefined();
 
       routeMock.action = "/invoices";
       await window.fetch("http://localhost/api/two");
+      markTracingError();
 
       expect(getTraceContext()).not.toEqual(firstNavigation);
       expect(sentHeaders[1].get("traceparent")).not.toBe(sentHeaders[0].get("traceparent"));

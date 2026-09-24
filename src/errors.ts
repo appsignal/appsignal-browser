@@ -10,7 +10,7 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteAction } from "./vitals.js";
-import { getTraceContext } from "./tracing.js";
+import { getTraceContext, markTracingError } from "./tracing.js";
 import { scrubPageUrl, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
@@ -246,6 +246,9 @@ function handleError(
   };
 
   sendError(toFrontendTransaction(payload));
+  // After the send, so the page_load post cannot be what this error's payload
+  // is built from. Only errors that cleared every gate declare the span.
+  markTracingError();
 
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)

@@ -29,7 +29,15 @@ export interface BrowserConfig {
    * (PII in messages, sensitive data fields). Runs on the page's hot path;
    * keep it cheap. */
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
-  /** URL patterns to inject trace context headers into. Glob syntax. */
+  /** URL patterns to inject trace context headers into. Glob syntax. Unset by
+   * default, which turns tracing off entirely.
+   *
+   * Every matching request carries a `traceparent`, because the backend
+   * records its spans the moment the request arrives. The page load span
+   * itself is only sent once the navigation has gone wrong: an error was
+   * reported, or a propagated request failed or returned a 5xx. Backend spans
+   * from navigations that never go wrong point at a parent that is never
+   * sent, and show as top-level spans in their trace. */
   tracePropagationTargets?: string[];
   /** Overrides the service name the server records for the page load span.
    * Unset by default, in which case the server defaults it to `"browser"`.

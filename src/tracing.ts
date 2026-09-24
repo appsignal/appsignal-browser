@@ -1,12 +1,12 @@
 import type { TraceContext } from "./types.js";
 import { safeUrl, globMatch, randomBytes, timeOrigin, toHex } from "./utils.js";
-import { onBeforeRequest } from "./network-hook.js";
+import { onBeforeRequest, onAfterRequest } from "./network-hook.js";
 import { sendPageLoad } from "./transport.js";
 import { getRouteAction } from "./vitals.js";
 import { getTags } from "./session.js";
 
 let targets: string[] = [];
-let unregister: (() => void) | null = null;
+let unregisters: (() => void)[] = [];
 // The host's config, carried on the page_load post so its identity matches
 // what the closing object and error payloads send. See BrowserConfig.appVersion
 // and BrowserConfig.serviceName.
@@ -24,6 +24,12 @@ let spanId: string | null = null;
 // Start of the current navigation, in epoch ms. The landing route starts at the
 // page's time origin; later routes start when the navigation happens.
 let navigationStart = 0;
+// Whether this navigation has sent its page_load post, and whether it has gone
+// wrong. The post waits until both a traceparent has gone out and something went
+// wrong, in either order, so a navigation that goes fine sends nothing about its
+// span.
+let declared = false;
+let errored = false;
 
 export function initTracing(
   tracePropagationTargets: string[],
@@ -37,40 +43,56 @@ export function initTracing(
 
   navigationStart = timeOrigin();
 
-  unregister = onBeforeRequest((ctx) => {
-    if (!shouldPropagate(ctx.url)) return;
+  unregisters.push(
+    onBeforeRequest((ctx) => {
+      if (!shouldPropagate(ctx.url)) return;
 
-    const firstOfNavigation = traceId === null || spanId === null;
-    if (firstOfNavigation) {
-      traceId = randomHex(16);
-      spanId = randomHex(8);
-    }
-    const trace = traceId as string;
-    const span = spanId as string;
-    ctx.headers.set("traceparent", `00-${trace}-${span}-01`);
+      if (traceId === null || spanId === null) {
+        traceId = randomHex(16);
+        spanId = randomHex(8);
+      }
+      ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
 
-    // Declare the page load span the moment something first refers to it. The
-    // backend span created from this header points at our span ID, so a span
-    // with that ID has to exist for the trace to make sense. Sending it here
-    // rather than at navigation start also means it can carry an action: data
-    // fetching is triggered from the host's effects, so its router has
-    // usually already declared the route template by now.
-    //
-    // Fire and forget. It may race the request it accompanies, and it may
-    // arrive after an error or the events post. The server merges the writes
-    // for one span in any order, so none of that matters.
-    if (firstOfNavigation) {
-      sendPageLoad({
-        type: "page_load",
-        trace_id: trace,
-        span_id: span,
-        start_time: navigationStart,
-        action: getRouteAction(),
-        app_version: appVersion,
-        service_name: serviceName,
-        tags: getTags(),
-      });
-    }
+      // An error before the first propagated request had no span to join, so
+      // the span is declared now, when something first refers to it.
+      if (errored) declarePageLoad();
+    }),
+  );
+
+  // A failed backend request often throws nothing in the browser, because the
+  // host renders an error state instead. Treat it as the navigation going
+  // wrong so its trace still gets a browser root.
+  unregisters.push(
+    onAfterRequest((result) => {
+      if (!shouldPropagate(result.url)) return;
+      if (result.error || (result.status ?? 0) >= 500) markTracingError();
+    }),
+  );
+}
+
+/** Record that the current navigation went wrong. This is what declares the
+ * page load span: now if a traceparent has already gone out, otherwise on the
+ * next propagated request. */
+export function markTracingError(): void {
+  errored = true;
+  if (traceId !== null && spanId !== null) declarePageLoad();
+}
+
+// Fire and forget. It may race the request it accompanies, and it may arrive
+// after an error or the events post. The server merges the writes for one span
+// in any order, so none of that matters.
+function declarePageLoad(): void {
+  if (declared || traceId === null || spanId === null) return;
+  declared = true;
+  sendPageLoad({
+    type: "page_load",
+    trace_id: traceId,
+    span_id: spanId,
+    start_time: navigationStart,
+    action: getRouteAction(),
+    app_version: appVersion,
+    service_name: serviceName,
+    tags: getTags(),
   });
 }
 
@@ -81,6 +103,13 @@ export function initTracing(
 export function getTraceContext(): TraceContext | undefined {
   if (traceId === null || spanId === null) return undefined;
   return { trace_id: traceId, span_id: spanId, start_time: navigationStart };
+}
+
+/** The trace context, but only once the page_load post has declared the span.
+ * The closing object on the events post uses this, so a navigation that never
+ * went wrong sends nothing about its span at all. */
+export function getDeclaredTraceContext(): TraceContext | undefined {
+  return declared ? getTraceContext() : undefined;
 }
 
 /** The current navigation's trace ID, but only for a URL we actually propagate
@@ -100,17 +129,19 @@ export function markTracingNavigation(): void {
   traceId = null;
   spanId = null;
   navigationStart = Date.now();
+  declared = false;
+  errored = false;
 }
 
 export function destroyTracing(): void {
-  if (unregister) {
-    unregister();
-    unregister = null;
-  }
+  for (const unregister of unregisters) unregister();
+  unregisters = [];
   targets = [];
   traceId = null;
   spanId = null;
   navigationStart = 0;
+  declared = false;
+  errored = false;
   appVersion = undefined;
   serviceName = undefined;
 }
