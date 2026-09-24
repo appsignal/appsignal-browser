@@ -1,11 +1,12 @@
-// OTLP/HTTP JSON for a navigation's span. One span: the backend already reports
+// OTLP/HTTP JSON for one trace root. One span: the backend already reports
 // one per request it served, and those hang off this one. What it cannot know is
 // which page asked, so that is what this says.
 
-import type { NavigationSpan, TracedException } from "./tracing.js";
+import type { AttributeValue, ChainSpan, TraceRoot, TracedException } from "./tracing.js";
 
-// OTLP SpanKind.INTERNAL and StatusCode.ERROR.
+// OTLP SpanKind.INTERNAL, SpanKind.CLIENT and StatusCode.ERROR.
 const SPAN_KIND_INTERNAL = 1;
+const SPAN_KIND_CLIENT = 3;
 const STATUS_CODE_ERROR = 2;
 
 const SCOPE_NAME = "@appsignal/browser";
@@ -13,11 +14,13 @@ const SCOPE_NAME = "@appsignal/browser";
 declare const __SDK_VERSION__: string | undefined;
 const SCOPE_VERSION = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : undefined;
 
-type Attribute = { key: string; value: { stringValue: string } };
+type AnyValue = { stringValue: string } | { intValue: string };
+type Attribute = { key: string; value: AnyValue };
 
 interface OtlpSpan {
   traceId: string;
   spanId: string;
+  parentSpanId?: string;
   name: string;
   kind: number;
   startTimeUnixNano: string;
@@ -44,53 +47,88 @@ export interface EnvelopeOptions {
   environment?: string;
 }
 
-/** The OTLP envelope for one navigation. */
+/** The OTLP envelope for one trace root and the spans that led to its errors. */
 export function buildTraceEnvelope(
-  navigation: NavigationSpan,
+  traceRoot: TraceRoot,
   options: EnvelopeOptions,
 ): TraceEnvelope {
-  const failed = navigation.exceptions.length > 0;
-  const span: OtlpSpan = {
-    traceId: navigation.trace_id,
-    spanId: navigation.span_id,
-    name: navigation.action || "navigation",
+  const failed = traceRoot.exceptions.length > 0;
+  const root: OtlpSpan = {
+    traceId: traceRoot.trace_id,
+    spanId: traceRoot.span_id,
+    name: traceRoot.action || "navigation",
     kind: SPAN_KIND_INTERNAL,
-    startTimeUnixNano: nanos(navigation.start_time),
-    endTimeUnixNano: nanos(navigation.end_time),
-    attributes: [str("appsignal.action", navigation.action)],
-    events: navigation.exceptions.map(exceptionEvent),
+    startTimeUnixNano: nanos(traceRoot.start_time),
+    endTimeUnixNano: nanos(traceRoot.end_time),
+    attributes: [attr("appsignal.action", traceRoot.action)],
+    events: exceptionsOn(traceRoot, traceRoot.span_id).map(exceptionEvent),
   };
   if (failed) {
-    span.status = { code: STATUS_CODE_ERROR, message: navigation.exceptions[0].message };
+    root.status = { code: STATUS_CODE_ERROR, message: traceRoot.exceptions[0].message };
   }
+
+  const spans = [root, ...traceRoot.chain.map((span) => chainSpan(span, traceRoot))];
 
   return {
     resourceSpans: [
       {
         resource: { attributes: resourceAttributes(options) },
-        scopeSpans: [{ scope: { name: SCOPE_NAME, version: SCOPE_VERSION }, spans: [span] }],
+        scopeSpans: [{ scope: { name: SCOPE_NAME, version: SCOPE_VERSION }, spans }],
       },
     ],
   };
 }
 
+function chainSpan(span: ChainSpan, traceRoot: TraceRoot): OtlpSpan {
+  const attributes = Object.entries(span.attributes ?? {}).map(([key, value]) =>
+    attr(key, value),
+  );
+  const failures = exceptionsOn(traceRoot, span.span_id);
+  const events = failures.map(exceptionEvent);
+  const otlp: OtlpSpan = {
+    traceId: traceRoot.trace_id,
+    spanId: span.span_id,
+    parentSpanId: span.parent_span_id,
+    name: span.name,
+    // A request is CLIENT, not INTERNAL: that is what tells a trace view the
+    // span below it was served by somebody else, and lets it draw the hop.
+    kind: span.kind === "client" ? SPAN_KIND_CLIENT : SPAN_KIND_INTERNAL,
+    startTimeUnixNano: nanos(span.start_time),
+    endTimeUnixNano: nanos(span.end_time),
+    attributes,
+    events,
+  };
+  if (failures.length > 0) {
+    otlp.status = { code: STATUS_CODE_ERROR, message: failures[0].message };
+  }
+  return otlp;
+}
+
+/** The errors that happened on one span. An error with no chain below it
+ * belongs to the root itself. */
+function exceptionsOn(traceRoot: TraceRoot, spanId: string): TracedException[] {
+  return traceRoot.exceptions.filter(
+    (exception) => (exception.on_span_id ?? traceRoot.span_id) === spanId,
+  );
+}
+
 /** OpenTelemetry records an error as an event on its span, not as a span. */
 function exceptionEvent(exception: TracedException): OtlpSpan["events"][number] {
   const attributes = [
-    str("exception.type", exception.name),
-    str("exception.message", exception.message),
+    attr("exception.type", exception.name),
+    attr("exception.message", exception.message),
   ];
-  if (exception.stack) attributes.push(str("exception.stacktrace", exception.stack));
+  if (exception.stack) attributes.push(attr("exception.stacktrace", exception.stack));
   return { name: "exception", timeUnixNano: nanos(exception.timestamp), attributes };
 }
 
 function resourceAttributes(options: EnvelopeOptions): Attribute[] {
-  const attributes = [str("service.name", options.serviceName)];
-  if (options.appName) attributes.push(str("appsignal.config.name", options.appName));
+  const attributes = [attr("service.name", options.serviceName)];
+  if (options.appName) attributes.push(attr("appsignal.config.name", options.appName));
   if (options.environment) {
-    attributes.push(str("appsignal.config.environment", options.environment));
+    attributes.push(attr("appsignal.config.environment", options.environment));
   }
-  if (options.revision) attributes.push(str("appsignal.config.revision", options.revision));
+  if (options.revision) attributes.push(attr("appsignal.config.revision", options.revision));
   return attributes;
 }
 
@@ -100,6 +138,10 @@ function nanos(epochMs: number): string {
   return String(Math.round(epochMs) * 1_000_000);
 }
 
-function str(key: string, value: string): Attribute {
-  return { key, value: { stringValue: value } };
+/** An attribute of whichever type the conventions give it. OTLP/JSON writes an
+ * int64 as a string, which is what a 64-bit value needs to survive JSON. */
+function attr(key: string, value: AttributeValue): Attribute {
+  return typeof value === "number"
+    ? { key, value: { intValue: String(Math.round(value)) } }
+    : { key, value: { stringValue: value } };
 }

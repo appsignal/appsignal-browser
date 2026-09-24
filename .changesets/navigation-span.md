@@ -9,9 +9,8 @@ says which page asked for them. Set `endpoint`, `appName` and `environment` to
 turn it on. The SDK posts to `<endpoint>/v1/traces`, so any receiver that
 speaks OTLP can take it.
 
-Every request of a page now shares one trace, where before each request made a
-trace of its own. A route change starts the next one, so a single-page app does
-not build one trace that never ends.
+A route change starts the next trace, so a single-page app does not build one
+trace that never ends.
 
 A navigation that throws sends one span, with the route as its action and every
 error of that navigation as an `exception` event. A navigation that goes well

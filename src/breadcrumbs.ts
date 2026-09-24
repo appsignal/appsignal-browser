@@ -846,7 +846,7 @@ function isCollectEndpoint(url: string): boolean {
 function recordNetworkBreadcrumb(result: RequestResult): void {
   const initiator = result.xhr ? "xhr" : "fetch";
   const filteredUrl = scrubUrl(result.url, queryParamsAllowlist);
-  const traceId = result.trace?.trace_id;
+  const trace = result.trace;
 
   if (result.aborted) return;
 
@@ -858,7 +858,7 @@ function recordNetworkBreadcrumb(result: RequestResult): void {
       url: filteredUrl,
       error: true,
     };
-    if (traceId) data.trace_id = traceId;
+    if (trace) Object.assign(data, trace);
     addBreadcrumb({
       timestamp: result.startTime,
       category: "network",
@@ -876,7 +876,7 @@ function recordNetworkBreadcrumb(result: RequestResult): void {
     duration: result.endTime - result.startTime,
   };
 
-  if (traceId) data.trace_id = traceId;
+  if (trace) Object.assign(data, trace);
 
   // Buffer now, add the timing when the observer delivers it. Waiting here
   // would put the breadcrumb after an error thrown from the response handler,

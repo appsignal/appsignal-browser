@@ -12,6 +12,10 @@ import { attemptCleanup } from "./utils.js";
  * current *then*, which after a route change is the next navigation's. */
 export interface RequestTrace {
   trace_id: string;
+  /** This request's own CLIENT span. The `traceparent` names it, so the
+   * backend span built from that header is a child of the request rather than
+   * a sibling of every other request the page made. */
+  span_id: string;
 }
 
 export interface RequestContext {

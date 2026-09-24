@@ -16,6 +16,7 @@ const NAVIGATION: NavigationSpan = {
   start_time: 1000,
   end_time: 4000,
   exceptions: [],
+  chain: [],
 };
 
 const ERROR = {

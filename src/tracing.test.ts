@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { initTracing, recordException, endNavigation, markTracingNavigation, destroyTracing } from "./tracing.js";
+import { initTracing, recordException, takeTraceRoot, markTracingNavigation, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 
 describe("tracing", () => {
-  describe("endNavigation", () => {
+  describe("takeTraceRoot", () => {
     it("has nothing to send when the page propagated nothing", () => {
-      expect(endNavigation()).toBeUndefined();
+      expect(takeTraceRoot()).toBeUndefined();
     });
   });
 
@@ -56,7 +56,7 @@ describe("tracing", () => {
     });
 
 
-    it("shares one trace and one span across every request of a page", async () => {
+    it("gives each request its own span, under one trace", async () => {
       const sent: string[] = [];
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         sent.push(new Headers(init?.headers).get("traceparent") ?? "");
@@ -71,9 +71,10 @@ describe("tracing", () => {
 
       const [first, second] = sent.map((header) => header.split("-"));
       expect(second[1]).toBe(first[1]);
-      // The navigation span parents every request, so each backend span has a
-      // parent that exists.
-      expect(second[2]).toBe(first[2]);
+      // Its own CLIENT span each, so the backend spans nest under the request
+      // that asked for them rather than beside every other request.
+      expect(second[2]).not.toBe(first[2]);
+      expect(second[2]).toMatch(/^[0-9a-f]{16}$/);
     });
 
     it("exports the span once, however many times the page flushes", async () => {
@@ -83,8 +84,8 @@ describe("tracing", () => {
       await window.fetch("http://localhost/api/cart");
       recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
-      const first = endNavigation();
-      const second = endNavigation();
+      const first = takeTraceRoot();
+      const second = takeTraceRoot();
 
       expect(first?.span_id).toMatch(/^[0-9a-f]{16}$/);
       // Declaring it twice would give one span two end times.
@@ -100,8 +101,7 @@ describe("tracing", () => {
       recordException({ name: "TypeError", message: "first", timestamp: 1000 });
       recordException({ name: "RangeError", message: "second", timestamp: 1100 });
 
-      const navigation = endNavigation();
-      expect(navigation?.exceptions.map((e) => e.message)).toEqual(["first", "second"]);
+      expect(takeTraceRoot()?.exceptions.map((e) => e.message)).toEqual(["first", "second"]);
     });
 
     it("drops an error when the page propagated nothing, so none is claimed", () => {
@@ -110,7 +110,7 @@ describe("tracing", () => {
 
       recordException({ name: "TypeError", message: "orphan", timestamp: 1000 });
 
-      expect(endNavigation()).toBeUndefined();
+      expect(takeTraceRoot()).toBeUndefined();
     });
 
     it("sends nothing for a navigation that went well", async () => {
@@ -122,7 +122,7 @@ describe("tracing", () => {
 
       // The backend already described every request it served. A span with no
       // error on it adds a page name and nothing else.
-      expect(endNavigation()).toBeUndefined();
+      expect(takeTraceRoot()).toBeUndefined();
     });
 
     it("starts a new trace on a route change", async () => {
@@ -137,7 +137,7 @@ describe("tracing", () => {
 
       await window.fetch("http://localhost/api/one");
       recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
-      endNavigation();
+      takeTraceRoot();
       markTracingNavigation();
       await window.fetch("http://localhost/api/two");
       recordException({ name: "TypeError", message: "again", timestamp: 2000 });
@@ -145,7 +145,7 @@ describe("tracing", () => {
       const [first, second] = sent.map((header) => header.split("-"));
       expect(second[1]).not.toBe(first[1]);
       // The next navigation is its own span, and can be exported in its turn.
-      expect(endNavigation()?.trace_id).toBe(second[1]);
+      expect(takeTraceRoot()?.trace_id).toBe(second[1]);
     });
 
     it("names the navigation by the route the host declared", async () => {
@@ -156,7 +156,7 @@ describe("tracing", () => {
       await window.fetch("http://localhost/api/cart");
       recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
-      expect(endNavigation()?.action).toBe("/checkout");
+      expect(takeTraceRoot()?.action).toBe("/checkout");
     });
   });
 });

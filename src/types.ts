@@ -259,6 +259,16 @@ export interface FrontendTransaction {
   /** Unix seconds (not milliseconds). */
   timestamp: number;
   namespace: "browser";
+  /** The trace the error belongs to, when tracing is on. It puts the error's
+   * span in the same trace as the spans that led to it, including the
+   * backend's. */
+  trace_id?: string;
+  /** The innermost span that led here. The error's span hangs off it rather
+   * than standing alone as a second root. */
+  parent_span_id?: string;
+  /** Names the browser among the services of a trace. Without it the error's
+   * span stands in as the app's own. */
+  service_name?: string;
   /** Route template if known, else `location.pathname`. */
   action: string;
   /** Maps to `BrowserConfig.appVersion`. */

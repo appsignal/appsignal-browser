@@ -60,10 +60,13 @@ export function sendTrace(envelope: unknown, useBeacon = false): void {
   if (!tracesEndpoint) return;
   const body = serialize(envelope);
   if (body === null) return;
-  const url = `${tracesEndpoint}/v1/traces`;
-  // A beacon is always credentialed, and an OTLP receiver answers a wildcard
-  // `Access-Control-Allow-Origin`, which a credentialed request rejects. So the
-  // unload path uses keepalive rather than sendBeacon.
+  // The key goes in both places: AppSignal's ingest reads the query parameter,
+  // as its other browser routes do, and a collector reads the header. One
+  // request then works against either, which is the point of sending OTLP.
+  const url = `${tracesEndpoint}/v1/traces?api_key=${encodeURIComponent(ingestionKey)}`;
+  // A beacon is always credentialed, and a receiver that answers a wildcard
+  // `Access-Control-Allow-Origin` rejects a credentialed request. So the unload
+  // path uses keepalive rather than sendBeacon.
   void fetch(url, {
     method: "POST",
     headers: {

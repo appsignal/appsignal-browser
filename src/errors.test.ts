@@ -33,7 +33,11 @@ vi.mock("./vitals.js", () => ({
       : location.pathname),
 }));
 
-vi.mock("./tracing.js", () => ({ recordException: vi.fn() }));
+vi.mock("./tracing.js", () => ({
+  recordException: vi.fn(),
+  getTraceContext: vi.fn(() => undefined),
+  randomSpanId: vi.fn(() => "0".repeat(16)),
+}));
 
 vi.mock("./session.js", () => ({
   getSessionContext: vi.fn(() => ({
