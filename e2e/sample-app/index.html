@@ -25,6 +25,7 @@
     <h2>Try it</h2>
     <button id="trigger-fetch">fetch /api/echo (200)</button>
     <button id="trigger-fetch-404">fetch /api/echo?status=404</button>
+    <button id="trigger-fetch-500">POST /api/echo?status=500</button>
     <button id="trigger-fetch-error">fetch /api/does-not-exist (network error)</button>
     <button id="trigger-fetch-sensitive-params">fetch /api/echo?password=...&amp;token=... (sensitive params)</button>
     <button id="trigger-fetch-mixed-params">fetch /api/echo?page=2&amp;token=abc (mixed params)</button>
@@ -63,6 +64,9 @@
       });
       document.getElementById("trigger-fetch-404").addEventListener("click", function () {
         fetch("/api/echo?status=404");
+      });
+      document.getElementById("trigger-fetch-500").addEventListener("click", function () {
+        fetch("/api/echo?status=500", { method: "POST" });
       });
       document.getElementById("trigger-fetch-error").addEventListener("click", function () {
         // hit a non-existent host so the fetch rejects rather than 404s

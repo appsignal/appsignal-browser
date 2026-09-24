@@ -3,6 +3,9 @@
 // the identity in the payloads the SDK posted to ingest. Agreement between the
 // two is what lets the server put the browser span and the backend spans in one
 // trace.
+//
+// The span is only sent for a navigation that went wrong, so most tests throw
+// an error after the propagated request to get one.
 
 import { test, expect } from "../fixtures.js";
 import {
@@ -40,11 +43,45 @@ test("two requests in one page load carry the same traceparent", async ({ page, 
   expect(headers[1].traceparent).toBe(headers[0].traceparent);
 });
 
+test("a navigation that goes fine sends nothing about its span", async ({ page, request }) => {
+  await withSdkConfig(page, TRACE_CONFIG);
+  await page.goto("/");
+
+  await page.click("#trigger-fetch");
+  await flush(page);
+
+  // Wait for the boundary post, so the absence below is not just a race.
+  const items = await pollFor(request, (items) =>
+    receivedTraceparents(items).length > 0 && ingestEvents(items).length > 0 ? items : null,
+  );
+
+  expect(ingestPageLoads(items)).toEqual([]);
+  expect(ingestEvents(items).some((e) => "page_load" in e)).toBe(false);
+});
+
+test("a propagated request that returns a 5xx declares the span", async ({ page, request }) => {
+  await withSdkConfig(page, TRACE_CONFIG);
+  await page.goto("/");
+
+  // No browser error: the host would render an error state, not throw.
+  await page.click("#trigger-fetch-500");
+
+  const joined = await pollFor(request, (items) => {
+    const header = receivedTraceparents(items)[0];
+    const declared = ingestPageLoads(items)[0];
+    if (!header || !declared) return null;
+    return { header, declared };
+  });
+
+  expect(joined.declared.span_id).toBe(joined.header.span_id);
+});
+
 test("the page_load post declares the span the traceparent points at", async ({ page, request }) => {
   await withSdkConfig(page, TRACE_CONFIG);
   await page.goto("/");
 
   await page.click("#trigger-fetch");
+  await page.click("#throw-error");
 
   const joined = await pollFor(request, (items) => {
     const header = receivedTraceparents(items)[0];
@@ -79,6 +116,7 @@ test("the page_load post carries the host's tags", async ({ page, request }) => 
     ).AppsignalBrowser.setTags({ plan: "pro" });
   });
   await page.click("#trigger-fetch");
+  await page.click("#throw-error");
 
   const declared = await pollFor(request, (items) => ingestPageLoads(items)[0] ?? null);
 
@@ -90,6 +128,7 @@ test("the page_load post carries the host's app_version", async ({ page, request
   await page.goto("/");
 
   await page.click("#trigger-fetch");
+  await page.click("#throw-error");
 
   const declared = await pollFor(request, (items) => ingestPageLoads(items)[0] ?? null);
 
@@ -161,6 +200,7 @@ test("the events post closes the span it declared", async ({ page, request }) =>
   await page.goto("/");
 
   await page.click("#trigger-fetch");
+  await page.click("#throw-error");
   await flush(page);
 
   const joined = await pollFor(request, (items) => {
@@ -189,11 +229,15 @@ test("a route change starts a new trace", async ({ page, request }) => {
   await withSdkConfig(page, TRACE_CONFIG);
   await page.goto("/");
 
+  // captureError rather than a throw, which lands on a later task and could
+  // count toward the wrong navigation.
   await page.click("#trigger-fetch");
+  await page.click("#capture-error");
   await page.evaluate(() => {
     history.pushState({}, "", "/spa-route-1");
   });
   await page.click("#trigger-fetch");
+  await page.click("#capture-error");
   await flush(page);
 
   const joined = await pollFor(request, (items) => {

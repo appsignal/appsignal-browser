@@ -6,7 +6,7 @@ import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate, getRouteAction } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
-import { initTracing, destroyTracing, getTraceContext, markTracingNavigation } from "./tracing.js";
+import { initTracing, destroyTracing, getDeclaredTraceContext, markTracingNavigation } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 import { logError, attemptCleanup } from "./utils.js";
@@ -344,8 +344,8 @@ function flushEvents({
   if (includeVitals) finalizeRouteVitals();
   const vitals = includeVitals ? drainVitals() : [];
 
-  // Close the page load span this navigation declared, if it declared one.
-  // Repeats the action and start time the declaring post already sent — the
+  // Close the page load span this navigation declared, if it went wrong and so
+  // declared one. Repeats the action and start time the declaring post already sent — the
   // freeze guarantees they agree — so a lost `page_load` post still leaves a
   // span with a real action rather than none at all.
   //
@@ -353,7 +353,7 @@ function flushEvents({
   // setTags after the declaring post has gone. This is the only delivery that
   // can carry those later tags, and the server unions tags across the span's
   // rows, so both the earlier and the later ones survive.
-  const trace = getTraceContext();
+  const trace = getDeclaredTraceContext();
   const pageLoad = trace
     ? {
         ...trace,

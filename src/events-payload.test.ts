@@ -116,8 +116,10 @@ describe("events payload shape", () => {
   it("closes the page load span the navigation declared", async () => {
     sdk.init({ key: "k", tracePropagationTargets: ["**/api/**"] });
 
-    // A propagated request declares the span, which the boundary post closes.
+    // A propagated request followed by an error declares the span, which the
+    // boundary post closes.
     await fetch("http://localhost/api/orders");
+    sdk.captureError(new Error("boom"));
 
     handlers.ttfb({ name: "TTFB", value: 120, entries: [{ startTime: 40 }] });
     const beforeFlush = Date.now();
@@ -172,6 +174,7 @@ describe("events payload shape", () => {
     sdk.setTags({ plan: "pro" });
 
     await fetch("http://localhost/api/orders");
+    sdk.captureError(new Error("boom"));
 
     const declared = sent
       .map((p) => {
@@ -204,6 +207,7 @@ describe("events payload shape", () => {
     sdk.init({ key: "k", tracePropagationTargets: ["**/api/**"] });
 
     await fetch("http://localhost/api/orders");
+    sdk.captureError(new Error("boom"));
 
     const beforeFlush = Date.now();
     sdk.flush();
@@ -223,6 +227,7 @@ describe("events payload shape", () => {
     });
 
     await fetch("http://localhost/api/orders");
+    sdk.captureError(new Error("boom"));
     handlers.ttfb({ name: "TTFB", value: 120, entries: [{ startTime: 40 }] });
     sdk.flush();
 
@@ -239,6 +244,21 @@ describe("events payload shape", () => {
 
     const body = eventsBodies().at(-1)!;
     expect(body.page_load.service_name).toBe("checkout");
+  });
+
+  it("sends nothing about the span when the navigation went fine", async () => {
+    // The traceparent went out, but nothing went wrong, so neither the
+    // page_load post nor the closing object is sent.
+    sdk.init({ key: "k", tracePropagationTargets: ["**/api/**"] });
+
+    await fetch("http://localhost/api/orders");
+    expect(sent.find((p) => p.url.includes("/api/orders"))?.traceparent).toBeTruthy();
+
+    handlers.ttfb({ name: "TTFB", value: 120, entries: [{ startTime: 40 }] });
+    sdk.flush();
+
+    expect(sent.some((p) => p.body.includes('"page_load"'))).toBe(false);
+    expect("page_load" in eventsBodies().at(-1)!).toBe(false);
   });
 
   it("carries no page_load when nothing propagated a traceparent", async () => {
