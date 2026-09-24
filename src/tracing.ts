@@ -6,6 +6,9 @@ const SPAN_ID_BYTES = 8;
 // Errors kept on one navigation. A page that throws in a loop would otherwise
 // grow this without limit.
 const MAX_EXCEPTIONS = 25;
+// Traces an interaction ended, held until the next flush. A page that errors on
+// every interaction would otherwise grow this without limit.
+const MAX_FINISHED_TRACES = 25;
 
 /** What a span attribute may hold. OpenTelemetry types its attributes, and the
  * conventions say which is which. `http.response.status_code` is an int, not
@@ -77,6 +80,19 @@ let chain = new Map<string, ChainSpan>();
 // A span is exported once, when it ends. Without this a second flush would
 // declare the same span again with a different end time.
 let exported = false;
+// When the person last did something. The next request starts its own trace
+// from here, so the page's own loading is not in the trace an error belongs to.
+let interactionAt: number | null = null;
+// Traces an interaction ended before anything flushed them.
+let finished: TraceRoot[] = [];
+// Span IDs the browser minted itself, by what they describe. Cleared with the
+// trace they belong to.
+let localSpanIds = new Map<string, string>();
+let releaseGestures: (() => void) | null = null;
+
+// What counts as the person doing something. Not "which request did this
+// cause", which a browser cannot answer, but "did they act", which is fact.
+const GESTURES = ["pointerdown", "keydown"] as const;
 
 export function initTracing(
   tracePropagationTargets: string[],
@@ -87,8 +103,15 @@ export function initTracing(
   startTime = timeOrigin();
   if (targets.length === 0) return;
 
+  listenForGestures();
+
   unregister = onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
+
+    // The person acted since the last request, so this one belongs to what they
+    // did rather than to the page that was already there. Rotating here rather
+    // than in the listener costs nothing when they act and nothing follows.
+    if (interactionAt !== null) rotate(interactionAt);
 
     // Minted on the first request that propagates, not when the trace starts.
     // Nothing refers to the span before that, and by now the host's router has
@@ -133,12 +156,30 @@ export function recordException(
   }
 }
 
-/** The trace root to send, or nothing. A trace that propagated no request has
- * no span, one already exported must not be declared twice, and one that went
- * well has nothing to report: the backend already described every request it
+/** The span ID for something the browser did not put in a `traceparent`, stable
+ * for as long as the trace lasts. Two errors after one click describe that
+ * click once: minting a fresh ID each time would declare the same thing twice,
+ * under two IDs nothing can reconcile. */
+export function spanIdFor(key: string): string {
+  let spanId = localSpanIds.get(key);
+  if (!spanId) {
+    spanId = randomHex(SPAN_ID_BYTES);
+    localSpanIds.set(key, spanId);
+  }
+  return spanId;
+}
+
+/** Take every trace root there is to send: the ones an interaction already
+ * ended, and the one still open. A trace that propagated no request has no
+ * span, one already exported must not be declared twice, and one that went well
+ * has nothing to report: the backend already described every request it
  * served. */
-export function takeTraceRoot(): TraceRoot | undefined {
-  return takeOpenRoot(Date.now());
+export function takeTraceRoots(): TraceRoot[] {
+  const roots = finished;
+  finished = [];
+  const open = takeOpenRoot(Date.now());
+  if (open) roots.push(open);
+  return roots;
 }
 
 /** Start the next navigation's trace. A route change ends the page the trace
@@ -153,9 +194,27 @@ export function destroyTracing(): void {
     unregister();
     unregister = null;
   }
+  if (releaseGestures) {
+    releaseGestures();
+    releaseGestures = null;
+  }
   targets = [];
   resolveRoute = null;
+  finished = [];
   reset(0);
+}
+
+/** Close the open trace so the next request starts a new one. Its errors are
+ * kept: they are already recorded and nothing has sent them yet. */
+function rotate(at: number): void {
+  const open = takeOpenRoot(at);
+  if (open) {
+    // The oldest goes first: the newest interaction is the one somebody is
+    // looking at when the page breaks.
+    if (finished.length >= MAX_FINISHED_TRACES) finished.shift();
+    finished.push(open);
+  }
+  reset(at);
 }
 
 function takeOpenRoot(endTime: number): TraceRoot | undefined {
@@ -181,6 +240,23 @@ function reset(at: number): void {
   exceptions = [];
   chain = new Map();
   exported = false;
+  interactionAt = null;
+  localSpanIds = new Map();
+}
+
+function listenForGestures(): void {
+  if (typeof document === "undefined") return;
+  const onGesture = () => {
+    interactionAt = Date.now();
+  };
+  for (const name of GESTURES) {
+    document.addEventListener(name, onGesture, { capture: true, passive: true });
+  }
+  releaseGestures = () => {
+    for (const name of GESTURES) {
+      document.removeEventListener(name, onGesture, true);
+    }
+  };
 }
 
 function shouldPropagate(url: string): boolean {

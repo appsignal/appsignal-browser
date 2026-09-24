@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { initTracing, recordException, takeTraceRoot, markTracingNavigation, destroyTracing } from "./tracing.js";
+import { initTracing, recordException, takeTraceRoots, markTracingNavigation, destroyTracing, getTraceContext } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 
 describe("tracing", () => {
-  describe("takeTraceRoot", () => {
+  describe("takeTraceRoots", () => {
     it("has nothing to send when the page propagated nothing", () => {
-      expect(takeTraceRoot()).toBeUndefined();
+      expect(takeTraceRoots()).toEqual([]);
     });
   });
 
@@ -84,12 +84,12 @@ describe("tracing", () => {
       await window.fetch("http://localhost/api/cart");
       recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
-      const first = takeTraceRoot();
-      const second = takeTraceRoot();
+      const first = takeTraceRoots();
+      const second = takeTraceRoots();
 
-      expect(first?.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(first[0].span_id).toMatch(/^[0-9a-f]{16}$/);
       // Declaring it twice would give one span two end times.
-      expect(second).toBeUndefined();
+      expect(second).toEqual([]);
     });
 
     it("carries every error of the navigation as one span's events", async () => {
@@ -101,7 +101,8 @@ describe("tracing", () => {
       recordException({ name: "TypeError", message: "first", timestamp: 1000 });
       recordException({ name: "RangeError", message: "second", timestamp: 1100 });
 
-      expect(takeTraceRoot()?.exceptions.map((e) => e.message)).toEqual(["first", "second"]);
+      const [root] = takeTraceRoots();
+      expect(root.exceptions.map((e) => e.message)).toEqual(["first", "second"]);
     });
 
     it("drops an error when the page propagated nothing, so none is claimed", () => {
@@ -110,7 +111,7 @@ describe("tracing", () => {
 
       recordException({ name: "TypeError", message: "orphan", timestamp: 1000 });
 
-      expect(takeTraceRoot()).toBeUndefined();
+      expect(takeTraceRoots()).toEqual([]);
     });
 
     it("sends nothing for a navigation that went well", async () => {
@@ -122,7 +123,7 @@ describe("tracing", () => {
 
       // The backend already described every request it served. A span with no
       // error on it adds a page name and nothing else.
-      expect(takeTraceRoot()).toBeUndefined();
+      expect(takeTraceRoots()).toEqual([]);
     });
 
     it("starts a new trace on a route change", async () => {
@@ -137,7 +138,7 @@ describe("tracing", () => {
 
       await window.fetch("http://localhost/api/one");
       recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
-      takeTraceRoot();
+      takeTraceRoots();
       markTracingNavigation();
       await window.fetch("http://localhost/api/two");
       recordException({ name: "TypeError", message: "again", timestamp: 2000 });
@@ -145,7 +146,89 @@ describe("tracing", () => {
       const [first, second] = sent.map((header) => header.split("-"));
       expect(second[1]).not.toBe(first[1]);
       // The next navigation is its own span, and can be exported in its turn.
-      expect(takeTraceRoot()?.trace_id).toBe(second[1]);
+      expect(takeTraceRoots()[0].trace_id).toBe(second[1]);
+    });
+
+    it("starts a trace of its own once the person does something", async () => {
+      const sent: string[] = [];
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get("traceparent") ?? "");
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      // The page loading itself.
+      await window.fetch("http://localhost/api/boot");
+      await window.fetch("http://localhost/api/config");
+
+      document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await window.fetch("http://localhost/api/prices");
+
+      const [boot, config, afterClick] = sent.map((header) => header.split("-"));
+      expect(config[1]).toBe(boot[1]);
+      // What the page did on its own is not in the trace the error belongs to.
+      expect(afterClick[1]).not.toBe(boot[1]);
+    });
+
+    it("keeps the errors of a trace an interaction closed", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/boot");
+      recordException({ name: "TypeError", message: "on load", timestamp: 1000 });
+
+      document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await window.fetch("http://localhost/api/prices");
+      recordException({ name: "RangeError", message: "on click", timestamp: 2000 });
+
+      const roots = takeTraceRoots();
+      // Two traces, each with its own error. Rotating must not drop the first.
+      expect(roots.map((root) => root.exceptions[0].message)).toEqual(["on load", "on click"]);
+      expect(roots[0].trace_id).not.toBe(roots[1].trace_id);
+    });
+
+    it("holds a bounded number of traces when nothing flushes", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      for (let i = 0; i < 30; i++) {
+        document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+        await window.fetch("http://localhost/api/prices");
+        recordException({ name: "TypeError", message: `boom ${i}`, timestamp: 1000 + i });
+      }
+
+      const roots = takeTraceRoots();
+
+      // A page that errors on every interaction must not grow without limit.
+      expect(roots.length).toBeLessThanOrEqual(26);
+      // The newest is the one somebody is looking at when the page breaks.
+      expect(roots[roots.length - 1].exceptions[0].message).toBe("boom 29");
+    });
+
+    it("does not start a trace for a gesture that asks for nothing", async () => {
+      const sent: string[] = [];
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get("traceparent") ?? "");
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/boot");
+      document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      await window.fetch("http://localhost/api/prices");
+
+      // Three gestures, one request: scrolling and typing must not burn a trace
+      // each, or a page would file traces nobody asked about.
+      const [boot, afterClicks] = sent.map((header) => header.split("-"));
+      expect(afterClicks[1]).not.toBe(boot[1]);
+      expect(sent).toHaveLength(2);
     });
 
     it("names the navigation by the route the host declared", async () => {
@@ -156,7 +239,7 @@ describe("tracing", () => {
       await window.fetch("http://localhost/api/cart");
       recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
-      expect(takeTraceRoot()?.action).toBe("/checkout");
+      expect(takeTraceRoots()[0].action).toBe("/checkout");
     });
   });
 });

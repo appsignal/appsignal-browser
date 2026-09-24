@@ -1,6 +1,6 @@
-// The spans an error sends: the page, and the request before the error. These
-// assert on what the ingest server received, because the IDs have to match the
-// `traceparent` the browser already sent.
+// The spans an error sends: the navigation, what the person did, and the
+// request before it. These assert on what the ingest server received, because
+// the IDs have to match the `traceparent` the browser already sent.
 
 import { test, expect, type APIRequestContext, type Page } from "../fixtures.js";
 import { withSdkConfig } from "../helpers.js";
@@ -61,6 +61,48 @@ async function waitForSpans(request: APIRequestContext, url: string): Promise<Ot
   return spans;
 }
 
+/** Wait until the browser has sent `count` traces, then take them all. Each
+ * trace root leaves in an envelope of its own. */
+async function waitForTraces(
+  request: APIRequestContext,
+  url: string,
+  count: number,
+): Promise<OtlpSpan[][]> {
+  let posts: OtlpSpan[][] = [];
+  await expect
+    .poll(async () => {
+      posts = await tracePosts(request, url);
+      return posts.length;
+    }, { timeout: 15_000 })
+    .toBeGreaterThanOrEqual(count);
+  return posts;
+}
+
+/** A button that fetches and then throws, so one click produces a request and
+ * the errors that followed it. */
+async function addCheckoutButton(page: Page, id: string, path: string, errors: string[]) {
+  await page.evaluate(
+    ({ id, path, errors }) => {
+      const button = document.createElement("button");
+      button.id = id;
+      button.textContent = id;
+      document.body.appendChild(button);
+      button.addEventListener("click", () => {
+        void fetch(path, { method: "POST", body: "{}" });
+        // After the request settles, so its breadcrumb is there to be found.
+        errors.forEach((name, index) => {
+          setTimeout(() => {
+            const error = new Error(`${name} went wrong`);
+            error.name = name;
+            throw error;
+          }, 300 + index * 50);
+        });
+      });
+    },
+    { id, path, errors },
+  );
+}
+
 test.beforeEach(async ({ page, request, ingestUrl }) => {
   await request.post(`${ingestUrl}/__reset`);
   await withSdkConfig(page, {
@@ -71,7 +113,7 @@ test.beforeEach(async ({ page, request, ingestUrl }) => {
   await page.goto("/");
 });
 
-test("an error hangs off the page and the request before it", async ({
+test("an error with nothing before it hangs off the root alone", async ({
   page,
   request,
   ingestUrl,
@@ -93,12 +135,63 @@ test("an error hangs off the page and the request before it", async ({
   const root = spans.find((span) => !span.parentSpanId);
   const requestSpan = requestTo(spans, "/api/boot");
 
-  // The page and the request it made, and nothing between them.
+  // Nobody clicked, and arriving on the page is not something they did either:
+  // the root already names it. The request hangs straight off the root.
+  expect(spans.some((span) => span.name.startsWith("click"))).toBe(false);
+  expect(spans.some((span) => span.name.startsWith("navigation"))).toBe(false);
   expect(requestSpan?.parentSpanId).toBe(root!.spanId);
   expect(spans).toHaveLength(2);
 });
 
-test("the request span follows the HTTP conventions", async ({
+test("two errors after one action describe that action once", async ({
+  page,
+  request,
+  ingestUrl,
+}) => {
+  await addCheckoutButton(page, "checkout", "/api/prices", ["PriceNaNError", "TaxNaNError"]);
+
+  await page.click("#checkout");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => (window as unknown as { AppsignalBrowser: { flush(): void } }).AppsignalBrowser.flush());
+
+  const spans = await waitForSpans(request, ingestUrl);
+
+  // Two errors are two errors, not two clicks. A fresh span each time would
+  // declare one action twice, under IDs nothing can reconcile.
+  expect(spans.filter((span) => span.name.startsWith("click"))).toHaveLength(1);
+  expect(spans.filter((span) => attribute(span, "url.path") === "/api/prices")).toHaveLength(1);
+  const errored = spans.find((span) => span.events.length > 1);
+  expect(errored?.events.map((event) => event.name)).toEqual(["exception", "exception"]);
+});
+
+test("each thing the person does gets a trace of its own", async ({
+  page,
+  request,
+  ingestUrl,
+}) => {
+  await addCheckoutButton(page, "cart", "/api/cart", ["CartLockedError"]);
+  await addCheckoutButton(page, "pay", "/api/pay", ["PayTokenError"]);
+
+  await page.click("#cart");
+  await page.waitForTimeout(600);
+  await page.click("#pay");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => (window as unknown as { AppsignalBrowser: { flush(): void } }).AppsignalBrowser.flush());
+
+  const posts = await waitForTraces(request, ingestUrl, 2);
+  const traceIds = posts.map((spans) => spans[0].traceId);
+
+  // One interaction, one trace: what the person did next is not the same story.
+  expect(new Set(traceIds).size).toBe(posts.length);
+  expect(posts.some((spans) => requestTo(spans, "/api/cart"))).toBe(true);
+  expect(posts.some((spans) => requestTo(spans, "/api/pay"))).toBe(true);
+  // Neither trace holds the other's request.
+  for (const spans of posts) {
+    expect(spans.filter((span) => attribute(span, "url.path"))).toHaveLength(1);
+  }
+});
+
+test("an error sends the navigation, the action before it, and the request", async ({
   page,
   request,
   ingestUrl,
@@ -123,8 +216,12 @@ test("the request span follows the HTTP conventions", async ({
 
   const spans = await waitForSpans(request, ingestUrl);
   const root = spans.find((span) => !span.parentSpanId);
+  const click = spans.find((span) => span.name.startsWith("click"));
   const requestSpan = spans.find((span) => span.name.startsWith("POST"));
 
+  expect(root).toBeDefined();
+  expect(click?.parentSpanId).toBe(root!.spanId);
+  expect(requestSpan?.parentSpanId).toBe(click!.spanId);
   // CLIENT, not INTERNAL: a trace view reads this to draw the hop to whoever
   // served the request, and the backend spans nest under it.
   expect(requestSpan?.kind).toBe(3);
@@ -138,6 +235,93 @@ test("the request span follows the HTTP conventions", async ({
   expect(status?.value).toEqual({ intValue: "200" });
   // Every span of one navigation shares its trace.
   expect(new Set(spans.map((span) => span.traceId)).size).toBe(1);
+});
+
+test("what the person did gets a trace of its own, without the page's own loading", async ({
+  page,
+  request,
+  ingestUrl,
+}) => {
+
+  const booted = await page.evaluate(async () => {
+    const sent: string[] = [];
+    const original = Headers.prototype.set;
+    Headers.prototype.set = function (key: string, value: string) {
+      if (key.toLowerCase() === "traceparent") sent.push(value);
+      return original.call(this, key, value);
+    };
+    (window as unknown as { __sent: string[] }).__sent = sent;
+
+    // The page loading itself, before anybody has touched it.
+    await fetch("/api/boot").catch(() => {});
+
+    const button = document.createElement("button");
+    button.id = "checkout";
+    button.textContent = "Checkout";
+    document.body.appendChild(button);
+    button.addEventListener("click", () => {
+      void fetch("/api/prices", { method: "POST", body: "{}" });
+      // After the request settles, so its breadcrumb is there to be found.
+      setTimeout(() => {
+        const error = new Error("total is undefined");
+        error.name = "TypeError";
+        throw error;
+      }, 300);
+    });
+    return sent[0];
+  });
+
+  // A real gesture, not button.click(): only a trusted pointerdown tells the
+  // SDK the person acted.
+  await page.click("#checkout");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => (window as unknown as { AppsignalBrowser: { flush(): void } }).AppsignalBrowser.flush());
+
+  const spans = await waitForSpans(request, ingestUrl);
+  const root = spans.find((span) => !span.parentSpanId);
+  const [, bootTraceId] = booted.split("-");
+
+  // The error's trace holds what the person did. The page's own loading is a
+  // trace of its own, and none of it is in this one.
+  expect(root!.traceId).not.toBe(bootTraceId);
+  expect(requestTo(spans, "/api/prices")).toBeDefined();
+  expect(requestTo(spans, "/api/boot")).toBeUndefined();
+});
+
+test("an error that beats its request home does not borrow the last one", async ({
+  page,
+  request,
+  ingestUrl,
+}) => {
+  await addCheckoutButton(page, "cart", "/api/cart", []);
+  await page.evaluate(() => {
+    const button = document.createElement("button");
+    button.id = "pay";
+    button.textContent = "Pay";
+    document.body.appendChild(button);
+    button.addEventListener("click", () => {
+      // Never settles, so it records no breadcrumb before the error.
+      void fetch("/api/never");
+      setTimeout(() => {
+        const error = new Error("total is undefined");
+        error.name = "TypeError";
+        throw error;
+      }, 100);
+    });
+  });
+
+  await page.click("#cart");
+  await page.waitForTimeout(400);
+  await page.click("#pay");
+  await page.waitForTimeout(400);
+  await page.evaluate(() => (window as unknown as { AppsignalBrowser: { flush(): void } }).AppsignalBrowser.flush());
+
+  const posts = await waitForTraces(request, ingestUrl, 1);
+  const errored = posts.find((spans) => spans.some((span) => span.events.length > 0))!;
+
+  // The settled request belongs to the interaction before this one, and a
+  // backend span there already points at its ID.
+  expect(requestTo(errored, "/api/cart")).toBeUndefined();
 });
 
 test("the request span carries the ID its traceparent already sent", async ({
