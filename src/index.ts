@@ -6,7 +6,7 @@ import { initErrors, reportError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate, getRouteAction } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, sendTrace, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
-import { initTracing, takeTraceRoot, markTracingNavigation, destroyTracing } from "./tracing.js";
+import { initTracing, takeTraceRoots, markTracingNavigation, destroyTracing } from "./tracing.js";
 import { buildTraceEnvelope } from "./otlp.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
@@ -165,7 +165,7 @@ export const flush = /* @__PURE__ */ guard("flush", (): void => {
   flushEvents();
   // A host that flushes wants everything the SDK is holding, the navigation's
   // spans included.
-  flushTraceRoot(false);
+  flushTraceRoots(false);
 });
 
 /** Tear down the SDK. Flushes remaining data and stops all collection. */
@@ -259,7 +259,7 @@ function startCollection(endpoint: string): void {
       flushEvents({ includeVitals: false });
       // A navigation that has thrown sends its span here rather than waiting
       // for the page to end, which may be minutes away or may never come.
-      flushTraceRoot(false);
+      flushTraceRoots(false);
     }, FLUSH_INTERVAL_MS);
   }
 
@@ -270,7 +270,7 @@ function startCollection(endpoint: string): void {
     onVisibilityChange((state) => {
       if (state === "hidden") {
         flushEvents({ beacon: true });
-        flushTraceRoot(true);
+        flushTraceRoots(true);
       }
     }),
   );
@@ -279,7 +279,7 @@ function startCollection(endpoint: string): void {
     onPageHide((persisted) => {
       if (!persisted && initialized) {
         flushEvents({ beacon: true });
-        flushTraceRoot(true);
+        flushTraceRoots(true);
       }
     }),
   );
@@ -304,7 +304,7 @@ function startCollection(endpoint: string): void {
     if (key === lastRouteKey) return;
     lastRouteKey = key;
     flushEvents();
-    flushTraceRoot(false);
+    flushTraceRoots(false);
     markTracingNavigation();
     markVitalsNavigation();
   };
@@ -341,23 +341,22 @@ function stopCollection(): void {
   attemptCleanup("lifecycle", destroyLifecycle);
 }
 
-/** Export the trace's root span where the events payload already leaves: a
- * route change, a hidden tab, the page going away. A span is exported once,
+/** Export the trace roots where the events payload already leaves: a route
+ * change, a hidden tab, the page going away. There can be several, because each
+ * thing the person did started a trace of its own. A span is exported once,
  * when it ends, which is what OpenTelemetry expects and what stops a second
  * flush declaring the same span with a different end time. */
-function flushTraceRoot(beacon: boolean): void {
+function flushTraceRoots(beacon: boolean): void {
   if (!tracingConfig) return;
-  const traceRoot = takeTraceRoot();
-  if (!traceRoot) return;
-  sendTrace(
-    buildTraceEnvelope(traceRoot, {
-      serviceName: serviceNameFor(tracingConfig),
-      revision: appVersion,
-      appName: tracingConfig.appName,
-      environment: tracingConfig.environment,
-    }),
-    beacon,
-  );
+  const options = {
+    serviceName: serviceNameFor(tracingConfig),
+    revision: appVersion,
+    appName: tracingConfig.appName,
+    environment: tracingConfig.environment,
+  };
+  for (const traceRoot of takeTraceRoots()) {
+    sendTrace(buildTraceEnvelope(traceRoot, options), beacon);
+  }
 }
 
 function flushEvents({
