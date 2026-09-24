@@ -61,7 +61,7 @@ const server = createServer(async (req, res) => {
   // SDK's instrumented fetch may target /api/* from /sample/*; same-origin.
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, traceparent");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, traceparent, AppSignal-Config-PushApiKey");
   if (req.method === "OPTIONS") {
     res.writeHead(204);
     res.end();
@@ -85,10 +85,13 @@ const server = createServer(async (req, res) => {
   // Routes the v1 SDK targets:
   //  - /ingest/browser         (events: breadcrumbs + vitals, replay later)
   //  - /ingest/browser/errors  (errors as FrontendTransaction)
+  //  - /ingest/browser/v1/traces (the navigation's spans, as OTLP)
   // All captured under kind="ingest"; helpers disambiguate by path.
   if (
     req.method === "POST" &&
-    (pathname === "/ingest/browser" || pathname === "/ingest/browser/errors")
+    (pathname === "/ingest/browser" ||
+      pathname === "/ingest/browser/errors" ||
+      pathname === "/ingest/browser/v1/traces")
   ) {
     const body = await readBody(req);
     captured.push({

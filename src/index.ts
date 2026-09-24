@@ -3,10 +3,11 @@ import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "./errors.js";
-import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
+import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate, getRouteAction } from "./vitals.js";
 
-import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
-import { initTracing, destroyTracing } from "./tracing.js";
+import { initTransport, sendEvents, sendBeaconEvents, sendTrace, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
+import { initTracing, takeTraceRoot, markTracingNavigation, destroyTracing } from "./tracing.js";
+import { buildTraceEnvelope } from "./otlp.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 import { logError, attemptCleanup } from "./utils.js";
@@ -17,6 +18,8 @@ let clientConfig: BrowserConfig | null = null;
 let resolved: ResolvedConfig | null = null;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
+let tracingConfig: BrowserConfig["tracing"];
+let appVersion: string | undefined;
 
 // Lifecycle subscription teardowns
 let lifecycleUnsubscribers: (() => void)[] = [];
@@ -26,6 +29,13 @@ let lifecycleUnsubscribers: (() => void)[] = [];
 // POSTs don't end up in their own breadcrumb trail — and a future endpoint
 // change can't drift between the two files.
 const FLUSH_INTERVAL_MS = 30_000;
+// Named in one place: the error's own span and the spans that explain it must
+// report the same service, or a trace view draws them as two.
+const DEFAULT_SERVICE_NAME = "Browser";
+
+function serviceNameFor(tracing: BrowserConfig["tracing"]): string {
+  return tracing?.serviceName ?? DEFAULT_SERVICE_NAME;
+}
 
 export function init(config: BrowserConfig): void {
   if (initialized) return;
@@ -40,7 +50,9 @@ export function init(config: BrowserConfig): void {
     resolved = resolveConfig(config);
 
     const endpoint = resolveEndpoint(config);
-    initTransport(endpoint, config.key);
+    initTransport(endpoint, config.key, config.tracing?.endpoint);
+    tracingConfig = config.tracing;
+    appVersion = config.appVersion;
     startCollection(endpoint);
   } catch (error) {
     // Hosts import this module at the top of their entry bundle, so a throw
@@ -151,6 +163,9 @@ export const setRouteTemplate = /* @__PURE__ */ guard("setRouteTemplate", (templ
 
 export const flush = /* @__PURE__ */ guard("flush", (): void => {
   flushEvents();
+  // A host that flushes wants everything the SDK is holding, the navigation's
+  // spans included.
+  flushTraceRoot(false);
 });
 
 /** Tear down the SDK. Flushes remaining data and stops all collection. */
@@ -225,10 +240,11 @@ function startCollection(endpoint: string): void {
     cfg.privacy.queryParamsAllowlist,
     clientConfig?.appVersion,
     clientConfig?.beforeError,
+    tracingConfig && serviceNameFor(tracingConfig),
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
-    initTracing(clientConfig.tracePropagationTargets);
+    initTracing(clientConfig.tracePropagationTargets, getRouteAction);
   }
 
   initVitals(cfg.privacy.queryParamsAllowlist);
@@ -239,7 +255,12 @@ function startCollection(endpoint: string): void {
   // streaming is off (the default) — otherwise it wakes twice a minute for an
   // empty payload that early-returns, burning CPU/battery for nothing.
   if (cfg.session.enabled) {
-    flushTimer = setInterval(() => flushEvents({ includeVitals: false }), FLUSH_INTERVAL_MS);
+    flushTimer = setInterval(() => {
+      flushEvents({ includeVitals: false });
+      // A navigation that has thrown sends its span here rather than waiting
+      // for the page to end, which may be minutes away or may never come.
+      flushTraceRoot(false);
+    }, FLUSH_INTERVAL_MS);
   }
 
   // Flush on visibility hidden (tab switch, app backgrounded). web-vitals
@@ -247,13 +268,19 @@ function startCollection(endpoint: string): void {
   // handler and populate collectedVitals before we flush.
   lifecycleUnsubscribers.push(
     onVisibilityChange((state) => {
-      if (state === "hidden") flushEvents({ beacon: true });
+      if (state === "hidden") {
+        flushEvents({ beacon: true });
+        flushTraceRoot(true);
+      }
     }),
   );
   // Flush on tab close / navigation away
   lifecycleUnsubscribers.push(
     onPageHide((persisted) => {
-      if (!persisted && initialized) flushEvents({ beacon: true });
+      if (!persisted && initialized) {
+        flushEvents({ beacon: true });
+        flushTraceRoot(true);
+      }
     }),
   );
 
@@ -277,6 +304,8 @@ function startCollection(endpoint: string): void {
     if (key === lastRouteKey) return;
     lastRouteKey = key;
     flushEvents();
+    flushTraceRoot(false);
+    markTracingNavigation();
     markVitalsNavigation();
   };
   onAfterNavigation(onNavigation);
@@ -310,6 +339,25 @@ function stopCollection(): void {
   lifecycleUnsubscribers = [];
   for (const unsub of unsubscribers) attemptCleanup("lifecycle subscription", unsub);
   attemptCleanup("lifecycle", destroyLifecycle);
+}
+
+/** Export the trace's root span where the events payload already leaves: a
+ * route change, a hidden tab, the page going away. A span is exported once,
+ * when it ends, which is what OpenTelemetry expects and what stops a second
+ * flush declaring the same span with a different end time. */
+function flushTraceRoot(beacon: boolean): void {
+  if (!tracingConfig) return;
+  const traceRoot = takeTraceRoot();
+  if (!traceRoot) return;
+  sendTrace(
+    buildTraceEnvelope(traceRoot, {
+      serviceName: serviceNameFor(tracingConfig),
+      revision: appVersion,
+      appName: tracingConfig.appName,
+      environment: tracingConfig.environment,
+    }),
+    beacon,
+  );
 }
 
 function flushEvents({

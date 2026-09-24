@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { initTracing, consumeTraceId, destroyTracing } from "./tracing.js";
+import { initTracing, recordException, takeTraceRoot, markTracingNavigation, destroyTracing } from "./tracing.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 
 describe("tracing", () => {
-  describe("consumeTraceId", () => {
-    it("returns undefined when no trace was generated", () => {
-      expect(consumeTraceId("http://example.com/api")).toBeUndefined();
+  describe("takeTraceRoot", () => {
+    it("has nothing to send when the page propagated nothing", () => {
+      expect(takeTraceRoot()).toBeUndefined();
     });
   });
 
@@ -55,63 +55,108 @@ describe("tracing", () => {
       expect(capturedHeaders?.get("traceparent")).toBeNull();
     });
 
-    it("stores trace_id for consumption by breadcrumbs", async () => {
-      window.fetch = async () => new Response();
 
-      initNetworkHook();
-      initTracing(["localhost/**"]);
-
-      await window.fetch("http://localhost/api/users");
-
-      const traceId = consumeTraceId("http://localhost/api/users");
-      expect(traceId).toMatch(/^[0-9a-f]{32}$/);
-    });
-
-    it("consumeTraceId removes the trace after first read", async () => {
-      window.fetch = async () => new Response();
-
-      initNetworkHook();
-      initTracing(["localhost/**"]);
-
-      await window.fetch("http://localhost/api/users");
-
-      const first = consumeTraceId("http://localhost/api/users");
-      const second = consumeTraceId("http://localhost/api/users");
-
-      expect(first).toBeTruthy();
-      expect(second).toBeUndefined();
-    });
-
-    it("keeps trace IDs distinct for parallel same-URL requests", async () => {
-      // Real-world example: a polling component fires two GETs to the same
-      // URL while the first is still in flight. With a URL-keyed Map the
-      // second recordTrace clobbers the first, so the breadcrumb that
-      // consumes the ID gets attributed to the wrong request — or worse,
-      // the second consumer reads `undefined`.
-      const sentHeaders: Headers[] = [];
+    it("gives each request its own span, under one trace", async () => {
+      const sent: string[] = [];
       window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
-        sentHeaders.push(new Headers(init?.headers));
+        sent.push(new Headers(init?.headers).get("traceparent") ?? "");
         return new Response();
       };
 
       initNetworkHook();
       initTracing(["localhost/**"]);
 
-      const url = "http://localhost/api/poll";
-      await Promise.all([window.fetch(url), window.fetch(url)]);
+      await window.fetch("http://localhost/api/cart");
+      await window.fetch("http://localhost/api/prices");
 
-      const sent1 = sentHeaders[0].get("traceparent")?.split("-")[1];
-      const sent2 = sentHeaders[1].get("traceparent")?.split("-")[1];
-      expect(sent1).toBeTruthy();
-      expect(sent2).toBeTruthy();
-      expect(sent1).not.toBe(sent2);
+      const [first, second] = sent.map((header) => header.split("-"));
+      expect(second[1]).toBe(first[1]);
+      // Its own CLIENT span each, so the backend spans nest under the request
+      // that asked for them rather than beside every other request.
+      expect(second[2]).not.toBe(first[2]);
+      expect(second[2]).toMatch(/^[0-9a-f]{16}$/);
+    });
 
-      const consumed1 = consumeTraceId(url);
-      const consumed2 = consumeTraceId(url);
+    it("exports the span once, however many times the page flushes", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+      await window.fetch("http://localhost/api/cart");
+      recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
 
-      expect(consumed1).toBeTruthy();
-      expect(consumed2).toBeTruthy();
-      expect([sent1, sent2].sort()).toEqual([consumed1, consumed2].sort());
+      const first = takeTraceRoot();
+      const second = takeTraceRoot();
+
+      expect(first?.span_id).toMatch(/^[0-9a-f]{16}$/);
+      // Declaring it twice would give one span two end times.
+      expect(second).toBeUndefined();
+    });
+
+    it("carries every error of the navigation as one span's events", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+      await window.fetch("http://localhost/api/cart");
+
+      recordException({ name: "TypeError", message: "first", timestamp: 1000 });
+      recordException({ name: "RangeError", message: "second", timestamp: 1100 });
+
+      expect(takeTraceRoot()?.exceptions.map((e) => e.message)).toEqual(["first", "second"]);
+    });
+
+    it("drops an error when the page propagated nothing, so none is claimed", () => {
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      recordException({ name: "TypeError", message: "orphan", timestamp: 1000 });
+
+      expect(takeTraceRoot()).toBeUndefined();
+    });
+
+    it("sends nothing for a navigation that went well", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/cart");
+
+      // The backend already described every request it served. A span with no
+      // error on it adds a page name and nothing else.
+      expect(takeTraceRoot()).toBeUndefined();
+    });
+
+    it("starts a new trace on a route change", async () => {
+      const sent: string[] = [];
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get("traceparent") ?? "");
+        return new Response();
+      };
+
+      initNetworkHook();
+      initTracing(["localhost/**"]);
+
+      await window.fetch("http://localhost/api/one");
+      recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
+      takeTraceRoot();
+      markTracingNavigation();
+      await window.fetch("http://localhost/api/two");
+      recordException({ name: "TypeError", message: "again", timestamp: 2000 });
+
+      const [first, second] = sent.map((header) => header.split("-"));
+      expect(second[1]).not.toBe(first[1]);
+      // The next navigation is its own span, and can be exported in its turn.
+      expect(takeTraceRoot()?.trace_id).toBe(second[1]);
+    });
+
+    it("names the navigation by the route the host declared", async () => {
+      window.fetch = async () => new Response();
+      initNetworkHook();
+      initTracing(["localhost/**"], () => "/checkout");
+
+      await window.fetch("http://localhost/api/cart");
+      recordException({ name: "TypeError", message: "boom", timestamp: 1000 });
+
+      expect(takeTraceRoot()?.action).toBe("/checkout");
     });
   });
 });

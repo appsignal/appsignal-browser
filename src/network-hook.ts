@@ -7,12 +7,25 @@
 
 import { attemptCleanup } from "./utils.js";
 
+/** What a before-listener propagated for one request. Carried to the result
+ * rather than read back at completion: read back, it would give whatever is
+ * current *then*, which after a route change is the next navigation's. */
+export interface RequestTrace {
+  trace_id: string;
+  /** This request's own CLIENT span. The `traceparent` names it, so the
+   * backend span built from that header is a child of the request rather than
+   * a sibling of every other request the page made. */
+  span_id: string;
+}
+
 export interface RequestContext {
   url: string;
   method: string;
   /** Mutable headers. Before-listeners may add or replace entries; the
    * resulting Headers object is applied to the outgoing request. */
   headers: Headers;
+  /** Set by the tracing listener when it propagates a `traceparent`. */
+  trace?: RequestTrace;
 }
 
 export interface RequestResult {
@@ -35,6 +48,8 @@ export interface RequestResult {
   response?: Response;
   /** Set for XHR responses. */
   xhr?: XMLHttpRequest;
+  /** What the before-listeners propagated, if anything. */
+  trace?: RequestTrace;
 }
 
 export type BeforeRequestListener = (ctx: RequestContext) => void;
@@ -118,6 +133,7 @@ function patchFetch(): void {
     // `new Headers(init?.headers)` would be empty for a `fetch(request)` call
     // and silently drop every header the caller set on the Request.
     let finalInit = init;
+    let trace: RequestTrace | undefined;
     if (beforeListeners.length > 0) {
       // Seed from the *effective* request headers (Request headers first,
       // then init headers override — the platform's own precedence) so a
@@ -129,6 +145,7 @@ function patchFetch(): void {
       for (const l of beforeListeners) {
         try { l(ctx); } catch { /* never let one listener break the chain */ }
       }
+      trace = ctx.trace;
       finalInit = { ...init, headers };
     }
 
@@ -142,6 +159,7 @@ function patchFetch(): void {
         status: response.status,
         error: false,
         response,
+        trace,
       };
       for (const l of afterListeners) {
         try { l(result); } catch { /* swallow */ }
@@ -157,6 +175,7 @@ function patchFetch(): void {
         endTime: Date.now(),
         error: !aborted,
         aborted,
+        trace,
       };
       for (const l of afterListeners) {
         try { l(result); } catch { /* swallow */ }
@@ -178,6 +197,7 @@ type TaggedXhr = XMLHttpRequest & {
     method: string;
     startTime: number;
     aborted?: boolean;
+    trace?: RequestTrace;
   } | null;
 };
 
@@ -202,6 +222,7 @@ function hookXhr(tagged: TaggedXhr): void {
       error: error && !aborted,
       aborted,
       xhr: tagged,
+      trace: pending.trace,
     };
     if (!error) result.status = tagged.status;
     for (const l of afterListeners) {
@@ -267,6 +288,7 @@ function patchXhr(): void {
     for (const l of beforeListeners) {
       try { l(ctx); } catch { /* swallow */ }
     }
+    if (xhr._ahPending) xhr._ahPending.trace = ctx.trace;
 
     // Apply headers contributed by before-listeners. setRequestHeader can
     // throw on forbidden headers (Cookie, Host, etc.); ignore those.

@@ -1,3 +1,16 @@
+/** Where the browser's spans go, and the identity they carry. */
+export interface TracingConfig {
+  /** Base URL for OTLP over HTTP. The SDK posts to `<endpoint>/v1/traces`,
+   * so anything that speaks OTLP can receive it. */
+  endpoint: string;
+  /** The AppSignal app these spans belong to. Without it an OTLP receiver
+   * routes them to an app of their own rather than the host's. */
+  appName: string;
+  environment: string;
+  /** Names the browser among the services of a trace. Defaults to "Browser". */
+  serviceName?: string;
+}
+
 /** Client-side configuration. Every group is optional; only `key` is
  * required. */
 export interface BrowserConfig {
@@ -12,6 +25,8 @@ export interface BrowserConfig {
    * `active: process.env.NODE_ENV === "production"`. */
   active?: boolean;
   appVersion?: string;
+  /** Send one span for each navigation, as OTLP over HTTP. */
+  tracing?: TracingConfig;
   user?: UserContext;
   /** Inspect or modify each error at the entry point, before the SDK adds an
    * error breadcrumb, records `lastErrorTimestamp`, or runs deduplication.
@@ -244,6 +259,16 @@ export interface FrontendTransaction {
   /** Unix seconds (not milliseconds). */
   timestamp: number;
   namespace: "browser";
+  /** The trace the error belongs to, when tracing is on. It puts the error's
+   * span in the same trace as the spans that led to it, including the
+   * backend's. */
+  trace_id?: string;
+  /** The innermost span that led here. The error's span hangs off it rather
+   * than standing alone as a second root. */
+  parent_span_id?: string;
+  /** Names the browser among the services of a trace. Without it the error's
+   * span stands in as the app's own. */
+  service_name?: string;
   /** Route template if known, else `location.pathname`. */
   action: string;
   /** Maps to `BrowserConfig.appVersion`. */

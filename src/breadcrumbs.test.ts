@@ -10,8 +10,7 @@ import {
   drainBreadcrumbs,
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
-import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
-import { consumeTraceId } from "./tracing.js";
+import { initNetworkHook, destroyNetworkHook, onBeforeRequest } from "./network-hook.js";
 import { timeOrigin } from "./utils.js";
 import type { ResolvedConfig } from "./types.js";
 
@@ -19,9 +18,7 @@ vi.mock("./errors.js", () => ({
   getLastErrorTimestamp: vi.fn(() => 0),
 }));
 
-vi.mock("./tracing.js", () => ({
-  consumeTraceId: vi.fn(() => undefined),
-}));
+vi.mock("./tracing.js", () => ({}));
 
 const defaultBreadcrumbConfig: ResolvedConfig["breadcrumbs"] = {
   network: false,
@@ -35,10 +32,6 @@ describe("breadcrumbs", () => {
   beforeEach(() => {
     initBreadcrumbs(defaultBreadcrumbConfig, ["http://localhost/ingest/browser"]);
     clearBreadcrumbs();
-    // Nothing else resets this mock, so a return value or a call from one test
-    // would otherwise reach the next one.
-    vi.mocked(consumeTraceId).mockReset();
-    vi.mocked(consumeTraceId).mockReturnValue(undefined);
   });
 
   it("stores and retrieves breadcrumbs", () => {
@@ -385,10 +378,9 @@ describe("breadcrumbs", () => {
       expect(networkCrumb!.data?.error).toBe(true);
     });
 
-    it("consumes the trace id of a cancelled request and adds no breadcrumb", async () => {
-      // A typeahead cancels on each keystroke. Not failures, but the id must
-      // still leave the queue.
-      vi.mocked(consumeTraceId).mockReturnValue("trace-from-cancelled");
+    it("adds no breadcrumb for a cancelled request", async () => {
+      // A typeahead cancels on each keystroke. Those are not failures, so they
+      // must not put an error breadcrumb in front of a real one.
 
       initNetworkHook();
       initBreadcrumbs(
@@ -402,20 +394,19 @@ describe("breadcrumbs", () => {
       xhr.abort();
       await new Promise((r) => setTimeout(r, 20));
 
-      expect(consumeTraceId).toHaveBeenCalledWith("http://example.com/api/search");
       expect(getSnapshot().filter((b) => b.category === "network")).toHaveLength(0);
     });
 
-    it("consumes the trace id on a transport failure too", async () => {
-      // pendingTraces is a FIFO keyed by URL, so an id left there is claimed
-      // by the next request to that URL.
-      vi.mocked(consumeTraceId).mockReturnValue("trace-from-failed-request");
-
+    it("keeps the propagated trace id on a transport failure too", async () => {
       window.fetch = async () => {
         throw new TypeError("Network error");
       };
 
       initNetworkHook();
+      // Stand in for the tracing listener, which this file mocks out.
+      const stopPropagating = onBeforeRequest((ctx) => {
+        ctx.trace = { trace_id: "trace-from-failed-request" };
+      });
       initBreadcrumbs(
         { ...defaultBreadcrumbConfig, network: true },
         ["http://localhost/ingest/browser"],
@@ -424,7 +415,7 @@ describe("breadcrumbs", () => {
       await window.fetch("http://example.com/api/down").catch(() => {});
       await new Promise((r) => setTimeout(r, 50));
 
-      expect(consumeTraceId).toHaveBeenCalledWith("http://example.com/api/down");
+      stopPropagating();
 
       const breadcrumb = getSnapshot().find((b) => b.category === "network");
       expect(breadcrumb!.data?.error).toBe(true);

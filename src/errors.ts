@@ -9,8 +9,10 @@ import type {
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import { recordException, getTraceContext } from "./tracing.js";
+import { buildErrorChain } from "./error-chain.js";
+import { getRouteAction } from "./vitals.js";
+import { scrubPageUrl, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -28,6 +30,9 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
+// Names the browser among the services of a trace, so the error's own span
+// joins the browser rather than standing in as the app's.
+let serviceName: string | undefined;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 // Query-param allowlist for scrubbing URLs that ride the error payload. The
 // errors module captures `location.href` for `environment.url`; without this it
@@ -80,6 +85,7 @@ export function initErrors(
   queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
+  service?: string,
 ): void {
   destroyErrors();
 
@@ -87,6 +93,7 @@ export function initErrors(
   allowlist = queryParamsAllowlist;
   appVersion = version;
   beforeErrorHook = beforeError;
+  serviceName = service;
 
   errorHandler = (event: ErrorEvent) => {
     handleError(
@@ -136,6 +143,7 @@ export function destroyErrors(): void {
   rateWindowStart = 0;
   rateWindowCount = 0;
   lastErrorTimestamp = 0;
+  serviceName = undefined;
   errorListeners.length = 0;
 }
 
@@ -241,7 +249,30 @@ function handleError(
     ...effective,
   };
 
-  sendError(toFrontendTransaction(payload));
+  // The navigation's span carries this as an event, under the spans that led
+  // to it. Both leave when the navigation ends; nothing is sent here.
+  const exception = {
+    name: effective.error_class || "Error",
+    message: effective.message,
+    stack: effective.stack,
+    timestamp: now,
+  };
+  const navigation = getTraceContext();
+  let placement: TracePlacement | undefined;
+  if (navigation) {
+    const { spans, onSpanId } = buildErrorChain(navigation, payload.breadcrumbs, exception);
+    recordException({ ...exception, on_span_id: onSpanId }, spans);
+    placement = {
+      trace_id: navigation.trace_id,
+      parent_span_id: onSpanId,
+      service_name: serviceName,
+    };
+  }
+
+  // Where the error's own span belongs: under the innermost thing that led to
+  // it, in the trace those spans are in. Without this it stands alone, a second
+  // root naming a service of its own.
+  sendError(toFrontendTransaction(payload, placement));
 
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)
@@ -265,14 +296,26 @@ function handleError(
 // shape consumed by the processor's frontend_errors pipeline. `revision` is
 // the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
 // site_id + revision); without it stacks land unsymbolicated.
-function toFrontendTransaction(error: BrowserError): FrontendTransaction {
+interface TracePlacement {
+  trace_id: string;
+  parent_span_id: string;
+  service_name?: string;
+}
+
+function toFrontendTransaction(
+  error: BrowserError,
+  placement?: TracePlacement,
+): FrontendTransaction {
   return {
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
+    trace_id: placement?.trace_id,
+    parent_span_id: placement?.parent_span_id,
+    service_name: placement?.service_name,
     // The action groups the errors. A template such as "/users/:id" prevents
     // one error group for each ID in the URL.
-    action: getRouteTemplate() || stripTrailingSlash(location.pathname),
+    action: getRouteAction(),
     revision: error.app_version,
     error: {
       name: error.error_class || "Error",

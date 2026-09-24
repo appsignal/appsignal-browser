@@ -20,12 +20,23 @@ vi.mock("./breadcrumbs.js", () => ({
   getErrorBreadcrumbs: vi.fn(() => []),
 }));
 
-// getRouteTemplate is the only thing errors.ts pulls from vitals; mock it so
+// getRouteAction is the only thing errors.ts pulls from vitals; mock it so
 // the route-template grouping is controllable per test without driving the
 // real vitals observers.
 const vitalsMock = vi.hoisted(() => ({ routeTemplate: "" }));
 vi.mock("./vitals.js", () => ({
-  getRouteTemplate: () => vitalsMock.routeTemplate,
+  // Mirrors the real getRouteAction, trailing-slash normalisation included.
+  getRouteAction: () =>
+    vitalsMock.routeTemplate ||
+    (location.pathname.length > 1
+      ? location.pathname.replace(/\/+$/, "") || "/"
+      : location.pathname),
+}));
+
+vi.mock("./tracing.js", () => ({
+  recordException: vi.fn(),
+  getTraceContext: vi.fn(() => undefined),
+  randomSpanId: vi.fn(() => "0".repeat(16)),
 }));
 
 vi.mock("./session.js", () => ({
