@@ -11,7 +11,7 @@ import {
   clearBreadcrumbs,
 } from "./breadcrumbs.js";
 import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
-import { consumeTraceId } from "./tracing.js";
+import { traceIdForUrl } from "./tracing.js";
 import { timeOrigin } from "./utils.js";
 import type { ResolvedConfig } from "./types.js";
 
@@ -20,7 +20,7 @@ vi.mock("./errors.js", () => ({
 }));
 
 vi.mock("./tracing.js", () => ({
-  consumeTraceId: vi.fn(() => undefined),
+  traceIdForUrl: vi.fn(() => undefined),
 }));
 
 const defaultBreadcrumbConfig: ResolvedConfig["breadcrumbs"] = {
@@ -37,8 +37,8 @@ describe("breadcrumbs", () => {
     clearBreadcrumbs();
     // Nothing else resets this mock, so a return value or a call from one test
     // would otherwise reach the next one.
-    vi.mocked(consumeTraceId).mockReset();
-    vi.mocked(consumeTraceId).mockReturnValue(undefined);
+    vi.mocked(traceIdForUrl).mockReset();
+    vi.mocked(traceIdForUrl).mockReturnValue(undefined);
   });
 
   it("stores and retrieves breadcrumbs", () => {
@@ -385,10 +385,9 @@ describe("breadcrumbs", () => {
       expect(networkCrumb!.data?.error).toBe(true);
     });
 
-    it("consumes the trace id of a cancelled request and adds no breadcrumb", async () => {
-      // A typeahead cancels on each keystroke. Not failures, but the id must
-      // still leave the queue.
-      vi.mocked(consumeTraceId).mockReturnValue("trace-from-cancelled");
+    it("adds no breadcrumb for a cancelled request", async () => {
+      // A typeahead cancels on each keystroke. Those are not failures.
+      vi.mocked(traceIdForUrl).mockReturnValue("trace-from-cancelled");
 
       initNetworkHook();
       initBreadcrumbs(
@@ -402,14 +401,11 @@ describe("breadcrumbs", () => {
       xhr.abort();
       await new Promise((r) => setTimeout(r, 20));
 
-      expect(consumeTraceId).toHaveBeenCalledWith("http://example.com/api/search");
       expect(getSnapshot().filter((b) => b.category === "network")).toHaveLength(0);
     });
 
-    it("consumes the trace id on a transport failure too", async () => {
-      // pendingTraces is a FIFO keyed by URL, so an id left there is claimed
-      // by the next request to that URL.
-      vi.mocked(consumeTraceId).mockReturnValue("trace-from-failed-request");
+    it("keeps the trace id on a transport failure", async () => {
+      vi.mocked(traceIdForUrl).mockReturnValue("trace-from-failed-request");
 
       window.fetch = async () => {
         throw new TypeError("Network error");
@@ -424,7 +420,7 @@ describe("breadcrumbs", () => {
       await window.fetch("http://example.com/api/down").catch(() => {});
       await new Promise((r) => setTimeout(r, 50));
 
-      expect(consumeTraceId).toHaveBeenCalledWith("http://example.com/api/down");
+      expect(traceIdForUrl).toHaveBeenCalledWith("http://example.com/api/down");
 
       const breadcrumb = getSnapshot().find((b) => b.category === "network");
       expect(breadcrumb!.data?.error).toBe(true);
