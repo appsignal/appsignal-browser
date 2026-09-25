@@ -780,6 +780,21 @@ describe("errors in a trace", () => {
   const payloads = () =>
     sendErrorMock.mock.calls.map((call) => call[0] as FrontendTransaction);
 
+  it("names the browser as a service", () => {
+    fireError("Test error");
+
+    expect(payloads()[0].service_name).toBe("Browser");
+  });
+
+  it("takes the host's service name when it sets one", () => {
+    destroyErrors();
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, undefined, "Checkout UI");
+
+    fireError("Test error");
+
+    expect(payloads()[0].service_name).toBe("Checkout UI");
+  });
+
   it("carries no trace when nothing propagated one", () => {
     fireError("Test error");
 

@@ -230,6 +230,15 @@ describe("SDK integration", () => {
     expect(body.error.message).toBe("manual error");
   });
 
+  it("the host's serviceName reaches the error payload", () => {
+    init({ key: "test-key", serviceName: "Checkout UI" });
+
+    captureError(new Error("manual error"));
+
+    const errorPayloads = sentPayloads.filter(p => p.url.includes("/ingest/browser/errors"));
+    expect(JSON.parse(errorPayloads[0].body).service_name).toBe("Checkout UI");
+  });
+
   it("endSession rotates session_id and clears user between flushes", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is
