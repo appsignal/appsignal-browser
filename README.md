@@ -40,6 +40,8 @@ interface BrowserConfig {
   active?: boolean;      // default: true — false makes init() and every public
                          // method a no-op, so call sites need no guarding
   appVersion?: string;   // Release tag, commit SHA, or deploy ID
+  serviceName?: string;  // default: "Browser" — this frontend's name in traces;
+                         // set one per frontend when you run several
 
   // Drop with null, mutate to redact. Both run before any buffering,
   // and neither can be `async` — a Promise return is not awaited.

@@ -12,6 +12,10 @@ export interface BrowserConfig {
    * `active: process.env.NODE_ENV === "production"`. */
   active?: boolean;
   appVersion?: string;
+  /** The name of this frontend as a service in traces. Defaults to "Browser".
+   * Set it when one organization runs several frontends, so each one gets its
+   * own node in the service map. Sent on every error. */
+  serviceName?: string;
   user?: UserContext;
   /** Inspect or modify each error at the entry point, before the SDK adds an
    * error breadcrumb, records `lastErrorTimestamp`, or runs deduplication.
@@ -109,7 +113,10 @@ export interface PrivacyDomConfig {
 /** Fully-resolved config (every field present) — the shape modules see
  * after defaults are merged with the user's input. Distinct from
  * BrowserConfig because that has Partial groups for ergonomic init() calls. */
+export const DEFAULT_SERVICE_NAME = "Browser";
+
 export interface ResolvedConfig {
+  serviceName: string;
   errors: Required<ErrorsConfig>;
   breadcrumbs: Required<BreadcrumbsConfig>;
   session: Required<SessionConfig>;
@@ -121,6 +128,7 @@ export interface ResolvedConfig {
 }
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
+  serviceName: DEFAULT_SERVICE_NAME,
   errors: { enabled: true, sampleRate: 1.0 },
   breadcrumbs: {
     network: true,
@@ -143,6 +151,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
 export function resolveConfig(input: BrowserConfig): ResolvedConfig {
   const d = DEFAULT_CONFIG;
   return {
+    serviceName: input.serviceName?.trim() || d.serviceName,
     errors: { ...d.errors, ...input.errors },
     breadcrumbs: { ...d.breadcrumbs, ...input.breadcrumbs },
     session: { ...d.session, ...input.session },
@@ -241,8 +250,22 @@ export interface BrowserError {
  * (`onErrorReported`) still want the richer internal shape — only the
  * network format follows this. */
 export interface FrontendTransaction {
+  /** The trace of the request the error followed, when one propagated a
+   * `traceparent` recently. The backend spans of that request point at
+   * `span_id`, so an error carrying it becomes their parent. */
+  trace_id?: string;
+  /** The span the request's `traceparent` promised. The error takes it. */
+  span_id?: string;
+  /** Set on a second error after the same request, which hangs off the first. */
+  parent_span_id?: string;
+  /** The request's start, in unix seconds. Sent with `span_id` so the span
+   * covers the request rather than the instant the error happened. */
+  start_time?: number;
   /** Unix seconds (not milliseconds). */
   timestamp: number;
+  /** Names the frontend among the services of a trace. See
+   * `BrowserConfig.serviceName`. */
+  service_name: string;
   namespace: "browser";
   /** Route template if known, else `location.pathname`. */
   action: string;

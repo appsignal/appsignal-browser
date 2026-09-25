@@ -6,10 +6,13 @@ import type {
   ResolvedConfig,
   TransactionBreadcrumb,
 } from "./types.js";
+import { DEFAULT_SERVICE_NAME } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
+import { claimErrorTrace } from "./tracing.js";
+import type { ErrorTrace } from "./tracing.js";
 import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
@@ -28,6 +31,7 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
+let serviceName: string = DEFAULT_SERVICE_NAME;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 // Query-param allowlist for scrubbing URLs that ride the error payload. The
 // errors module captures `location.href` for `environment.url`; without this it
@@ -80,12 +84,14 @@ export function initErrors(
   queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
+  service: string = DEFAULT_SERVICE_NAME,
 ): void {
   destroyErrors();
 
   config = resolved;
   allowlist = queryParamsAllowlist;
   appVersion = version;
+  serviceName = service;
   beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
@@ -137,6 +143,7 @@ export function destroyErrors(): void {
   rateWindowCount = 0;
   lastErrorTimestamp = 0;
   errorListeners.length = 0;
+  serviceName = DEFAULT_SERVICE_NAME;
 }
 
 /** Report an error through the full pipeline. Used by captureError for framework plugins. */
@@ -241,7 +248,7 @@ function handleError(
     ...effective,
   };
 
-  sendError(toFrontendTransaction(payload));
+  sendError(toFrontendTransaction(payload, claimErrorTrace()));
 
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)
@@ -265,8 +272,11 @@ function handleError(
 // shape consumed by the processor's frontend_errors pipeline. `revision` is
 // the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
 // site_id + revision); without it stacks land unsymbolicated.
-function toFrontendTransaction(error: BrowserError): FrontendTransaction {
+function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): FrontendTransaction {
   return {
+    // Absent when no recent request propagated a trace. The server then gives
+    // the error a trace of its own, as it does for every other integration.
+    ...trace,
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
@@ -274,6 +284,7 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // one error group for each ID in the URL.
     action: getRouteTemplate() || stripTrailingSlash(location.pathname),
     revision: error.app_version,
+    service_name: serviceName,
     error: {
       name: error.error_class || "Error",
       message: error.message,
