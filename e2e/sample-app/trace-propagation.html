@@ -22,6 +22,7 @@
        <code>host&nbsp;+&nbsp;pathname</code>.</p>
 
     <button id="trigger-fetch">fetch /api/echo</button>
+    <button id="trigger-error">throw an error</button>
     <pre id="status">SDK loading…</pre>
 
     <script src="/dist/browser.umd.js"></script>
@@ -39,6 +40,12 @@
 
       document.getElementById("trigger-fetch").addEventListener("click", function () {
         fetch("/api/echo");
+      });
+
+      document.getElementById("trigger-error").addEventListener("click", function () {
+        setTimeout(function () {
+          throw new Error("checkout failed");
+        }, 0);
       });
     </script>
   </body>

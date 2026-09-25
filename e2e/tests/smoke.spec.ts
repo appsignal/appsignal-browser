@@ -7,6 +7,7 @@ import {
   reset,
   flush,
   ingestEvents,
+  ingestErrors,
   pollFor,
   type CapturedApi,
 } from "../helpers.js";
@@ -86,4 +87,33 @@ test("tracePropagationTargets injects traceparent and the breadcrumb attaches th
 
   expect(joined.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
   expect(joined.traceIdOnBreadcrumb).toBe(joined.traceIdFromHeader);
+});
+
+test("the error takes the span the request's traceparent promised", async ({ page, request }) => {
+  // The backend span of the request points at the traceparent's second id.
+  // Nothing in the browser sends a span with that id until an error does, so
+  // this agreement is what puts the error and the backend in one trace.
+  await page.goto("/trace-propagation.html");
+  await page.click("#trigger-fetch");
+  await page.click("#trigger-error");
+
+  const joined = await pollFor(request, (items) => {
+    const api = items.find(
+      (i): i is CapturedApi => i.kind === "api" && i.path === "/api/echo",
+    );
+    const traceparent = api?.headers.traceparent;
+    const error = ingestErrors(items).find((e) =>
+      String(e.message).includes("checkout failed"),
+    );
+    if (!traceparent || !error) return null;
+    return { traceparent, error };
+  });
+
+  const [, traceIdFromHeader, spanIdFromHeader] = joined.traceparent.split("-");
+  expect(joined.error.trace_id).toBe(traceIdFromHeader);
+  expect(joined.error.span_id).toBe(spanIdFromHeader);
+  // The span covers the request, so the backend spans sit inside it.
+  expect(joined.error.start_time as number).toBeLessThanOrEqual(
+    joined.error.timestamp as number,
+  );
 });

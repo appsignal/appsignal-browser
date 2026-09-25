@@ -51,6 +51,28 @@ class KeyedQueue<V> {
 
 const pendingTraces = new KeyedQueue<string>(200);
 
+// The identity of the last request that carried a traceparent. A traceparent
+// promises a span with that ID exists, and nothing in the browser sends one, so
+// an error that follows the request takes the ID as its own and the promise
+// comes true. The error then holds the place the backend spans of that request
+// point at.
+let lastPropagated: { traceId: string; spanId: string; startTime: number; claimed: boolean } | null = null;
+
+// An error much later than the request has nothing to do with it. Ten seconds
+// covers a response the host is still rendering, and little else.
+const MAX_ERROR_DELAY_MS = 10_000;
+
+export interface ErrorTrace {
+  trace_id: string;
+  /** Set on the error that takes the request's promised span. */
+  span_id?: string;
+  /** Set on a second error after the same request, which hangs off the first. */
+  parent_span_id?: string;
+  /** Unix seconds. The request's start, so the span covers the request it
+   * claims rather than the instant the error happened. */
+  start_time?: number;
+}
+
 export function initTracing(tracePropagationTargets: string[]): void {
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
@@ -61,7 +83,29 @@ export function initTracing(tracePropagationTargets: string[]): void {
     const spanId = randomHex(8);
     pendingTraces.push(ctx.url, traceId);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+    lastPropagated = { traceId, spanId, startTime: Date.now(), claimed: false };
   });
+}
+
+/** Trace identity for an error that is about to ship, or undefined when no
+ * recent request propagated one. The error joins the trace of the request it
+ * followed, which is a guess: the request whose response the host was handling
+ * is usually the last one, and with several in flight it is the last to start.
+ * A second error after the same request hangs off the first. */
+export function claimErrorTrace(): ErrorTrace | undefined {
+  if (!lastPropagated) return undefined;
+  if (Date.now() - lastPropagated.startTime > MAX_ERROR_DELAY_MS) return undefined;
+
+  const { traceId, spanId, startTime, claimed } = lastPropagated;
+  if (claimed) return { trace_id: traceId, parent_span_id: spanId };
+
+  lastPropagated.claimed = true;
+  return {
+    trace_id: traceId,
+    span_id: spanId,
+    // Unix seconds, like the transaction's own timestamp.
+    start_time: Math.floor(startTime / 1000),
+  };
 }
 
 /** Get and consume the trace ID generated for a request URL. FIFO per URL. */
@@ -76,6 +120,7 @@ export function destroyTracing(): void {
   }
   targets = [];
   pendingTraces.clear();
+  lastPropagated = null;
 }
 
 function shouldPropagate(url: string): boolean {

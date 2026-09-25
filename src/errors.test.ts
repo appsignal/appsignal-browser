@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   initErrors,
   destroyErrors,
@@ -9,6 +9,8 @@ import {
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
 import * as session from "./session.js";
+import { initTracing, destroyTracing } from "./tracing.js";
+import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
 import type { Breadcrumb, FrontendTransaction, IncomingError } from "./types.js";
 
 vi.mock("./transport.js", () => ({
@@ -752,5 +754,87 @@ describe("errors", () => {
 
     expect(sendErrorMock).toHaveBeenCalledTimes(1);
     expect(sendErrorMock.mock.calls[0][0].error.message).toBe("real failure");
+  });
+});
+
+describe("errors in a trace", () => {
+  const originalFetch = window.fetch;
+
+  beforeEach(() => {
+    destroyErrors();
+    destroyTracing();
+    destroyNetworkHook();
+    sendErrorMock.mockClear();
+    getErrorBreadcrumbsMock.mockReturnValue([]);
+    getTagsMock.mockReturnValue({});
+    window.fetch = async () => new Response();
+    initErrors({ enabled: true, sampleRate: 1.0 }, []);
+  });
+
+  afterEach(() => {
+    destroyTracing();
+    destroyNetworkHook();
+    window.fetch = originalFetch;
+  });
+
+  const payloads = () =>
+    sendErrorMock.mock.calls.map((call) => call[0] as FrontendTransaction);
+
+  it("carries no trace when nothing propagated one", () => {
+    fireError("Test error");
+
+    const [payload] = payloads();
+    expect(payload.trace_id).toBeUndefined();
+    expect(payload.span_id).toBeUndefined();
+    expect(payload.start_time).toBeUndefined();
+  });
+
+  it("takes the span the request it followed promised", async () => {
+    // The server builds the error's span from these, so the backend spans of
+    // that request get the parent their traceparent named.
+    initNetworkHook();
+    initTracing(["localhost/**"]);
+    await window.fetch("http://localhost/api/orders");
+
+    fireError("Test error");
+
+    const [payload] = payloads();
+    expect(payload.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(payload.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(payload.start_time).toBeLessThanOrEqual(payload.timestamp);
+    expect(payload.parent_span_id).toBeUndefined();
+  });
+
+  it("hangs a second error off the first", async () => {
+    initNetworkHook();
+    initTracing(["localhost/**"]);
+    await window.fetch("http://localhost/api/orders");
+
+    fireError("First error");
+    fireError("Second error");
+
+    const [first, second] = payloads();
+    expect(second.trace_id).toBe(first.trace_id);
+    expect(second.parent_span_id).toBe(first.span_id);
+    expect(second.span_id).toBeUndefined();
+  });
+
+  it("leaves a dropped error out of the trace", async () => {
+    // beforeError returning null drops the error entirely, so it must not take
+    // the request's span with it.
+    destroyErrors();
+    initErrors({ enabled: true, sampleRate: 1.0 }, [], undefined, (e) =>
+      e.message === "dropped" ? null : e,
+    );
+    initNetworkHook();
+    initTracing(["localhost/**"]);
+    await window.fetch("http://localhost/api/orders");
+
+    fireError("dropped");
+    fireError("kept");
+
+    const [kept] = payloads();
+    expect(kept.error.message).toBe("kept");
+    expect(kept.span_id).toMatch(/^[0-9a-f]{16}$/);
   });
 });

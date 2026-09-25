@@ -241,6 +241,17 @@ export interface BrowserError {
  * (`onErrorReported`) still want the richer internal shape — only the
  * network format follows this. */
 export interface FrontendTransaction {
+  /** The trace of the request the error followed, when one propagated a
+   * `traceparent` recently. The backend spans of that request point at
+   * `span_id`, so an error carrying it becomes their parent. */
+  trace_id?: string;
+  /** The span the request's `traceparent` promised. The error takes it. */
+  span_id?: string;
+  /** Set on a second error after the same request, which hangs off the first. */
+  parent_span_id?: string;
+  /** The request's start, in unix seconds. Sent with `span_id` so the span
+   * covers the request rather than the instant the error happened. */
+  start_time?: number;
   /** Unix seconds (not milliseconds). */
   timestamp: number;
   namespace: "browser";

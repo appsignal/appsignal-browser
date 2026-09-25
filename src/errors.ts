@@ -10,6 +10,8 @@ import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
+import { claimErrorTrace } from "./tracing.js";
+import type { ErrorTrace } from "./tracing.js";
 import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
@@ -241,7 +243,7 @@ function handleError(
     ...effective,
   };
 
-  sendError(toFrontendTransaction(payload));
+  sendError(toFrontendTransaction(payload, claimErrorTrace()));
 
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)
@@ -265,8 +267,11 @@ function handleError(
 // shape consumed by the processor's frontend_errors pipeline. `revision` is
 // the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
 // site_id + revision); without it stacks land unsymbolicated.
-function toFrontendTransaction(error: BrowserError): FrontendTransaction {
+function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): FrontendTransaction {
   return {
+    // Absent when no recent request propagated a trace. The server then gives
+    // the error a trace of its own, as it does for every other integration.
+    ...trace,
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
