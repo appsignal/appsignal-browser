@@ -4,16 +4,6 @@ import { onBeforeRequest, type RequestResult } from "./network-hook.js";
 let targets: string[] = [];
 let unregister: (() => void) | null = null;
 
-/** The ids a request put in its `traceparent` header. They are kept on the
- * request itself, so whatever reads them later gets the ids of that request
- * and not of another one to the same URL. */
-interface PropagatedRequest {
-  traceId: string;
-  spanId: string;
-}
-
-const REQUEST_KEY = "appsignal.propagated";
-
 export function initTracing(tracePropagationTargets: string[]): void {
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
@@ -23,8 +13,9 @@ export function initTracing(tracePropagationTargets: string[]): void {
     const traceId = randomHex(16);
     const spanId = randomHex(8);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
-    const request: PropagatedRequest = { traceId, spanId };
-    ctx.data[REQUEST_KEY] = request;
+    // Kept on the request itself, so whatever reads it later gets the ids of
+    // that request and not of another one to the same URL.
+    ctx.trace = { traceId, spanId };
   });
 }
 
@@ -32,7 +23,7 @@ export function initTracing(tracePropagationTargets: string[]): void {
  * It comes from the request itself, so two requests to one URL that answer in
  * either order each report their own. */
 export function traceIdForRequest(result: RequestResult): string | undefined {
-  return (result.data[REQUEST_KEY] as PropagatedRequest | undefined)?.traceId;
+  return result.trace?.traceId;
 }
 
 export function destroyTracing(): void {

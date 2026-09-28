@@ -13,9 +13,15 @@ export interface RequestContext {
   /** Mutable headers. Before-listeners may add or replace entries; the
    * resulting Headers object is applied to the outgoing request. */
   headers: Headers;
-  /** Shared with the RequestResult of the same request, so a before-listener
-   * can leave a value that its after-listener reads. */
-  data: Record<string, unknown>;
+  /** Set by a before-listener that propagates trace context. The
+   * RequestResult of the same request carries it back. */
+  trace?: PropagatedTrace;
+}
+
+/** The ids a request put in its `traceparent` header. */
+export interface PropagatedTrace {
+  traceId: string;
+  spanId: string;
 }
 
 export interface RequestResult {
@@ -37,8 +43,8 @@ export interface RequestResult {
   response?: Response;
   /** Set for XHR responses. */
   xhr?: XMLHttpRequest;
-  /** The object the before-listeners got as RequestContext.data. */
-  data: Record<string, unknown>;
+  /** What a before-listener set on the RequestContext. */
+  trace?: PropagatedTrace;
 }
 
 export type BeforeRequestListener = (ctx: RequestContext) => void;
@@ -124,7 +130,7 @@ function patchFetch(): void {
     const method =
       (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
     const startTime = Date.now();
-    const data: Record<string, unknown> = {};
+    let trace: PropagatedTrace | undefined;
 
     // Default path: no before-listeners (tracing is the only one, and only
     // when tracePropagationTargets is configured). Pass `init` straight
@@ -140,10 +146,11 @@ function patchFetch(): void {
       const headers = new Headers(input instanceof Request ? input.headers : undefined);
       if (init?.headers) new Headers(init.headers).forEach((v, k) => headers.set(k, v));
 
-      const ctx: RequestContext = { url, method, headers, data };
+      const ctx: RequestContext = { url, method, headers };
       for (const l of beforeListeners) {
         try { l(ctx); } catch { /* never let one listener break the chain */ }
       }
+      trace = ctx.trace;
       finalInit = { ...init, headers };
     }
 
@@ -157,7 +164,7 @@ function patchFetch(): void {
         status: response.status,
         error: false,
         response,
-        data,
+        trace,
       };
       for (const l of afterListeners) {
         try { l(result); } catch { /* swallow */ }
@@ -173,7 +180,7 @@ function patchFetch(): void {
         endTime: Date.now(),
         error: !aborted,
         aborted,
-        data,
+        trace,
       };
       for (const l of afterListeners) {
         try { l(result); } catch { /* swallow */ }
@@ -195,7 +202,7 @@ type TaggedXhr = XMLHttpRequest & {
     method: string;
     startTime: number;
     aborted?: boolean;
-    data: Record<string, unknown>;
+    trace?: PropagatedTrace;
   } | null;
 };
 
@@ -214,7 +221,7 @@ function emitXhr(tagged: TaggedXhr, error: boolean): void {
     error: error && !aborted,
     aborted,
     xhr: tagged,
-    data: pending.data,
+    trace: pending.trace,
   };
   if (!error) result.status = tagged.status;
   for (const l of afterListeners) {
@@ -296,16 +303,17 @@ function patchXhr(): void {
     if (!url) return origXhrSend.call(this, body);
 
     hookXhr(xhr);
-    const data: Record<string, unknown> = {};
     const previous = xhr._ahPending;
-    xhr._ahPending = { url, method, startTime: Date.now(), data };
+    const pending: NonNullable<TaggedXhr["_ahPending"]> = { url, method, startTime: Date.now() };
+    xhr._ahPending = pending;
     unreportedXhrs.add(xhr);
     const headers = new Headers();
 
-    const ctx: RequestContext = { url, method, headers, data };
+    const ctx: RequestContext = { url, method, headers };
     for (const l of beforeListeners) {
       try { l(ctx); } catch { /* swallow */ }
     }
+    pending.trace = ctx.trace;
 
     // Apply headers contributed by before-listeners. setRequestHeader can
     // throw on forbidden headers (Cookie, Host, etc.); ignore those.

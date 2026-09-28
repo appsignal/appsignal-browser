@@ -6,7 +6,7 @@ describe("tracing", () => {
   describe("traceIdForRequest", () => {
     it("returns undefined for a request that propagated nothing", () => {
       expect(
-        traceIdForRequest({ url: "http://example.com/api", method: "GET", startTime: 0, endTime: 0, error: false, data: {} }),
+        traceIdForRequest({ url: "http://example.com/api", method: "GET", startTime: 0, endTime: 0, error: false }),
       ).toBeUndefined();
     });
   });

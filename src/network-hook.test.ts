@@ -182,9 +182,9 @@ describe("network-hook teardown that the browser refuses", () => {
 
   it("keeps the in-flight request's record when a second send() throws", () => {
     let sends = 0;
-    onBeforeRequest((ctx) => { ctx.data.send = ++sends; });
+    onBeforeRequest((ctx) => { ctx.trace = { traceId: String(++sends), spanId: "s" }; });
     const reported: unknown[] = [];
-    onAfterRequest((result) => { reported.push(result.data.send); });
+    onAfterRequest((result) => { reported.push(result.trace?.traceId); });
 
     const xhr = new XMLHttpRequest();
     xhr.open("GET", "https://example.com/first");
@@ -194,7 +194,7 @@ describe("network-hook teardown that the browser refuses", () => {
     finish(xhr);
     xhr.dispatchEvent(new Event("readystatechange"));
 
-    expect(reported).toEqual([1]);
+    expect(reported).toEqual(["1"]);
   });
 
   it("reports once for each send, whichever event arrives first", () => {
