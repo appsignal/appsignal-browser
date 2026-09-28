@@ -4,10 +4,10 @@ import {
   destroyNetworkHook,
   onBeforeRequest,
   onAfterRequest,
+  reportFinishedXhrs,
 } from "./network-hook.js";
-import { initTracing, consumeTraceId, destroyTracing } from "./tracing.js";
 
-// Capture what origFetch actually receives so we can assert on the headers
+// Capture what underlyingFetch actually receives so we can assert on the headers
 // the wrapper forwards. The real network never runs.
 let lastInput: RequestInfo | URL;
 let lastInit: RequestInit | undefined;
@@ -34,6 +34,18 @@ beforeEach(() => {
 afterEach(() => {
   destroyNetworkHook();
 });
+
+/** Make an XHR look finished, as jsdom never answers one on its own. */
+function finish(xhr: XMLHttpRequest, status = 200): void {
+  Object.defineProperty(xhr, "readyState", { value: 4, configurable: true });
+  Object.defineProperty(xhr, "status", { value: status, configurable: true });
+}
+
+/** Undo `finish`, so the object reports its real state again. */
+function unfinish(xhr: XMLHttpRequest): void {
+  delete (xhr as { readyState?: number }).readyState;
+  delete (xhr as { status?: number }).status;
+}
 
 describe("network-hook fetch header preservation", () => {
   it("preserves headers carried on a Request input (no init)", async () => {
@@ -117,25 +129,72 @@ describe("network-hook teardown that the browser refuses", () => {
     xhr.open("GET", "https://example.com/api/thing");
     xhr.addEventListener("load", () => { order.push("host"); });
     xhr.send();
+    finish(xhr);
     xhr.dispatchEvent(new Event("load"));
 
     expect(order).toEqual(["sdk", "host"]);
   });
 
-  it("reports the request that send() started, not a later open()", () => {
-    // A poll loop can re-open the object before the previous load arrives.
-    const seen: { url: string; status?: number }[] = [];
-    onAfterRequest((result) => { seen.push({ url: result.url, status: result.status }); });
+  it("does not report the next request when the host sends it from onload", () => {
+    // A poll loop sends the next request from the previous one's load handler.
+    // The SDK's own load listener runs after it, and must not report the new
+    // request, which has not been answered yet.
+    const seen: string[] = [];
+    onAfterRequest((result) => { seen.push(result.url); });
+
+    const xhr = new XMLHttpRequest();
+    xhr.onload = () => {
+      unfinish(xhr);
+      xhr.open("GET", "https://example.com/second");
+      xhr.send();
+    };
+    xhr.open("GET", "https://example.com/first");
+    xhr.send();
+    finish(xhr);
+    xhr.dispatchEvent(new Event("readystatechange"));
+    xhr.dispatchEvent(new Event("load"));
+
+    expect(seen).toEqual(["https://example.com/first"]);
+  });
+
+  it("reports a finished XHR early, for a host handler that runs before the SDK's", () => {
+    // A handler set before open() runs first. Code in it that asks for the
+    // request it is handling must find that request already reported.
+    const seen: string[] = [];
+    onAfterRequest((result) => { seen.push(result.url); });
+    let seenInHandler: string[] = [];
+
+    const xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== 4) return;
+      reportFinishedXhrs();
+      seenInHandler = [...seen];
+    };
+    xhr.open("GET", "https://example.com/users");
+    xhr.send();
+    finish(xhr);
+    xhr.dispatchEvent(new Event("readystatechange"));
+
+    expect(seenInHandler).toEqual(["https://example.com/users"]);
+    // Once, although the SDK's own listener ran after the early report.
+    expect(seen).toEqual(["https://example.com/users"]);
+  });
+
+  it("keeps the in-flight request's record when a second send() throws", () => {
+    let sends = 0;
+    onBeforeRequest((ctx) => { ctx.trace = { traceId: String(++sends), spanId: "s" }; });
+    const reported: unknown[] = [];
+    onAfterRequest((result) => { reported.push(result.trace?.traceId); });
 
     const xhr = new XMLHttpRequest();
     xhr.open("GET", "https://example.com/first");
     xhr.send();
-    // The host starts the next request before the first one reports.
-    xhr.open("GET", "https://example.com/second");
-    xhr.dispatchEvent(new Event("load"));
+    // The object is still sending, so the native send() refuses this one.
+    expect(() => xhr.send()).toThrow();
+    finish(xhr);
+    xhr.dispatchEvent(new Event("readystatechange"));
 
-    expect(seen).toHaveLength(1);
-    expect(seen[0].url).toBe("https://example.com/first");
+    expect(reported).toEqual(["1"]);
   });
 
   it("reports once for each send, whichever event arrives first", () => {
@@ -146,6 +205,7 @@ describe("network-hook teardown that the browser refuses", () => {
     const xhr = new XMLHttpRequest();
     xhr.open("GET", "https://example.com/once");
     xhr.send();
+    finish(xhr);
     xhr.dispatchEvent(new Event("load"));
     xhr.dispatchEvent(new Event("error"));
 

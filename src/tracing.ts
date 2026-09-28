@@ -1,55 +1,8 @@
 import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
-import { onBeforeRequest } from "./network-hook.js";
+import { onBeforeRequest, type RequestResult } from "./network-hook.js";
 
 let targets: string[] = [];
 let unregister: (() => void) | null = null;
-
-// FIFO queue keyed by URL, with a global cap on total entries. Concurrent
-// same-URL fetches each push their own trace_id; the breadcrumb wrapper
-// shifts them in the order they were recorded. The global cap bounds memory
-// when a request's breadcrumb never lands (cross-origin opaque responses,
-// fire-and-forget XHR, etc.).
-class KeyedQueue<V> {
-  private readonly buckets = new Map<string, V[]>();
-  private total = 0;
-
-  constructor(private readonly maxTotal: number) {}
-
-  push(key: string, value: V): void {
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      bucket = [];
-      this.buckets.set(key, bucket);
-    }
-    bucket.push(value);
-    this.total++;
-    if (this.total > this.maxTotal) this.evictOldest();
-  }
-
-  shift(key: string): V | undefined {
-    const bucket = this.buckets.get(key);
-    if (!bucket || bucket.length === 0) return undefined;
-    const value = bucket.shift();
-    this.total--;
-    if (bucket.length === 0) this.buckets.delete(key);
-    return value;
-  }
-
-  clear(): void {
-    this.buckets.clear();
-    this.total = 0;
-  }
-
-  private evictOldest(): void {
-    // Map iteration order is insertion order; the first key is the oldest
-    // bucket, and shift() drops the oldest entry within it.
-    const oldestKey = this.buckets.keys().next().value;
-    if (oldestKey === undefined) return;
-    this.shift(oldestKey);
-  }
-}
-
-const pendingTraces = new KeyedQueue<string>(200);
 
 export function initTracing(tracePropagationTargets: string[]): void {
   targets = tracePropagationTargets;
@@ -59,14 +12,18 @@ export function initTracing(tracePropagationTargets: string[]): void {
     if (!shouldPropagate(ctx.url)) return;
     const traceId = randomHex(16);
     const spanId = randomHex(8);
-    pendingTraces.push(ctx.url, traceId);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+    // Kept on the request itself, so whatever reads it later gets the ids of
+    // that request and not of another one to the same URL.
+    ctx.trace = { traceId, spanId };
   });
 }
 
-/** Get and consume the trace ID generated for a request URL. FIFO per URL. */
-export function consumeTraceId(url: string): string | undefined {
-  return pendingTraces.shift(url);
+/** The trace ID a request propagated, or undefined when it propagated none.
+ * It comes from the request itself, so two requests to one URL that answer in
+ * either order each report their own. */
+export function traceIdForRequest(result: RequestResult): string | undefined {
+  return result.trace?.traceId;
 }
 
 export function destroyTracing(): void {
@@ -75,7 +32,6 @@ export function destroyTracing(): void {
     unregister = null;
   }
   targets = [];
-  pendingTraces.clear();
 }
 
 function shouldPropagate(url: string): boolean {
