@@ -58,7 +58,7 @@ let origFetch: typeof window.fetch;
 let origXhrOpen: typeof XMLHttpRequest.prototype.open;
 let origXhrSend: typeof XMLHttpRequest.prototype.send;
 let origXhrAbort: typeof XMLHttpRequest.prototype.abort;
-const unreportedXhrs = new Set<TaggedXhr>();
+const xhrsToReport = new Set<WatchedXhr>();
 
 /** Register a before-request listener. Returns an unregister fn. */
 export function onBeforeRequest(fn: BeforeRequestListener): () => void {
@@ -101,7 +101,7 @@ export function destroyNetworkHook(): void {
   // which would dispatch every request twice and grow with each cycle.
   beforeListeners = [];
   afterListeners = [];
-  unreportedXhrs.clear();
+  xhrsToReport.clear();
   let restored = true;
   if (origFetch) {
     restored = attemptCleanup("fetch patch", () => { window.fetch = origFetch; }) && restored;
@@ -190,10 +190,10 @@ function patchFetch(): void {
   };
 }
 
-type TaggedXhr = XMLHttpRequest & {
+type WatchedXhr = XMLHttpRequest & {
   _ahMethod?: string;
   _ahUrl?: string;
-  _ahHooked?: boolean;
+  _appsignalWatched?: boolean;
   // The request that send() started. The listeners take this record, so a host
   // that opens the object again for the next request cannot change the report
   // of the request that is still in flight.
@@ -206,24 +206,24 @@ type TaggedXhr = XMLHttpRequest & {
   } | null;
 };
 
-function emitXhr(tagged: TaggedXhr, error: boolean): void {
-  const pending = tagged._ahPending;
+function reportXhr(xhr: WatchedXhr, failed: boolean): void {
+  const pending = xhr._ahPending;
   if (!pending) return;
   // One report per send(), whichever event arrives first.
-  tagged._ahPending = null;
-  unreportedXhrs.delete(tagged);
+  xhr._ahPending = null;
+  xhrsToReport.delete(xhr);
   const aborted = pending.aborted === true;
   const result: RequestResult = {
     url: pending.url,
     method: pending.method,
     startTime: pending.startTime,
     endTime: Date.now(),
-    error: error && !aborted,
+    error: failed && !aborted,
     aborted,
-    xhr: tagged,
+    xhr,
     trace: pending.trace,
   };
-  if (!error) result.status = tagged.status;
+  if (!failed) result.status = xhr.status;
   for (const l of afterListeners) {
     try { l(result); } catch { /* swallow */ }
   }
@@ -233,32 +233,32 @@ function emitXhr(tagged: TaggedXhr, error: boolean): void {
  * handler that was set before open() runs before the SDK's listeners, so code
  * in it that needs to know the request it is handling calls this first. */
 export function reportFinishedXhrs(): void {
-  for (const xhr of unreportedXhrs) {
+  for (const xhr of xhrsToReport) {
     // status 0 at DONE is a transport failure, as in the readystatechange listener.
-    if (xhr.readyState === 4) emitXhr(xhr, xhr.status === 0);
+    if (xhr.readyState === 4) reportXhr(xhr, xhr.status === 0);
   }
 }
 
 /** Registers once per object, in open(): listeners run in registration order
  * and a host attaches between open() and send(). A host that attaches before
  * open() still wins, and reportFinishedXhrs covers that case. */
-function hookXhr(tagged: TaggedXhr): void {
-  if (tagged._ahHooked) return;
-  tagged._ahHooked = true;
+function watchXhr(xhr: WatchedXhr): void {
+  if (xhr._appsignalWatched) return;
+  xhr._appsignalWatched = true;
 
-  tagged.addEventListener("readystatechange", () => {
-    if (tagged.readyState !== 4) return;
+  xhr.addEventListener("readystatechange", () => {
+    if (xhr.readyState !== 4) return;
     // status 0 at DONE is a transport failure. abort() marks the record first,
-    // so emit reports a cancel instead.
-    emitXhr(tagged, tagged.status === 0);
+    // so reportXhr reports a cancel instead.
+    reportXhr(xhr, xhr.status === 0);
   });
   // Only at DONE: a host that sends the next request from its own load or
   // error handler has already moved the object on to that request.
-  tagged.addEventListener("load", () => {
-    if (tagged.readyState === 4) emitXhr(tagged, false);
+  xhr.addEventListener("load", () => {
+    if (xhr.readyState === 4) reportXhr(xhr, false);
   });
-  tagged.addEventListener("error", () => {
-    if (tagged.readyState === 4) emitXhr(tagged, true);
+  xhr.addEventListener("error", () => {
+    if (xhr.readyState === 4) reportXhr(xhr, true);
   });
 }
 
@@ -271,10 +271,10 @@ function patchXhr(): void {
     url: string | URL,
     ...rest: unknown[]
   ) {
-    const tagged = this as TaggedXhr;
-    tagged._ahMethod = method;
-    tagged._ahUrl = typeof url === "string" ? url : url.href;
-    hookXhr(tagged);
+    const xhr = this as WatchedXhr;
+    xhr._ahMethod = method;
+    xhr._ahUrl = typeof url === "string" ? url : url.href;
+    watchXhr(xhr);
     return origXhrOpen.call(
       this,
       method,
@@ -287,26 +287,26 @@ function patchXhr(): void {
   // failure, and fires before the `abort` event. Mark it here.
   origXhrAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
-    const tagged = this as TaggedXhr;
-    if (tagged._ahPending) tagged._ahPending.aborted = true;
+    const xhr = this as WatchedXhr;
+    if (xhr._ahPending) xhr._ahPending.aborted = true;
     return origXhrAbort.call(this);
   };
 
   XMLHttpRequest.prototype.send = function (
     body?: Document | XMLHttpRequestBodyInit | null,
   ) {
-    const xhr = this as TaggedXhr;
+    const xhr = this as WatchedXhr;
     const url = xhr._ahUrl || "";
     const method = (xhr._ahMethod || "GET").toUpperCase();
     // Opened before the SDK patched open(), so there is no url to report or
     // propagate to.
     if (!url) return origXhrSend.call(this, body);
 
-    hookXhr(xhr);
+    watchXhr(xhr);
     const previous = xhr._ahPending;
-    const pending: NonNullable<TaggedXhr["_ahPending"]> = { url, method, startTime: Date.now() };
+    const pending: NonNullable<WatchedXhr["_ahPending"]> = { url, method, startTime: Date.now() };
     xhr._ahPending = pending;
-    unreportedXhrs.add(xhr);
+    xhrsToReport.add(xhr);
     const headers = new Headers();
 
     const ctx: RequestContext = { url, method, headers };
@@ -327,7 +327,7 @@ function patchXhr(): void {
       // The native send refused this call, so the request already in flight,
       // if there is one, keeps its own record.
       xhr._ahPending = previous;
-      if (!previous) unreportedXhrs.delete(xhr);
+      if (!previous) xhrsToReport.delete(xhr);
       throw error;
     }
   };
