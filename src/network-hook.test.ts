@@ -7,7 +7,7 @@ import {
   reportFinishedXhrs,
 } from "./network-hook.js";
 
-// Capture what origFetch actually receives so we can assert on the headers
+// Capture what underlyingFetch actually receives so we can assert on the headers
 // the wrapper forwards. The real network never runs.
 let lastInput: RequestInfo | URL;
 let lastInit: RequestInit | undefined;

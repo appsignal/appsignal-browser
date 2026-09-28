@@ -1,6 +1,6 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
 import { logError, attemptCleanup } from "./utils.js";
-import { unpatchedFetch } from "./network-hook.js";
+import { fetchPastHook } from "./network-hook.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -243,7 +243,7 @@ function doFetch(body: string, attempt: number, kind: Kind): void {
   // destroyTransport() clears the base endpoint — bail out rather than fire
   // a stray fetch at the current origin with an empty key.
   if (baseEndpoint === "") return;
-  unpatchedFetch()(urlFor(kind), {
+  fetchPastHook()(urlFor(kind), {
     method: "POST",
     headers: { "Content-Type": contentTypeFor(kind) },
     body,

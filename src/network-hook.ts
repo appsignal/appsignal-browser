@@ -54,10 +54,10 @@ let beforeListeners: BeforeRequestListener[] = [];
 let afterListeners: AfterRequestListener[] = [];
 
 let installed = false;
-let origFetch: typeof window.fetch;
-let origXhrOpen: typeof XMLHttpRequest.prototype.open;
-let origXhrSend: typeof XMLHttpRequest.prototype.send;
-let origXhrAbort: typeof XMLHttpRequest.prototype.abort;
+let underlyingFetch: typeof window.fetch;
+let underlyingXhrOpen: typeof XMLHttpRequest.prototype.open;
+let underlyingXhrSend: typeof XMLHttpRequest.prototype.send;
+let underlyingXhrAbort: typeof XMLHttpRequest.prototype.abort;
 const xhrsToReport = new Set<WatchedXhr>();
 
 /** Register a before-request listener. Returns an unregister fn. */
@@ -82,8 +82,8 @@ export function onAfterRequest(fn: AfterRequestListener): () => void {
  * installed. The SDK sends its own posts through this, so they reach no
  * listener: they must not carry a traceparent, show up as a breadcrumb or
  * become the request an error joins. */
-export function unpatchedFetch(): typeof window.fetch {
-  return installed ? origFetch : window.fetch;
+export function fetchPastHook(): typeof window.fetch {
+  return installed ? underlyingFetch : window.fetch;
 }
 
 export function initNetworkHook(): void {
@@ -103,23 +103,23 @@ export function destroyNetworkHook(): void {
   afterListeners = [];
   xhrsToReport.clear();
   let restored = true;
-  if (origFetch) {
-    restored = attemptCleanup("fetch patch", () => { window.fetch = origFetch; }) && restored;
+  if (underlyingFetch) {
+    restored = attemptCleanup("fetch patch", () => { window.fetch = underlyingFetch; }) && restored;
   }
-  if (origXhrOpen) {
-    restored = attemptCleanup("xhr open patch", () => { XMLHttpRequest.prototype.open = origXhrOpen; }) && restored;
+  if (underlyingXhrOpen) {
+    restored = attemptCleanup("xhr open patch", () => { XMLHttpRequest.prototype.open = underlyingXhrOpen; }) && restored;
   }
-  if (origXhrSend) {
-    restored = attemptCleanup("xhr send patch", () => { XMLHttpRequest.prototype.send = origXhrSend; }) && restored;
+  if (underlyingXhrSend) {
+    restored = attemptCleanup("xhr send patch", () => { XMLHttpRequest.prototype.send = underlyingXhrSend; }) && restored;
   }
-  if (origXhrAbort) {
-    restored = attemptCleanup("xhr abort patch", () => { XMLHttpRequest.prototype.abort = origXhrAbort; }) && restored;
+  if (underlyingXhrAbort) {
+    restored = attemptCleanup("xhr abort patch", () => { XMLHttpRequest.prototype.abort = underlyingXhrAbort; }) && restored;
   }
   installed = !restored;
 }
 
 function patchFetch(): void {
-  origFetch = window.fetch.bind(window);
+  underlyingFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const url =
       typeof input === "string"
@@ -147,15 +147,15 @@ function patchFetch(): void {
       if (init?.headers) new Headers(init.headers).forEach((v, k) => headers.set(k, v));
 
       const ctx: RequestContext = { url, method, headers };
-      for (const l of beforeListeners) {
-        try { l(ctx); } catch { /* never let one listener break the chain */ }
+      for (const listener of beforeListeners) {
+        try { listener(ctx); } catch { /* never let one listener break the chain */ }
       }
       trace = ctx.trace;
       finalInit = { ...init, headers };
     }
 
     try {
-      const response = await origFetch(input, finalInit);
+      const response = await underlyingFetch(input, finalInit);
       const result: RequestResult = {
         url,
         method,
@@ -166,8 +166,8 @@ function patchFetch(): void {
         response,
         trace,
       };
-      for (const l of afterListeners) {
-        try { l(result); } catch { /* swallow */ }
+      for (const listener of afterListeners) {
+        try { listener(result); } catch { /* swallow */ }
       }
       return response;
     } catch (err) {
@@ -182,8 +182,8 @@ function patchFetch(): void {
         aborted,
         trace,
       };
-      for (const l of afterListeners) {
-        try { l(result); } catch { /* swallow */ }
+      for (const listener of afterListeners) {
+        try { listener(result); } catch { /* swallow */ }
       }
       throw err;
     }
@@ -191,13 +191,13 @@ function patchFetch(): void {
 }
 
 type WatchedXhr = XMLHttpRequest & {
-  _ahMethod?: string;
-  _ahUrl?: string;
+  _appsignalMethod?: string;
+  _appsignalUrl?: string;
   _appsignalWatched?: boolean;
   // The request that send() started. The listeners take this record, so a host
   // that opens the object again for the next request cannot change the report
   // of the request that is still in flight.
-  _ahPending?: {
+  _appsignalRequest?: {
     url: string;
     method: string;
     startTime: number;
@@ -207,10 +207,10 @@ type WatchedXhr = XMLHttpRequest & {
 };
 
 function reportXhr(xhr: WatchedXhr, failed: boolean): void {
-  const pending = xhr._ahPending;
+  const pending = xhr._appsignalRequest;
   if (!pending) return;
   // One report per send(), whichever event arrives first.
-  xhr._ahPending = null;
+  xhr._appsignalRequest = null;
   xhrsToReport.delete(xhr);
   const aborted = pending.aborted === true;
   const result: RequestResult = {
@@ -224,8 +224,8 @@ function reportXhr(xhr: WatchedXhr, failed: boolean): void {
     trace: pending.trace,
   };
   if (!failed) result.status = xhr.status;
-  for (const l of afterListeners) {
-    try { l(result); } catch { /* swallow */ }
+  for (const listener of afterListeners) {
+    try { listener(result); } catch { /* swallow */ }
   }
 }
 
@@ -263,8 +263,8 @@ function watchXhr(xhr: WatchedXhr): void {
 }
 
 function patchXhr(): void {
-  origXhrOpen = XMLHttpRequest.prototype.open;
-  origXhrSend = XMLHttpRequest.prototype.send;
+  underlyingXhrOpen = XMLHttpRequest.prototype.open;
+  underlyingXhrSend = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function (
     method: string,
@@ -272,10 +272,10 @@ function patchXhr(): void {
     ...rest: unknown[]
   ) {
     const xhr = this as WatchedXhr;
-    xhr._ahMethod = method;
-    xhr._ahUrl = typeof url === "string" ? url : url.href;
+    xhr._appsignalMethod = method;
+    xhr._appsignalUrl = typeof url === "string" ? url : url.href;
     watchXhr(xhr);
-    return origXhrOpen.call(
+    return underlyingXhrOpen.call(
       this,
       method,
       url,
@@ -285,33 +285,33 @@ function patchXhr(): void {
 
   // abort() reaches readyState 4 with status 0, indistinguishable from a
   // failure, and fires before the `abort` event. Mark it here.
-  origXhrAbort = XMLHttpRequest.prototype.abort;
+  underlyingXhrAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
     const xhr = this as WatchedXhr;
-    if (xhr._ahPending) xhr._ahPending.aborted = true;
-    return origXhrAbort.call(this);
+    if (xhr._appsignalRequest) xhr._appsignalRequest.aborted = true;
+    return underlyingXhrAbort.call(this);
   };
 
   XMLHttpRequest.prototype.send = function (
     body?: Document | XMLHttpRequestBodyInit | null,
   ) {
     const xhr = this as WatchedXhr;
-    const url = xhr._ahUrl || "";
-    const method = (xhr._ahMethod || "GET").toUpperCase();
+    const url = xhr._appsignalUrl || "";
+    const method = (xhr._appsignalMethod || "GET").toUpperCase();
     // Opened before the SDK patched open(), so there is no url to report or
     // propagate to.
-    if (!url) return origXhrSend.call(this, body);
+    if (!url) return underlyingXhrSend.call(this, body);
 
     watchXhr(xhr);
-    const previous = xhr._ahPending;
-    const pending: NonNullable<WatchedXhr["_ahPending"]> = { url, method, startTime: Date.now() };
-    xhr._ahPending = pending;
+    const previous = xhr._appsignalRequest;
+    const pending: NonNullable<WatchedXhr["_appsignalRequest"]> = { url, method, startTime: Date.now() };
+    xhr._appsignalRequest = pending;
     xhrsToReport.add(xhr);
     const headers = new Headers();
 
     const ctx: RequestContext = { url, method, headers };
-    for (const l of beforeListeners) {
-      try { l(ctx); } catch { /* swallow */ }
+    for (const listener of beforeListeners) {
+      try { listener(ctx); } catch { /* swallow */ }
     }
     pending.trace = ctx.trace;
 
@@ -322,11 +322,11 @@ function patchXhr(): void {
     });
 
     try {
-      return origXhrSend.call(this, body);
+      return underlyingXhrSend.call(this, body);
     } catch (error) {
       // The native send refused this call, so the request already in flight,
       // if there is one, keeps its own record.
-      xhr._ahPending = previous;
+      xhr._appsignalRequest = previous;
       if (!previous) xhrsToReport.delete(xhr);
       throw error;
     }
