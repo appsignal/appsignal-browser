@@ -230,6 +230,54 @@ describe("SDK integration", () => {
     expect(body.error.message).toBe("manual error");
   });
 
+  it("keeps the SDK's own posts out of the hook", async () => {
+    // A target that covers the whole host also covers the ingest endpoint.
+    const traceparents: (string | null)[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation((url, requestInit) => {
+      traceparents.push(new Headers(requestInit?.headers).get("traceparent"));
+      return mockFetch(url as string, requestInit);
+    });
+    init({ key: "test-key", endpoint: "http://localhost", tracePropagationTargets: ["localhost/**"] });
+
+    captureError(new Error("first"));
+    await new Promise((r) => setTimeout(r, 0));
+    captureError(new Error("second"));
+
+    expect(traceparents.every((header) => header === null)).toBe(true);
+    const errors = sentPayloads.filter((p) => p.url.includes("/ingest/browser/errors"));
+    const breadcrumbs = JSON.parse(errors[1].body).breadcrumbs as { category: string }[];
+    expect(breadcrumbs.some((b) => b.category === "network")).toBe(false);
+  });
+
+  it("gives each network breadcrumb its own request's trace id, whatever order responses arrive in", async () => {
+    const pending: ((response: Response) => void)[] = [];
+    const traceIdsSent: string[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation((url, requestInit) => {
+      if (String(url).includes("/api/search")) {
+        traceIdsSent.push(new Headers(requestInit?.headers).get("traceparent")!.split("-")[1]);
+        return new Promise<Response>((resolve) => pending.push(resolve));
+      }
+      return mockFetch(url as string, requestInit);
+    });
+    init({ key: "test-key", tracePropagationTargets: ["localhost/**"] });
+
+    const first = fetch("http://localhost/api/search");
+    const second = fetch("http://localhost/api/search");
+    // The second request answers first.
+    pending[1](new Response(null, { status: 201 }));
+    await second;
+    pending[0](new Response(null, { status: 200 }));
+    await first;
+    captureError(new Error("boom"));
+
+    const error = JSON.parse(sentPayloads.find((p) => p.url.includes("/ingest/browser/errors"))!.body);
+    const traceIdFor = (status: number) =>
+      error.breadcrumbs.find((b: { metadata: { status?: number } }) => b.metadata.status === status)
+        .metadata.trace_id;
+    expect(traceIdFor(200)).toBe(traceIdsSent[0]);
+    expect(traceIdFor(201)).toBe(traceIdsSent[1]);
+  });
+
   it("endSession rotates session_id and clears user between flushes", () => {
     // Public contract: events captured before endSession() carry session A,
     // events captured after carry a fresh session B, and user identity is

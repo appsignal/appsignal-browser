@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { initTracing, consumeTraceId, destroyTracing } from "./tracing.js";
-import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
+import { initTracing, traceIdForRequest, destroyTracing } from "./tracing.js";
+import { initNetworkHook, destroyNetworkHook, onAfterRequest } from "./network-hook.js";
 
 describe("tracing", () => {
-  describe("consumeTraceId", () => {
-    it("returns undefined when no trace was generated", () => {
-      expect(consumeTraceId("http://example.com/api")).toBeUndefined();
+  describe("traceIdForRequest", () => {
+    it("returns undefined for a request that propagated nothing", () => {
+      expect(
+        traceIdForRequest({ url: "http://example.com/api", method: "GET", startTime: 0, endTime: 0, error: false, data: {} }),
+      ).toBeUndefined();
     });
   });
 
@@ -55,31 +57,24 @@ describe("tracing", () => {
       expect(capturedHeaders?.get("traceparent")).toBeNull();
     });
 
-    it("stores trace_id for consumption by breadcrumbs", async () => {
-      window.fetch = async () => new Response();
+    it("reports the trace id a request propagated, for its breadcrumb", async () => {
+      let sent: string | undefined;
+      window.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent = new Headers(init?.headers).get("traceparent")?.split("-")[1];
+        return new Response();
+      };
 
       initNetworkHook();
       initTracing(["localhost/**"]);
+      let reported: string | undefined;
+      onAfterRequest((result) => {
+        reported = traceIdForRequest(result);
+      });
 
       await window.fetch("http://localhost/api/users");
 
-      const traceId = consumeTraceId("http://localhost/api/users");
-      expect(traceId).toMatch(/^[0-9a-f]{32}$/);
-    });
-
-    it("consumeTraceId removes the trace after first read", async () => {
-      window.fetch = async () => new Response();
-
-      initNetworkHook();
-      initTracing(["localhost/**"]);
-
-      await window.fetch("http://localhost/api/users");
-
-      const first = consumeTraceId("http://localhost/api/users");
-      const second = consumeTraceId("http://localhost/api/users");
-
-      expect(first).toBeTruthy();
-      expect(second).toBeUndefined();
+      expect(reported).toMatch(/^[0-9a-f]{32}$/);
+      expect(reported).toBe(sent);
     });
 
     it("keeps trace IDs distinct for parallel same-URL requests", async () => {
@@ -97,6 +92,11 @@ describe("tracing", () => {
       initNetworkHook();
       initTracing(["localhost/**"]);
 
+      const reported: (string | undefined)[] = [];
+      onAfterRequest((result) => {
+        reported.push(traceIdForRequest(result));
+      });
+
       const url = "http://localhost/api/poll";
       await Promise.all([window.fetch(url), window.fetch(url)]);
 
@@ -106,12 +106,7 @@ describe("tracing", () => {
       expect(sent2).toBeTruthy();
       expect(sent1).not.toBe(sent2);
 
-      const consumed1 = consumeTraceId(url);
-      const consumed2 = consumeTraceId(url);
-
-      expect(consumed1).toBeTruthy();
-      expect(consumed2).toBeTruthy();
-      expect([sent1, sent2].sort()).toEqual([consumed1, consumed2].sort());
+      expect([...reported].sort()).toEqual([sent1, sent2].sort());
     });
   });
 });
