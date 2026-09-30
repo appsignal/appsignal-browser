@@ -61,7 +61,8 @@ describe("request failure traces", () => {
     expect(reports).toHaveLength(1);
     expectIdentity(reports[0]);
     expect(reports[0]).toMatchObject({
-      service_name: "Checkout", start_time: 1_700_000_000, timestamp: 1_700_000_012,
+      service_name: "Checkout", start_time_ms: 1_700_000_000_000, duration_ms: 12_350,
+      timestamp: 1_700_000_012,
       error: { name: "HTTPError", backtrace: [] },
       params: { request: { url: "http://localhost/api/orders?page=2", method: "GET", status: 500, duration_ms: 12_350 } },
     });

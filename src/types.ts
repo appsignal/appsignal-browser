@@ -253,9 +253,12 @@ export interface ErrorTrace {
   trace_id: string;
   /** The browser span named as parent by the backend's request span. */
   span_id: string;
-  /** The request's start, in unix seconds. The span then covers the request
-   * rather than the instant the error happened. */
-  start_time: number;
+  /** The request's start, in unix milliseconds, and how long it ran. The span
+   * is built from these, so it covers the request. Milliseconds because a
+   * request is usually shorter than a second, and a span built from seconds
+   * collapses to a point and leaves the backend spans outside their parent. */
+  start_time_ms: number;
+  duration_ms: number;
 }
 
 /** Wire shape for errors POSTed to `/ingest/browser/errors`. Aligned with AppSignal's

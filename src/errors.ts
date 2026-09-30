@@ -191,20 +191,24 @@ export function reportRequestError(result: RequestResult): void {
   const url = scrubUrl(result.url, allowlist);
   const errorClass = serverError ? "HTTPError" : "TimeoutError";
   const failure = serverError ? `HTTP ${result.status}` : "timed out";
+  const durationMs = Math.max(0, result.endTime - result.startTime);
   const sent = handleError(
     `${result.method} ${url}: ${failure}`,
     undefined, undefined, undefined, undefined,
+    // The same duration rides the params, where `beforeError` can redact it.
+    // The span is built from the field below, which the hook cannot reach.
     { request: {
       url,
       method: result.method,
       ...(result.status === undefined ? {} : { status: result.status }),
-      duration_ms: Math.max(0, result.endTime - result.startTime),
+      duration_ms: durationMs,
     } },
     errorClass,
     {
       trace_id: result.trace.traceId,
       span_id: result.trace.spanId,
-      start_time: Math.floor(result.startTime / 1000),
+      start_time_ms: result.startTime,
+      duration_ms: durationMs,
     },
     result.endTime,
   );

@@ -25,7 +25,10 @@ for (const [button, name, status] of [
     const details = (joined.error.params as { request: { status?: number; duration_ms: number } }).request;
     expect(details.status).toBe(status);
     expect(details.duration_ms).toBeGreaterThanOrEqual(0);
-    expect(joined.error.start_time).toBeLessThanOrEqual(joined.error.timestamp as number);
+    // Milliseconds, so the span keeps the length of a sub-second request.
+    const startMs = joined.error.start_time_ms as number;
+    expect(startMs).toBeGreaterThan((joined.error.timestamp as number) * 1000 - 60_000);
+    expect(joined.error.duration_ms).toBe(details.duration_ms);
   });
 }
 
