@@ -2,13 +2,14 @@ import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
 import { onBeforeRequest, type RequestResult } from "./network-hook.js";
 
 let targets: string[] = [];
-let unregister: (() => void) | null = null;
+let unregisters: (() => void)[] = [];
 
 export function initTracing(tracePropagationTargets: string[]): void {
+  destroyTracing();
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
 
-  unregister = onBeforeRequest((ctx) => {
+  unregisters.push(onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
     const traceId = randomHex(16);
     const spanId = randomHex(8);
@@ -16,7 +17,7 @@ export function initTracing(tracePropagationTargets: string[]): void {
     // Kept on the request itself, so whatever reads it later gets the ids of
     // that request and not of another one to the same URL.
     ctx.trace = { traceId, spanId };
-  });
+  }));
 }
 
 /** The trace ID a request propagated, or undefined when it propagated none.
@@ -27,10 +28,8 @@ export function traceIdForRequest(result: RequestResult): string | undefined {
 }
 
 export function destroyTracing(): void {
-  if (unregister) {
-    unregister();
-    unregister = null;
-  }
+  for (const unregister of unregisters) unregister();
+  unregisters = [];
   targets = [];
 }
 

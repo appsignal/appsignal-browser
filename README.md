@@ -40,6 +40,8 @@ interface BrowserConfig {
   active?: boolean;      // default: true — false makes init() and every public
                          // method a no-op, so call sites need no guarding
   appVersion?: string;   // Release tag, commit SHA, or deploy ID
+  serviceName?: string;  // default: "Browser" — this frontend's name in traces;
+                         // set one per frontend when you run several
 
   // Drop with null, mutate to redact. Both run before any buffering,
   // and neither can be `async` — a Promise return is not awaited.
@@ -115,6 +117,31 @@ Instrument `window.onerror` and `window.addEventListener("unhandledrejection")`.
 3. Send immediately (do not buffer).
 
 Stack traces are sent as raw strings.
+
+**Request failures and backend traces.** With `tracePropagationTargets` set, a
+matching request that answers 5xx or runs out of time is reported as an error,
+carrying the trace and span ids it sent in its `traceparent`. The backend's
+spans for that request name that span as their parent, so both ends read as one
+trace.
+
+Only a failure the backend can answer for is reported. A timeout means the
+server took the request and may have traced it. A request that was refused,
+undeliverable or blocked by an extension leaves no span to join, and the browser
+reports every one of those the same way, so none of them is reported. They are
+still recorded as network breadcrumbs. Successful requests, HTTP 4xx responses,
+and intentional cancellations do not generate these reports either. Ordinary
+JavaScript errors keep independent traces; there is no time window that
+associates them with a preceding request. Fetch responses/rejections remain
+unchanged for application code.
+
+Request reports honor `errors.enabled`, `errors.sampleRate`, `beforeError`,
+rate limits, `privacy.networkBlocklist`, and `privacy.queryParamsAllowlist`.
+`beforeError` receives `HTTPError` or `TimeoutError`, with request details in
+`context.request`; those details are sent as `params.request`. Network
+breadcrumb collection can be disabled without disabling request reports.
+The same fetch rejection object is not reported again via `captureError` or
+the global error handlers after its request report is sent. A new error thrown
+by application code after a 500 remains a separate JavaScript error.
 
 **Cross-origin scripts.** When a script from another origin throws, the browser collapses it to an opaque `"Script error."` with no stack and no location, unless that script is served with `crossorigin="anonymous"` **and** an `Access-Control-Allow-Origin` header. The SDK drops these opaque, unsymbolicatable `"Script error."` entries rather than fill the stream with indistinguishable noise. To capture real errors from third-party/CDN-hosted scripts, add `crossorigin="anonymous"` to those `<script>` tags and ensure the host serves the matching CORS header.
 

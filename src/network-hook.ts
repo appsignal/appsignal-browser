@@ -37,6 +37,11 @@ export interface RequestResult {
    * status code however it wants. Listeners that want to flag 4xx/5xx
    * should inspect `status` themselves. */
   error: boolean;
+  /** The request ran out of time. A subset of `error`: the server received it
+   * and may well have traced it, unlike a refused or undeliverable request. */
+  timedOut?: boolean;
+  /** Original fetch rejection, used to avoid reporting the same object twice. */
+  failureReason?: unknown;
   /** The host cancelled it. Still reported, but `error` stays false. */
   aborted?: boolean;
   /** Set for fetch responses. Listeners must `.clone()` before reading. */
@@ -81,7 +86,7 @@ export function onAfterRequest(fn: AfterRequestListener): () => void {
 /** The fetch the hook wrapped, or the global one when the hook is not
  * installed. The SDK sends its own posts through this, so they reach no
  * listener: they must not carry a traceparent, show up as a breadcrumb or
- * become the request an error joins. */
+ * produce an automatic request-error report. */
 export function fetchPastHook(): typeof window.fetch {
   return installed ? underlyingFetch : window.fetch;
 }
@@ -172,13 +177,19 @@ function patchFetch(): void {
       return response;
     } catch (err) {
       // A cancelled fetch rejects with AbortError, which is not a failure.
-      const aborted = (err as { name?: string } | null)?.name === "AbortError";
+      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      const name = (err as { name?: string } | null)?.name;
+      // Custom abort reasons still mean cancellation. TimeoutError is a
+      // failed request, including AbortSignal.timeout().
+      const aborted = name === "AbortError" || (signal?.aborted === true && name !== "TimeoutError");
       const result: RequestResult = {
         url,
         method,
         startTime,
         endTime: Date.now(),
         error: !aborted,
+        timedOut: name === "TimeoutError",
+        failureReason: err,
         aborted,
         trace,
       };
@@ -213,12 +224,18 @@ function reportXhr(xhr: WatchedXhr, failed: boolean): void {
   xhr._appsignalRequest = null;
   xhrsToReport.delete(xhr);
   const aborted = pending.aborted === true;
+  const endTime = Date.now();
+  // The `timeout` event arrives after readystatechange reaches DONE, too late
+  // for this report. A failure at or past the deadline is that timeout;
+  // startTime is taken before the native send, so elapsed never reads short.
+  const timedOut = failed && !aborted && xhr.timeout > 0 && endTime - pending.startTime >= xhr.timeout;
   const result: RequestResult = {
     url: pending.url,
     method: pending.method,
     startTime: pending.startTime,
-    endTime: Date.now(),
+    endTime,
     error: failed && !aborted,
+    timedOut,
     aborted,
     xhr,
     trace: pending.trace,
