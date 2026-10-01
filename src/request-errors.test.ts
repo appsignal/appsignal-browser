@@ -181,14 +181,32 @@ describe("request failure traces", () => {
       await expect(fetch("http://localhost/api/orders", { signal: controller.signal })).rejects.toBe(reason);
     }
     expect(reports).toHaveLength(0);
+    // A real deadline fires while the request is in flight. One that fired
+    // before the call is a different thing, covered below.
     const timeout = new DOMException("Timed out", "TimeoutError");
     const controller = new AbortController();
+    let failRequest!: (reason: unknown) => void;
+    respond = () => new Promise((_, reject) => { failRequest = reject; });
+    const inFlight = fetch("http://localhost/api/orders", { signal: controller.signal });
     controller.abort(timeout);
-    respond = async () => { throw timeout; };
-    await expect(fetch("http://localhost/api/orders", { signal: controller.signal })).rejects.toBe(timeout);
+    failRequest(timeout);
+    await expect(inFlight).rejects.toBe(timeout);
     expect(reports).toHaveLength(1);
     expect(reports[0].error.name).toBe("TimeoutError");
     expectIdentity(reports[0], requests[2]);
+  });
+
+  it("does not report a request whose deadline expired before it was sent", async () => {
+    // `AbortSignal.timeout()` reused across retries. fetch rejects without
+    // sending, so the request says nothing about the backend, and a report
+    // would invent a span no backend span can ever join.
+    const expired = new DOMException("Timed out", "TimeoutError");
+    const controller = new AbortController();
+    controller.abort(expired);
+    init(config());
+    respond = async () => { throw expired; };
+    await fetch("http://localhost/api/orders", { signal: controller.signal }).catch(() => {});
+    expect(reports).toHaveLength(0);
   });
 
   it.each([500, 503])("reports XHR status %s once with its own identity", status => {

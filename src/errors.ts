@@ -177,10 +177,11 @@ export function reportError(
  * sent. Later application errors never claim this identity. */
 export function reportRequestError(result: RequestResult): void {
   if (!result.trace || result.aborted) return;
-  // Only a failure the backend can answer for. A timeout means the server took
-  // the request and may have traced it. Every other transport failure (refused,
-  // undeliverable, blocked by an extension) leaves no span to join, and its
-  // volume follows the device's connection rather than the backend.
+  // Only a failure the backend can answer for. A timeout usually means the
+  // server took the request and traced it, though a deadline can expire during
+  // DNS or connect. Every other transport failure (refused, undeliverable,
+  // blocked by an extension) leaves no span to join, and its volume follows the
+  // device's connection rather than the backend.
   const serverError = result.status !== undefined && result.status >= 500 && result.status <= 599;
   if (!serverError && !result.timedOut) return;
   // A deadline missed on an offline device says nothing about the backend, and

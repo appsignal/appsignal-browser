@@ -136,6 +136,11 @@ function patchFetch(): void {
     const method =
       (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
     const startTime = Date.now();
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    // A signal that fired before this call means the request never goes out, so
+    // nothing about it says anything about the server. `AbortSignal.timeout()`
+    // reused across retries is the way this happens.
+    const abortedBeforeSend = Boolean(signal?.aborted);
     let trace: PropagatedTrace | undefined;
 
     // Default path: no before-listeners (tracing is the only one, and only
@@ -178,18 +183,19 @@ function patchFetch(): void {
       return response;
     } catch (err) {
       // A cancelled fetch rejects with AbortError, which is not a failure.
-      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
       const name = (err as { name?: string } | null)?.name;
       // Custom abort reasons still mean cancellation. TimeoutError is a
       // failed request, including AbortSignal.timeout().
-      const aborted = name === "AbortError" || (signal?.aborted === true && name !== "TimeoutError");
+      const aborted = abortedBeforeSend
+        || name === "AbortError"
+        || (signal?.aborted === true && name !== "TimeoutError");
       const result: RequestResult = {
         url,
         method,
         startTime,
         endTime: Date.now(),
         error: !aborted,
-        timedOut: name === "TimeoutError",
+        timedOut: !aborted && name === "TimeoutError",
         failureReason: err,
         aborted,
         trace,

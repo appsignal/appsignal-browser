@@ -125,7 +125,8 @@ spans for that request name that span as their parent, so both ends read as one
 trace.
 
 Only a failure the backend can answer for is reported. A timeout means the
-server took the request and may have traced it. A request that was refused,
+server usually took the request and traced it, although a deadline can also
+expire during DNS or connect. A request that was refused,
 undeliverable or blocked by an extension leaves no span to join, and the browser
 reports every one of those the same way, so none of them is reported. They are
 still recorded as network breadcrumbs. Successful requests, HTTP 4xx responses,
