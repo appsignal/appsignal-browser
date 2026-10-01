@@ -219,21 +219,23 @@ describe("request failure traces", () => {
     expect(reports).toHaveLength(0);
   });
 
-  it("reports an XHR that missed its deadline, and ignores one that failed outright", () => {
+  it("reports the XHR the browser timed out, and not the one it failed", () => {
     vi.useFakeTimers();
     vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
     init(config());
 
+    // A blocked main thread delivers the failure past the deadline. Only the
+    // event says which failure it was, so elapsed time must not decide.
     const failed = new XMLHttpRequest();
     failed.open("GET", "http://localhost/api/orders");
+    failed.timeout = 200;
     failed.send();
+    vi.advanceTimersByTime(500);
     Object.defineProperty(failed, "readyState", { value: 4 });
     Object.defineProperty(failed, "status", { value: 0 });
     failed.dispatchEvent(new Event("error"));
     expect(reports).toHaveLength(0);
 
-    // The `timeout` event arrives after this report, so the deadline is what
-    // tells the two apart.
     const timedOut = new XMLHttpRequest();
     timedOut.open("GET", "http://localhost/api/orders");
     timedOut.timeout = 5_000;
@@ -241,7 +243,7 @@ describe("request failure traces", () => {
     vi.advanceTimersByTime(5_000);
     Object.defineProperty(timedOut, "readyState", { value: 4 });
     Object.defineProperty(timedOut, "status", { value: 0 });
-    timedOut.dispatchEvent(new Event("error"));
+    timedOut.dispatchEvent(new Event("timeout"));
     expect(reports).toHaveLength(1);
     expect(reports[0].error.name).toBe("TimeoutError");
     expect(reports[0].params).toMatchObject({ request: { duration_ms: 5_000 } });

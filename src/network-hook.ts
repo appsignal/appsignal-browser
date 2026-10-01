@@ -37,8 +37,9 @@ export interface RequestResult {
    * status code however it wants. Listeners that want to flag 4xx/5xx
    * should inspect `status` themselves. */
   error: boolean;
-  /** The request ran out of time. A subset of `error`: the server received it
-   * and may well have traced it, unlike a refused or undeliverable request. */
+  /** The browser timed the request out, as its own `timeout` event says. A
+   * subset of `error`: the server usually received it, unlike a refused or
+   * undeliverable request. */
   timedOut?: boolean;
   /** Original fetch rejection, used to avoid reporting the same object twice. */
   failureReason?: unknown;
@@ -217,25 +218,20 @@ type WatchedXhr = XMLHttpRequest & {
   } | null;
 };
 
-function reportXhr(xhr: WatchedXhr, failed: boolean): void {
+function reportXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
   const pending = xhr._appsignalRequest;
   if (!pending) return;
   // One report per send(), whichever event arrives first.
   xhr._appsignalRequest = null;
   xhrsToReport.delete(xhr);
   const aborted = pending.aborted === true;
-  const endTime = Date.now();
-  // The `timeout` event arrives after readystatechange reaches DONE, too late
-  // for this report. A failure at or past the deadline is that timeout;
-  // startTime is taken before the native send, so elapsed never reads short.
-  const timedOut = failed && !aborted && xhr.timeout > 0 && endTime - pending.startTime >= xhr.timeout;
   const result: RequestResult = {
     url: pending.url,
     method: pending.method,
     startTime: pending.startTime,
-    endTime,
+    endTime: Date.now(),
     error: failed && !aborted,
-    timedOut,
+    timedOut: timedOut && !aborted,
     aborted,
     xhr,
     trace: pending.trace,
@@ -251,7 +247,8 @@ function reportXhr(xhr: WatchedXhr, failed: boolean): void {
  * in it that needs to know the request it is handling calls this first. */
 export function reportFinishedXhrs(): void {
   for (const xhr of xhrsToReport) {
-    // status 0 at DONE is a transport failure, as in the readystatechange listener.
+    // No named event has run for these, so a transport failure stays
+    // unclassified and reports as a plain failure, never as a timeout.
     if (xhr.readyState === 4) reportXhr(xhr, xhr.status === 0);
   }
 }
@@ -265,9 +262,12 @@ function watchXhr(xhr: WatchedXhr): void {
 
   xhr.addEventListener("readystatechange", () => {
     if (xhr.readyState !== 4) return;
-    // status 0 at DONE is a transport failure. abort() marks the record first,
-    // so reportXhr reports a cancel instead.
-    reportXhr(xhr, xhr.status === 0);
+    // status 0 at DONE is a transport failure, and only the named event that
+    // follows says which one. Elapsed time cannot stand in for it: a blocked
+    // main thread delivers a connection failure after the deadline and makes
+    // it look like a timeout.
+    if (xhr.status === 0) return;
+    reportXhr(xhr, false);
   });
   // Only at DONE: a host that sends the next request from its own load or
   // error handler has already moved the object on to that request.
@@ -275,6 +275,15 @@ function watchXhr(xhr: WatchedXhr): void {
     if (xhr.readyState === 4) reportXhr(xhr, false);
   });
   xhr.addEventListener("error", () => {
+    if (xhr.readyState === 4) reportXhr(xhr, true);
+  });
+  xhr.addEventListener("timeout", () => {
+    if (xhr.readyState === 4) reportXhr(xhr, true, true);
+  });
+  // abort() marks the record, so this reports a cancel. Without it a cancelled
+  // request reaches no listener at all, because readystatechange leaves every
+  // status 0 to the named event.
+  xhr.addEventListener("abort", () => {
     if (xhr.readyState === 4) reportXhr(xhr, true);
   });
 }
