@@ -286,6 +286,32 @@ describe("request failure traces", () => {
     expect(reports[0].params).toMatchObject({ request: { status: 500 } });
   });
 
+  it("does not report a stale request after a status 0 that succeeded", () => {
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+    const xhr = new XMLHttpRequest();
+    let state = 1;
+    Object.defineProperty(xhr, "readyState", { get: () => state, configurable: true });
+    Object.defineProperty(xhr, "status", { value: 0, configurable: true });
+
+    // A `file:` URL finishes with status 0 and fires `load`, never a named event.
+    xhr.open("GET", "http://localhost/api/first");
+    xhr.send();
+    state = 4;
+    xhr.dispatchEvent(new Event("readystatechange"));
+    xhr.dispatchEvent(new Event("load"));
+
+    state = 1;
+    xhr.open("GET", "http://localhost/api/second");
+    xhr.send();
+    state = 4;
+    xhr.dispatchEvent(new Event("timeout"));
+
+    expect(reports).toHaveLength(1);
+    expect((reports[0].params as { request: { url: string } }).request.url)
+      .toBe("http://localhost/api/second");
+  });
+
   it("does not report a request that never reached the backend", async () => {
     // Refused, undeliverable or blocked by an extension. The browser reports
     // all of them as one TypeError, and none of them leaves a span to join.

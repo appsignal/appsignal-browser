@@ -342,7 +342,18 @@ function watchXhr(xhr: WatchedXhr): void {
   // Only at DONE: a host that sends the next request from its own load or
   // error handler has already moved the object on to that request.
   xhr.addEventListener("load", () => {
-    if (xhr.readyState === 4) reportXhr(xhr, false);
+    if (xhr.readyState !== 4) return;
+    const finished = xhr._appsignalFinished;
+    if (finished) {
+      // `load` after a status 0 means the request succeeded and no named event
+      // is coming, as a `file:` URL does. Without this the record stays parked
+      // and the next failure on this object reports it instead of its own.
+      xhr._appsignalFinished = null;
+      if (!xhr._appsignalRequest) xhrsToReport.delete(xhr);
+      emitXhrReport(xhr, finished, false, false);
+      return;
+    }
+    reportXhr(xhr, false);
   });
   xhr.addEventListener("error", () => reportXhrFailure(xhr, false));
   xhr.addEventListener("timeout", () => reportXhrFailure(xhr, true));
