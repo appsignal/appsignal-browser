@@ -151,11 +151,13 @@ function patchFetch(): void {
     // and silently drop every header the caller set on the Request.
     let finalInit = init;
     if (beforeListeners.length > 0) {
-      // Seed from the *effective* request headers (Request headers first,
-      // then init headers override — the platform's own precedence) so a
-      // listener that adds a header doesn't clobber the caller's.
-      const headers = new Headers(input instanceof Request ? input.headers : undefined);
-      if (init?.headers) new Headers(init.headers).forEach((v, k) => headers.set(k, v));
+      // The platform replaces rather than merges: `new Request(input, init)`
+      // empties the request's header list and refills it from `init.headers`
+      // when that member is present. Seeding from both would put back a header
+      // the caller removed, an Authorization among them.
+      const headers = init?.headers
+        ? new Headers(init.headers)
+        : new Headers(input instanceof Request ? input.headers : undefined);
 
       const ctx: RequestContext = { url, method, headers };
       for (const listener of beforeListeners) {

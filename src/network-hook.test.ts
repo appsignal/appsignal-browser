@@ -119,6 +119,21 @@ describe("network-hook teardown that the browser refuses", () => {
     destroyNetworkHook();
   });
 
+  it("does not put back a header the caller replaced on a Request", async () => {
+    // `new Request(input, init)` empties the header list and refills it from
+    // init, so a caller who passes replacement headers has dropped the rest.
+    onBeforeRequest((ctx) => { ctx.headers.set("traceparent", "00-a-b-01"); });
+    const authed = new Request("https://example.com/api", {
+      headers: { authorization: "Bearer SECRET", accept: "a" },
+    });
+    await window.fetch(authed, { headers: { accept: "b" } });
+
+    const headers = effectiveHeaders();
+    expect(headers.get("accept")).toBe("b");
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("traceparent")).toBe("00-a-b-01");
+  });
+
   it("notifies after-listeners before a host XHR load handler", () => {
     // Listeners run in registration order, and a host attaches between open()
     // and send(), so the SDK must register first.
