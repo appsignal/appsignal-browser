@@ -341,6 +341,32 @@ describe("request failure traces", () => {
     expect(reports).toHaveLength(0);
   });
 
+  it.each(["fetch", "xhr"] as const)("joins the trace the caller's own traceparent names, over %s", async transport => {
+    const traceId = "a".repeat(32);
+    const spanId = "b".repeat(16);
+    const header = `00-${traceId}-${spanId}-01`;
+    respond = async () => new Response(null, { status: 500 });
+    // Before init(), or the spy would replace the SDK's own patched send.
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+
+    if (transport === "fetch") {
+      await fetch("http://localhost/api/orders", { headers: { traceparent: header } });
+    } else {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "http://localhost/api/orders");
+      xhr.setRequestHeader("traceparent", header);
+      xhr.send();
+      Object.defineProperty(xhr, "readyState", { get: () => 4, configurable: true });
+      Object.defineProperty(xhr, "status", { get: () => 500, configurable: true });
+      xhr.dispatchEvent(new Event("readystatechange"));
+    }
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].trace_id).toBe(traceId);
+    expect(reports[0].span_id).toBe(spanId);
+  });
+
   it("leaves a traceparent the host set on an XHR alone", () => {
     // setRequestHeader combines values, so setting ours over the host's would
     // send one malformed header that a conformant backend rejects whole.

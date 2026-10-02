@@ -1,5 +1,5 @@
 import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
-import { onBeforeRequest, type RequestResult } from "./network-hook.js";
+import { onBeforeRequest, type PropagatedTrace, type RequestResult } from "./network-hook.js";
 
 let targets: string[] = [];
 let unregisters: (() => void)[] = [];
@@ -11,6 +11,13 @@ export function initTracing(tracePropagationTargets: string[]): void {
 
   unregisters.push(onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
+    const caller = parseTraceparent(ctx.headers.get("traceparent"));
+    if (caller) {
+      // The caller propagates its own context. Join that trace rather than
+      // start a rival one, and report the ids that actually go on the wire.
+      ctx.trace = caller;
+      return;
+    }
     const traceId = randomHex(16);
     const spanId = randomHex(8);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
@@ -18,6 +25,20 @@ export function initTracing(tracePropagationTargets: string[]): void {
     // that request and not of another one to the same URL.
     ctx.trace = { traceId, spanId };
   }));
+}
+
+const TRACE_ID = /^[0-9a-f]{32}$/;
+const SPAN_ID = /^[0-9a-f]{16}$/;
+
+/** The ids of a W3C `traceparent` the caller set, when it is one we can join.
+ * An all-zero id is invalid per the spec and names no span. */
+function parseTraceparent(value: string | null): PropagatedTrace | undefined {
+  if (!value) return undefined;
+  const [version, traceId, spanId] = value.trim().split("-");
+  if (version?.length !== 2) return undefined;
+  if (!TRACE_ID.test(traceId ?? "") || !SPAN_ID.test(spanId ?? "")) return undefined;
+  if (/^0+$/.test(traceId) || /^0+$/.test(spanId)) return undefined;
+  return { traceId, spanId };
 }
 
 /** The trace ID a request propagated, or undefined when it propagated none.

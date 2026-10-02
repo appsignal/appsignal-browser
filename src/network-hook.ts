@@ -232,10 +232,12 @@ type WatchedXhr = XMLHttpRequest & {
   // that says which failure it was. Held apart from `_appsignalRequest`,
   // because a host can retry on this object before that event arrives.
   _appsignalFinished?: PendingXhr | null;
-  // Header names the host set on this request, lowercased. setRequestHeader
-  // combines values rather than replacing them, so the SDK has to know which
-  // names to leave alone. XHR cannot read a request header back.
-  _appsignalHostHeaders?: Set<string>;
+  // Headers the host set on this request, keyed by lowercased name.
+  // setRequestHeader combines values rather than replacing them, so the SDK
+  // has to know which names to leave alone, and a before-listener needs the
+  // value to read a traceparent the host already set. XHR cannot read a
+  // request header back.
+  _appsignalHostHeaders?: Map<string, string>;
 };
 
 type PendingXhr = NonNullable<WatchedXhr["_appsignalRequest"]>;
@@ -400,8 +402,11 @@ function patchXhr(): void {
   underlyingXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.setRequestHeader = function (name: string, value: string) {
     const xhr = this as WatchedXhr;
-    (xhr._appsignalHostHeaders ??= new Set()).add(String(name).toLowerCase());
-    return underlyingXhrSetHeader.call(this, name, value);
+    const result = underlyingXhrSetHeader.call(this, name, value);
+    // Recorded only once the call is accepted: a rejected one leaves no header
+    // on the request, so the SDK must still apply its own.
+    (xhr._appsignalHostHeaders ??= new Map()).set(String(name).toLowerCase(), String(value));
+    return result;
   };
 
   underlyingXhrAbort = XMLHttpRequest.prototype.abort;
@@ -427,6 +432,10 @@ function patchXhr(): void {
     xhr._appsignalRequest = pending;
     xhrsToReport.add(xhr);
     const headers = new Headers();
+    // Show a before-listener the trace header the host already set, so it can
+    // join that trace instead of starting a rival one.
+    const hostTraceparent = xhr._appsignalHostHeaders?.get("traceparent");
+    if (hostTraceparent) headers.set("traceparent", hostTraceparent);
 
     const ctx: RequestContext = { url, method, headers };
     for (const listener of beforeListeners) {
@@ -442,6 +451,7 @@ function patchXhr(): void {
     const hostHeaders = xhr._appsignalHostHeaders;
     headers.forEach((value, key) => {
       if (hostHeaders?.has(key.toLowerCase())) return;
+
       try { underlyingXhrSetHeader.call(xhr, key, value); } catch { /* forbidden header */ }
     });
 
