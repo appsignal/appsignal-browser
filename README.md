@@ -137,6 +137,10 @@ unchanged for application code.
 
 Request reports honor `errors.enabled`, `errors.sampleRate`, `beforeError`,
 rate limits, `privacy.networkBlocklist`, and `privacy.queryParamsAllowlist`.
+Anchor each pattern on a host. `**` matches any character including `/`, so a
+pattern that starts with it, such as `**/api/**`, matches that path on every
+host and sends the header to third parties. `api.example.com/**` is a host.
+
 `beforeError` receives `HTTPError` or `TimeoutError`, with request details in
 `context.request`; those details are sent as `params.request`. Network
 breadcrumb collection can be disabled without disabling request reports.
