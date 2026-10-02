@@ -3,10 +3,10 @@ bump: minor
 type: change
 ---
 
-Use one host-aware URL matcher for tracing targets and network blocklists.
-Hosts match case insensitively and ignore trailing dots; paths remain case
-sensitive. Host-only patterns match every path. Omitted ports match every port,
-while explicit ports also recognize the protocol's default port. A path can
-no longer satisfy a blocklist host pattern. Audit existing patterns when
-upgrading: include ports to retain a narrow tracing target, and use a wildcard
-host for a blocklist intended to match a path on every host.
+Share host-aware URL matching between tracing and network blocklists. Hosts
+are case insensitive and ignore trailing dots; paths are case sensitive.
+Host-only patterns cover every path, omitted ports cover every port, and
+explicit default ports work. Paths cannot satisfy host patterns.
+
+Audit existing patterns: add ports to narrow tracing targets, and use wildcard
+hosts for blocklists intended to match paths on every host.
