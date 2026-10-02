@@ -28,6 +28,7 @@
     <button id="trigger-xhr-503">XHR → HTTP 503 (request error)</button>
     <button id="trigger-timeout">fetch → timeout (request error)</button>
     <button id="trigger-xhr-timeout">XHR → timeout (request error)</button>
+    <button id="trigger-xhr-retry">XHR → HTTP 500, retried on the same object</button>
     <button id="trigger-connection-closed">fetch → connection closed (no request error)</button>
     <button id="trigger-fetch-404">fetch → HTTP 404 (no request error)</button>
     <button id="trigger-js-error">JavaScript error (independent trace)</button>
@@ -62,6 +63,21 @@
         xhr.onload = () => {
           document.getElementById("status").textContent = "XHR completed with HTTP " + xhr.status;
         };
+        xhr.send();
+      });
+      document.getElementById("trigger-xhr-retry").addEventListener("click", function () {
+        const xhr = new XMLHttpRequest();
+        let retried = false;
+        // Set before open(), so it runs ahead of the SDK's own listener.
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4 && !retried) {
+            retried = true;
+            xhr.open("GET", "/api/echo?status=200");
+            xhr.send();
+            document.getElementById("status").textContent = "XHR retried on the same object";
+          }
+        };
+        xhr.open("POST", "/api/echo?status=500");
         xhr.send();
       });
       document.getElementById("trigger-xhr-timeout").addEventListener("click", function () {

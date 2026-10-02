@@ -297,6 +297,23 @@ export function reportFinishedXhrs(): void {
   }
 }
 
+/** Report a request the reopen is about to terminate. `open()` resets the
+ * object and the events that would have reported it never fire, so a host that
+ * retries on it would otherwise lose the request it is retrying. A record set
+ * aside at DONE is left alone: its named event still has to classify it, and
+ * reporting it here would drop the timeout. */
+function flushOnReopen(xhr: WatchedXhr): void {
+  const pending = xhr._appsignalRequest;
+  if (!pending) return;
+  if (xhr.readyState === 4) {
+    // No named event ran, so the failure stays unclassified.
+    reportXhr(xhr, xhr.status === 0);
+    return;
+  }
+  pending.aborted = true;
+  reportXhr(xhr, true);
+}
+
 /** Registers once per object, in open(): listeners run in registration order
  * and a host attaches between open() and send(). A host that attaches before
  * open() still wins, and reportFinishedXhrs covers that case. */
@@ -343,6 +360,7 @@ function patchXhr(): void {
     ...rest: unknown[]
   ) {
     const xhr = this as WatchedXhr;
+    flushOnReopen(xhr);
     xhr._appsignalMethod = method;
     xhr._appsignalUrl = typeof url === "string" ? url : url.href;
     watchXhr(xhr);

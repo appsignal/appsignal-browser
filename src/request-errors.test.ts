@@ -259,6 +259,33 @@ describe("request failure traces", () => {
     expect(reports[0].error.name).toBe("TimeoutError");
   });
 
+  it("reports a 500 the host reopened before the SDK's listener ran", () => {
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+
+    let state = 4;
+    const xhr = new XMLHttpRequest();
+    // Set before open(), so this runs ahead of the SDK's listener and the
+    // reopen lands before the SDK ever sees DONE.
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState === 4 && xhr.status === 500) {
+        xhr.open("GET", "http://localhost/api/orders");
+        state = 1; // open() puts the object back to OPENED
+        xhr.send();
+      }
+    };
+    xhr.open("GET", "http://localhost/api/orders");
+    xhr.send();
+
+    Object.defineProperty(xhr, "readyState", { get: () => state, configurable: true });
+    Object.defineProperty(xhr, "status", { get: () => (state === 4 ? 500 : 0), configurable: true });
+    xhr.dispatchEvent(new Event("readystatechange"));
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].error.name).toBe("HTTPError");
+    expect(reports[0].params).toMatchObject({ request: { status: 500 } });
+  });
+
   it("does not report a request that never reached the backend", async () => {
     // Refused, undeliverable or blocked by an extension. The browser reports
     // all of them as one TypeError, and none of them leaves a span to join.

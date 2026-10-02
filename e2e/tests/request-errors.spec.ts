@@ -32,6 +32,19 @@ for (const [button, name, status] of [
   });
 }
 
+test("reports a 500 the host retried on the same XHR", async ({ page, request }) => {
+  await page.click("#trigger-xhr-retry");
+  await expect(page.locator("#status")).toHaveText("XHR retried on the same object");
+  const joined = await pollFor(request, items => {
+    const api = items.find((item): item is CapturedApi =>
+      item.kind === "api" && item.path === "/api/echo" && item.method === "POST");
+    const error = ingestErrors(items).find(item => (item.error as { name?: string })?.name === "HTTPError");
+    return api?.headers.traceparent && error ? { api, error } : null;
+  });
+  const [, trace, span] = joined.api.headers.traceparent!.split("-");
+  expect(joined.error).toMatchObject({ trace_id: trace, span_id: span });
+});
+
 test("a JS error after a 500 stays independent, and a 404 adds no request error", async ({ page, request }) => {
   await page.click("#trigger-fetch-500");
   await pollFor(request, items => ingestErrors(items).length === 1);
