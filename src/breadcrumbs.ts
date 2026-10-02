@@ -3,7 +3,7 @@ import { RingBuffer } from "./ring-buffer.js";
 import { touchActivity } from "./session.js";
 import { getLastErrorTimestamp } from "./errors.js";
 import { traceIdForRequest } from "./tracing.js";
-import { safeUrl, matchesUrl, scrubUrl, timeOrigin, errorLike, pruneRecordForJson, applyHook, attemptCleanup } from "./utils.js";
+import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, pruneRecordForJson, applyHook, attemptCleanup } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
 
@@ -836,7 +836,7 @@ function timingPhases(entry: PerformanceResourceTiming): Record<string, unknown>
 function isBlocklisted(url: string): boolean {
   const parsed = safeUrl(url);
   if (!parsed) return false;
-  return networkBlocklist.some((pattern) => matchesUrl(pattern, parsed));
+  return networkBlocklist.some((pattern) => globMatch(pattern, parsed.host + parsed.pathname));
 }
 
 function isCollectEndpoint(url: string): boolean {

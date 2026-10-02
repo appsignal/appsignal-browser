@@ -137,11 +137,11 @@ unchanged for application code.
 
 Request reports honor `errors.enabled`, `errors.sampleRate`, `beforeError`,
 rate limits, `privacy.networkBlocklist`, and `privacy.queryParamsAllowlist`.
-Anchor each pattern on a host. The host and the path are matched separately, so
-a wildcard cannot reach out of the part it was written for, but a pattern that
-starts with one, such as `**/api/**`, still means that path on every host and
-sends the header to third parties. `api.example.com/**` is a host. A pattern
-that names a port matches that port only.
+Anchor each tracing pattern on a host. Patterns match `host + pathname`,
+including non-default ports, and tracing checks the host separately so path
+segments cannot satisfy a host pattern. A wildcard host such as `**/api/**`
+still matches that path on third-party hosts. Use `api.example.com/**` for a
+specific host, or include its port, such as `api.example.com:8443/**`.
 
 `beforeError` receives `HTTPError` or `TimeoutError`, with request details in
 `context.request`; those details are sent as `params.request`. Network

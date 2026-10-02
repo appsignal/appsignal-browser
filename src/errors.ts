@@ -13,7 +13,7 @@ import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
 import type { RequestResult } from "./network-hook.js";
-import { scrubPageUrl, scrubUrl, safeUrl, matchesUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import { scrubPageUrl, scrubUrl, safeUrl, globMatch, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -213,7 +213,7 @@ export function reportRequestError(result: RequestResult): void {
   // a page that keeps polling would report one failure per attempt.
   if (result.timedOut && navigator.onLine === false) return;
   const parsed = safeUrl(result.url);
-  if (!parsed || networkBlocklist.some((pattern) => matchesUrl(pattern, parsed))) return;
+  if (!parsed || networkBlocklist.some((pattern) => globMatch(pattern, parsed.host + parsed.pathname))) return;
   const url = scrubUrl(result.url, allowlist);
   const errorClass = serverError ? "HTTPError" : "TimeoutError";
   const failure = serverError ? `HTTP ${result.status}` : "timed out";
