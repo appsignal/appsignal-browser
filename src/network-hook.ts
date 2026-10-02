@@ -66,7 +66,7 @@ let underlyingXhrOpen: typeof XMLHttpRequest.prototype.open;
 let underlyingXhrSend: typeof XMLHttpRequest.prototype.send;
 let underlyingXhrAbort: typeof XMLHttpRequest.prototype.abort;
 let underlyingXhrSetHeader: typeof XMLHttpRequest.prototype.setRequestHeader;
-const xhrsToReport = new Set<WatchedXhr>();
+const xhrsToReport = new Set<XhrState>();
 
 /** Register a before-request listener. Returns an unregister fn. */
 export function onBeforeRequest(fn: BeforeRequestListener): () => void {
@@ -227,298 +227,214 @@ function patchFetch(): void {
   };
 }
 
-/** One request on one XMLHttpRequest, from send() to its report.
- *
- * `status` is captured when the request reaches DONE rather than read from the
- * object at report time. The event that classifies a transport failure arrives
- * after DONE, and a host can reuse the object in between, so by then the
- * object's own status belongs to another request. */
-type XhrRecord = {
-  generation: number;
+/** Applied headers survive rejected send() calls. */
+type PreparedXhr = {
   url: string;
   method: string;
+  headers: Map<string, string>;
+};
+
+type XhrRecord = {
+  generation: number;
+  prepared: PreparedXhr;
   startTime: number;
-  aborted: boolean;
-  completed?: boolean;
+  endTime?: number;
   status?: number;
+  cancelled: boolean;
+  completed: boolean;
   trace?: PropagatedTrace;
 };
 
-type WatchedXhr = XMLHttpRequest & {
-  _appsignalMethod?: string;
-  _appsignalUrl?: string;
-  _appsignalWatched?: boolean;
-  // Headers the host set on this request, keyed by lowercased name.
-  // setRequestHeader combines values rather than replacing them, so the SDK
-  // has to know which names to leave alone, and a before-listener needs the
-  // value to read a traceparent the host already set. XHR cannot read a
-  // request header back.
-  _appsignalHostHeaders?: Map<string, string>;
-  // Native send can reject after this header was applied. Keep it for retries.
-  _appsignalSdkTraceparent?: string;
-  // The send() that is still running.
-  _appsignalSending?: XhrRecord | null;
-  // A request that reached DONE with no status, waiting for the named event
-  // that says which failure it was. Held apart from `_appsignalSending`,
-  // because a host can retry on this object before that event arrives.
-  _appsignalParked?: XhrRecord | null;
+type XhrOutcome =
+  | { kind: "response"; status: number }
+  | { kind: "timeout" }
+  | { kind: "network-error" }
+  | { kind: "cancelled" };
+
+type XhrState = {
+  xhr: XMLHttpRequest;
+  prepared?: PreparedXhr;
+  active?: XhrRecord;
+  // Keep terminal markers after reporting; nested retry events unwind first.
+  endings: XhrRecord[];
 };
 
-/** Pick the request this terminal event belongs to. A parked request owns
- * the next named event even if the host has already reused the object. */
-function recordForXhrEvent(xhr: WatchedXhr): XhrRecord | null {
-  if (xhr._appsignalParked) return xhr._appsignalParked;
-  const sending = xhr._appsignalSending;
-  if (!sending || xhr.readyState !== 4) return null;
-  sending.status = xhr.status;
-  return sending;
+const xhrStates = new WeakMap<XMLHttpRequest, XhrState>();
+
+function trackXhr(state: XhrState): void {
+  if (state.active || state.endings.some(record => !record.completed)) {
+    xhrsToReport.add(state);
+  } else {
+    xhrsToReport.delete(state);
+  }
 }
 
-/** Complete an explicit record, independent of the object's current state.
- * Detach before notifying listeners, which may synchronously reuse the XHR. */
-function completeXhrRecord(
-  xhr: WatchedXhr,
-  record: XhrRecord,
-  failed: boolean,
-  timedOut = false,
-): void {
+function captureXhrDone(state: XhrState, record: XhrRecord): void {
+  record.status = state.xhr.status;
+  record.endTime ??= Date.now();
+  if (state.active === record) state.active = undefined;
+  if (!state.endings.includes(record)) state.endings.push(record);
+  trackXhr(state);
+}
+
+/** Settle once using captured data, even if the host reset the XHR. */
+function settleXhr(state: XhrState, record: XhrRecord, outcome: XhrOutcome): void {
   if (record.completed) return;
   record.completed = true;
-  if (xhr._appsignalParked === record) xhr._appsignalParked = null;
-  if (xhr._appsignalSending === record) xhr._appsignalSending = null;
-  if (!xhr._appsignalSending && !xhr._appsignalParked) xhrsToReport.delete(xhr);
-  emitXhrReport(xhr, record, failed, timedOut);
-}
-
-function emitXhrReport(
-  xhr: WatchedXhr,
-  record: XhrRecord,
-  failed: boolean,
-  timedOut: boolean,
-): void {
+  if (state.active === record) state.active = undefined;
+  trackXhr(state);
   if (record.generation !== generation) return;
-  const aborted = record.aborted;
   const result: RequestResult = {
-    url: record.url,
-    method: record.method,
+    url: record.prepared.url,
+    method: record.prepared.method,
     startTime: record.startTime,
-    endTime: Date.now(),
-    error: failed && !aborted,
-    timedOut: timedOut && !aborted,
-    aborted,
-    xhr,
+    endTime: record.endTime ?? Date.now(),
+    error: outcome.kind === "timeout" || outcome.kind === "network-error",
+    timedOut: outcome.kind === "timeout",
+    aborted: outcome.kind === "cancelled",
+    ...(outcome.kind === "response" ? { status: outcome.status } : {}),
+    xhr: state.xhr,
     trace: record.trace,
   };
-  if (!failed) result.status = record.status;
   for (const listener of afterListeners) {
     try { listener(result); } catch { /* swallow */ }
   }
 }
 
-/** Report whatever this event ended. One release point, so no two listeners
- * can disagree about which record an event belongs to. */
-function releaseXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
-  const record = recordForXhrEvent(xhr);
-  if (record) completeXhrRecord(xhr, record, failed, timedOut);
+function endXhr(state: XhrState, kind: XhrOutcome["kind"]): void {
+  // Support terminal events without an earlier readystatechange.
+  if (state.endings.length === 0 && state.active && state.xhr.readyState === 4) captureXhrDone(state, state.active);
+  const record = state.endings.pop();
+  if (!record) return;
+  const outcome: XhrOutcome = record.cancelled || kind === "cancelled"
+    ? { kind: "cancelled" }
+    : kind === "response"
+      ? { kind: "response", status: record.status ?? 0 }
+      : { kind };
+  settleXhr(state, record, outcome);
+  trackXhr(state);
 }
 
-/** Report each XHR that has finished but whose report has not run yet. A host
- * handler that was set before the SDK's listeners runs first, so code in it
- * that needs to know the request it is handling calls this first. */
+/** Report HTTP responses early; status zero waits for its named event. */
 export function reportFinishedXhrs(): void {
-  for (const xhr of xhrsToReport) {
-    // No named event has run for these, so a transport failure stays
-    // unclassified and reports as a plain failure, never as a timeout.
-    if (xhr._appsignalParked || xhr.readyState === 4) {
-      releaseXhr(xhr, (xhr._appsignalParked?.status ?? xhr.status) === 0);
-    }
+  for (const state of xhrsToReport) {
+    const record = state.active;
+    if (!record || state.xhr.readyState !== 4) continue;
+    captureXhrDone(state, record);
+    if (record.status !== 0) settleXhr(state, record, { kind: "response", status: record.status! });
   }
 }
 
-/** Registers once per object, in open(): listeners run in registration order
- * and a host attaches between open() and send(). A host that attaches before
- * open() still wins, and reportFinishedXhrs covers that case. */
-function watchXhr(xhr: WatchedXhr): void {
-  if (xhr._appsignalWatched) return;
-  xhr._appsignalWatched = true;
-
+function stateForXhr(xhr: XMLHttpRequest): XhrState {
+  const known = xhrStates.get(xhr);
+  if (known) return known;
+  const state: XhrState = { xhr, endings: [] };
+  xhrStates.set(xhr, state);
   xhr.addEventListener("readystatechange", () => {
-    if (xhr.readyState !== 4) return;
-    const sending = xhr._appsignalSending;
-    if (!sending) return;
-    // Capture it now. The named event that classifies a status 0 arrives
-    // later, and the object may belong to another request by then.
-    sending.status = xhr.status;
-    if (xhr.status === 0) {
-      // Only the named event that follows says which failure this was.
-      // Elapsed time cannot stand in for it: a blocked main thread delivers a
-      // connection failure after the deadline and makes it look like a timeout.
-      xhr._appsignalSending = null;
-      xhr._appsignalParked = sending;
-      return;
-    }
-    completeXhrRecord(xhr, sending, false);
+    const record = state.active;
+    if (!record || xhr.readyState !== 4) return;
+    captureXhrDone(state, record);
+    if (record.cancelled) settleXhr(state, record, { kind: "cancelled" });
+    else if (record.status !== 0) settleXhr(state, record, { kind: "response", status: record.status! });
   });
-
-  // `load` after a status 0 means the request succeeded and no named event is
-  // coming, as a `file:` URL does.
-  xhr.addEventListener("load", () => releaseXhr(xhr, false));
-  xhr.addEventListener("error", () => releaseXhr(xhr, true));
-  xhr.addEventListener("timeout", () => releaseXhr(xhr, true, true));
-  // abort() marks the record, so this reports a cancel. Without it a cancelled
-  // request reaches no listener at all, because readystatechange leaves every
-  // status 0 to the named event.
-  xhr.addEventListener("abort", () => releaseXhr(xhr, true));
+  xhr.addEventListener("load", () => endXhr(state, "response"));
+  xhr.addEventListener("error", () => endXhr(state, "network-error"));
+  xhr.addEventListener("timeout", () => endXhr(state, "timeout"));
+  xhr.addEventListener("abort", () => endXhr(state, "cancelled"));
+  return state;
 }
 
 function patchXhr(): void {
   underlyingXhrOpen = XMLHttpRequest.prototype.open;
   underlyingXhrSend = XMLHttpRequest.prototype.send;
+  underlyingXhrAbort = XMLHttpRequest.prototype.abort;
+  underlyingXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
 
-  XMLHttpRequest.prototype.open = function (
-    method: string,
-    url: string | URL,
-    ...rest: unknown[]
-  ) {
-    const xhr = this as WatchedXhr;
-    const sending = xhr._appsignalSending;
-    const parked = xhr._appsignalParked;
-    const status = sending && xhr.readyState === 4 ? xhr.status : undefined;
-    const previousHeaders = xhr._appsignalHostHeaders;
-    const previousSdkTraceparent = xhr._appsignalSdkTraceparent;
-    const previousMethod = xhr._appsignalMethod;
-    const previousUrl = xhr._appsignalUrl;
-    // Prepare for synchronous OPENED handlers that may send a new request.
-    // Reporting the old request waits until native open() accepts the call.
-    xhr._appsignalSending = null;
-    if (sending && status === 0) xhr._appsignalParked = sending;
-    xhr._appsignalHostHeaders = undefined;
-    xhr._appsignalSdkTraceparent = undefined;
-    xhr._appsignalMethod = method;
-    xhr._appsignalUrl = resolveRequestUrl(typeof url === "string" ? url : url.href);
-    watchXhr(xhr);
+  XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: unknown[]) {
+    const state = stateForXhr(this);
+    const previousPrepared = state.prepared;
+    const previousActive = state.active;
+    const previousEndings = [...state.endings];
+    const done = previousActive && this.readyState === 4;
+    if (done) captureXhrDone(state, previousActive);
+    state.active = undefined;
+    state.prepared = { url: resolveRequestUrl(String(url)), method: method.toUpperCase(), headers: new Map() };
     try {
-      underlyingXhrOpen.call(
-        this,
-        method,
-        url,
-        ...(rest as [boolean, string?, string?]),
-      );
+      underlyingXhrOpen.call(this, method, url, ...(rest as [boolean, string?, string?]));
     } catch (error) {
-      // Rejected arguments leave the native request running unchanged.
-      xhr._appsignalSending = sending;
-      xhr._appsignalParked = parked;
-      xhr._appsignalHostHeaders = previousHeaders;
-      xhr._appsignalSdkTraceparent = previousSdkTraceparent;
-      xhr._appsignalMethod = previousMethod;
-      xhr._appsignalUrl = previousUrl;
+      state.prepared = previousPrepared;
+      state.active = previousActive;
+      state.endings = previousEndings;
+      trackXhr(state);
       throw error;
     }
-    if (sending) {
-      sending.status = status;
-      if (status === undefined) {
-        sending.aborted = true;
-        completeXhrRecord(xhr, sending, true);
-      } else if (status !== 0) {
-        completeXhrRecord(xhr, sending, false);
+    if (previousActive) {
+      if (!done) {
+        previousActive.cancelled = true;
+        settleXhr(state, previousActive, { kind: "cancelled" });
+      } else if (previousActive.status !== 0) {
+        settleXhr(state, previousActive, { kind: "response", status: previousActive.status! });
       }
-      // Status zero still belongs to the pending named terminal event.
     }
+    trackXhr(state);
   };
 
-  // abort() reaches readyState 4 with status 0, indistinguishable from a
-  // failure, and fires before the `abort` event. Mark it here.
-  underlyingXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.setRequestHeader = function (name: string, value: string) {
-    const xhr = this as WatchedXhr;
     const result = underlyingXhrSetHeader.call(this, name, value);
-    // Recorded only once the call is accepted: a rejected one leaves no header
-    // on the request, so the SDK must still apply its own.
-    const headers = xhr._appsignalHostHeaders ??= new Map();
-    const key = String(name).toLowerCase();
-    const previous = headers.get(key);
-    const normalized = String(value).trim();
-    headers.set(key, previous === undefined ? normalized : `${previous}, ${normalized}`);
+    const prepared = xhrStates.get(this)?.prepared;
+    if (prepared) {
+      const key = String(name).toLowerCase();
+      const normalized = String(value).trim();
+      const previous = prepared.headers.get(key);
+      prepared.headers.set(key, previous === undefined ? normalized : `${previous}, ${normalized}`);
+    }
     return result;
   };
 
-  underlyingXhrAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
-    const xhr = this as WatchedXhr;
-    // abort() at DONE is cleanup, not cancellation of the completed request.
-    const live = xhr._appsignalSending;
-    if (live) {
-      if (xhr.readyState === 4) {
-        live.status = xhr.status;
-        if (live.status === 0) {
-          xhr._appsignalSending = null;
-          xhr._appsignalParked = live;
-        } else {
-          completeXhrRecord(xhr, live, false);
-        }
+    const state = xhrStates.get(this);
+    const active = state?.active;
+    if (state && active) {
+      if (this.readyState === 4) {
+        captureXhrDone(state, active);
+        if (active.status !== 0) settleXhr(state, active, { kind: "response", status: active.status! });
       } else {
-        live.aborted = true;
+        active.cancelled = true;
       }
     }
     return underlyingXhrAbort.call(this);
   };
 
-  XMLHttpRequest.prototype.send = function (
-    body?: Document | XMLHttpRequestBodyInit | null,
-  ) {
-    const xhr = this as WatchedXhr;
-    const url = xhr._appsignalUrl || "";
-    const method = (xhr._appsignalMethod || "GET").toUpperCase();
-    // Opened before the SDK patched open(), so there is no url to report or
-    // propagate to.
-    if (!url) return underlyingXhrSend.call(this, body);
-
-    watchXhr(xhr);
-    const previous = xhr._appsignalSending;
-    const pending: XhrRecord = { generation, url, method, startTime: Date.now(), aborted: false };
-    xhr._appsignalSending = pending;
-    xhrsToReport.add(xhr);
-    const headers = new Headers();
-    // Show a before-listener the trace header the host already set, so it can
-    // join that trace instead of starting a rival one.
-    const hostTraceparent = xhr._appsignalHostHeaders?.get("traceparent") ?? xhr._appsignalSdkTraceparent;
-    if (hostTraceparent) headers.set("traceparent", hostTraceparent);
-
-    const ctx: RequestContext = { url, method, headers };
+  XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
+    const state = xhrStates.get(this);
+    const prepared = state?.prepared;
+    if (!state || !prepared) return underlyingXhrSend.call(this, body);
+    const previousActive = state.active;
+    const record: XhrRecord = { generation, prepared, startTime: Date.now(), cancelled: false, completed: false };
+    state.active = record;
+    trackXhr(state);
+    const headers = new Headers(Object.fromEntries(prepared.headers));
+    const ctx: RequestContext = { url: prepared.url, method: prepared.method, headers };
     for (const listener of beforeListeners) {
       try { listener(ctx); } catch { /* swallow */ }
     }
-    // A caller's header cannot be replaced on XHR. Adopt the listener's
-    // identity only if its traceparent will actually be sent unchanged.
-    let traceparentApplied = !headers.has("traceparent")
-      || headers.get("traceparent") === hostTraceparent;
-
-    // Apply headers contributed by before-listeners, through the underlying
-    // method so they are not recorded as the host's. A name the host already
-    // set is left alone: setRequestHeader would append to it and produce one
-    // malformed header rather than replacing it. setRequestHeader can also
-    // throw on forbidden headers (Cookie, Host, etc.); ignore those.
-    const hostHeaders = xhr._appsignalHostHeaders;
     headers.forEach((value, key) => {
-      if (hostHeaders?.has(key.toLowerCase()) || (key === "traceparent" && xhr._appsignalSdkTraceparent !== undefined)) return;
-
+      if (prepared.headers.has(key)) return;
       try {
-        underlyingXhrSetHeader.call(xhr, key, value);
-        if (key === "traceparent") {
-          traceparentApplied = true;
-          xhr._appsignalSdkTraceparent = value;
-        }
-      } catch { /* forbidden header */ }
+        underlyingXhrSetHeader.call(this, key, value);
+        prepared.headers.set(key, value);
+      } catch { /* rejected header */ }
     });
-    if (traceparentApplied) pending.trace = ctx.trace;
-
+    // Only adopt trace context accepted by the platform.
+    if (!headers.has("traceparent") || headers.get("traceparent") === prepared.headers.get("traceparent")) {
+      record.trace = ctx.trace;
+    }
     try {
       return underlyingXhrSend.call(this, body);
     } catch (error) {
-      // The native send refused this call, so the request already in flight,
-      // if there is one, keeps its own record.
-      xhr._appsignalSending = previous ?? null;
-      if (!previous && !xhr._appsignalParked) xhrsToReport.delete(xhr);
+      if (state.active === record) state.active = previousActive;
+      // A synchronous request can emit its terminal events before send throws.
+      trackXhr(state);
       throw error;
     }
   };
