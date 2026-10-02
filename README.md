@@ -137,11 +137,20 @@ unchanged for application code.
 
 Request reports honor `errors.enabled`, `errors.sampleRate`, `beforeError`,
 rate limits, `privacy.networkBlocklist`, and `privacy.queryParamsAllowlist`.
-Anchor each tracing pattern on a host. Patterns match `host + pathname`,
-including non-default ports, and tracing checks the host separately so path
-segments cannot satisfy a host pattern. A wildcard host such as `**/api/**`
-still matches that path on third-party hosts. Use `api.example.com/**` for a
-specific host, or include its port, such as `api.example.com:8443/**`.
+Tracing targets and network blocklists share one URL-pattern contract. Hosts
+match case insensitively and ignore a trailing dot; paths remain case sensitive.
+A host-only pattern matches all paths. A pattern with no port matches every
+port; an explicit port matches only that port, including default ports such as
+HTTPS 443. For example, `api.example.com/**` covers that host on every port,
+while `api.example.com:8443/**` covers only 8443.
+
+The host is matched separately so path segments cannot satisfy a host pattern.
+Anchor tracing targets on your own host: `**/api/**` still matches that path on
+third-party hosts. Compared with previous versions, a portless pattern now
+also matches non-default ports, and blocklists no longer match a host name that
+appears only in a path. Audit existing patterns before upgrading; add explicit
+ports where needed, and write `**/path/**` for a blocklist intended to match a
+path on every host.
 
 `beforeError` receives `HTTPError` or `TimeoutError`, with request details in
 `context.request`; those details are sent as `params.request`. Network

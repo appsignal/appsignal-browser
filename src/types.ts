@@ -35,8 +35,10 @@ export interface BrowserConfig {
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to propagate trace context to. Matching fetch/XHR requests
    * also report HTTP 5xx responses and timeouts as browser root spans.
-   * Glob syntax against host + pathname, including a non-default port.
-   * The host is checked separately to keep path segments out of host matches. */
+   * Glob syntax. The host and path are matched separately. Hosts are case
+   * insensitive and ignore a trailing dot; paths remain case sensitive.
+   * A host-only pattern matches every path. Omitted ports match any port;
+   * an explicit port matches only that port, including a default port. */
   tracePropagationTargets?: string[];
 
   errors?: ErrorsConfig;
@@ -89,9 +91,10 @@ export interface PrivacyConfig {
    *  - `web_vitals.page_url`
    *  - the error payload's `environment.url` */
   queryParamsAllowlist?: string[];
-  /** Glob URL patterns whose requests are never recorded. Matched against
-   * host + pathname. Applied to network breadcrumbs and automatic request
-   * errors; when replay returns it will gate replay's network capture too. */
+  /** Glob URL patterns whose requests are never recorded. Uses the same
+   * host, path, and port semantics as tracePropagationTargets. Applied to
+   * network breadcrumbs and automatic request errors; when replay returns
+   * it will gate replay's network capture too. */
   networkBlocklist?: string[];
   /** DOM-derived captures only. Selectors are CSS selectors evaluated
    * against live DOM nodes; they have no effect on data that isn't sourced

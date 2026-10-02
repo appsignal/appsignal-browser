@@ -5,11 +5,19 @@ import { matchesUrl } from "./utils.js";
 // segment stand in for a host.
 describe("matchesUrl", () => {
   const cases: [string, string, boolean][] = [
-    // Preserve explicit host + pathname syntax and existing port semantics.
+    // A host pattern matches that host, whatever the URL carries around it.
     ["api.example.com/**", "https://api.example.com/users/42", true],
     ["api.example.com/**", "https://API.EXAMPLE.COM/users/42", true],
-    ["api.example.com/**", "https://api.example.com./users/42", false],
-    ["api.example.com/**", "https://api.example.com:8443/users/42", false],
+    ["api.example.com/**", "https://api.example.com./users/42", true],
+    ["api.example.com/**", "https://api.example.com:8443/users/42", true],
+    ["API.EXAMPLE.COM/**", "https://api.example.com/users", true],
+    ["API.EXAMPLE.COM/Users/**", "https://api.example.com/Users/42", true],
+    ["API.EXAMPLE.COM/Users/**", "https://api.example.com/users/42", false],
+    ["api.example.com:443/**", "https://api.example.com:443/users", true],
+    ["api.example.com:80/**", "http://api.example.com/users", true],
+    ["api.example.com:443/**", "http://api.example.com/users", false],
+    ["[::1]/**", "http://[::1]/users", true],
+    ["[::1]:80/**", "http://[::1]/users", true],
     // A path segment is not a host.
     ["api.example.com/**", "https://evil.com/api.example.com/x", false],
     ["**.example.com/**", "https://evil.com/cdn/logo.example.com/x", false],
@@ -17,9 +25,9 @@ describe("matchesUrl", () => {
     // A pattern that names a port means that port.
     ["localhost:5005/**", "http://localhost:5005/api/orders", true],
     ["localhost:5005/**", "http://localhost:3000/api/orders", false],
-    ["localhost/**", "http://localhost:5005/api/orders", false],
-    // A host-only pattern retains its existing behavior.
-    ["api.example.com", "https://api.example.com/anything/at/all", false],
+    ["localhost/**", "http://localhost:5005/api/orders", true],
+    // No path part means the whole host.
+    ["api.example.com", "https://api.example.com/anything/at/all", true],
     // One `*` stays inside a path segment; `**` crosses them.
     ["api.example.com/v1/*", "https://api.example.com/v1/users", true],
     ["api.example.com/v1/*", "https://api.example.com/v1/users/42", false],
