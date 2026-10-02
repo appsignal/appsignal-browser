@@ -503,3 +503,113 @@ describe("request failure traces", () => {
     expect(reports).toHaveLength(0);
   });
 });
+
+
+describe("trace headers on the wire", () => {
+  const traceId = "a".repeat(32);
+  const spanId = "b".repeat(16);
+  const valid = `00-${traceId}-${spanId}-01`;
+  const malformed = [
+    "invalid", `00-${traceId}-${spanId}`, `ff-${traceId}-${spanId}-01`,
+    `zz-${traceId}-${spanId}-01`, `00-${traceId}-${spanId}-gg`,
+    `${valid}-extra`, `${valid}, ${valid}`, `00-${"0".repeat(32)}-${spanId}-01`,
+  ];
+
+  it.each(malformed)("replaces malformed fetch context: %s", async traceparent => {
+    init(config());
+    await fetch("http://localhost/api/orders", { headers: { traceparent } });
+    expect(reports).toHaveLength(1);
+    expectIdentity(reports[0]);
+    expect(requests[0].traceparent).not.toBe(traceparent);
+    expect(requests[0].traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+  });
+
+  it.each(malformed)("does not invent an identity for malformed XHR context: %s", traceparent => {
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "http://localhost/api/orders");
+    xhr.setRequestHeader("traceparent", traceparent);
+    xhr.send();
+    Object.defineProperty(xhr, "readyState", { value: 4 });
+    Object.defineProperty(xhr, "status", { value: 500 });
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(reports).toHaveLength(0);
+  });
+
+  it("uses the combined XHR header rather than its last appended value", () => {
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "http://localhost/api/orders");
+    xhr.setRequestHeader("traceparent", valid);
+    xhr.setRequestHeader("traceparent", valid);
+    xhr.send();
+    Object.defineProperty(xhr, "readyState", { value: 4 });
+    Object.defineProperty(xhr, "status", { value: 500 });
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(reports).toHaveLength(0);
+  });
+
+  it("adopts a future-version header with the required fields", async () => {
+    init(config());
+    await fetch("http://localhost/api/orders", { headers: { traceparent: `01-${traceId}-${spanId}-01-extra` } });
+    expect(reports).toHaveLength(1);
+    expectIdentity(reports[0]);
+    expect(reports[0].trace_id).toBe(traceId);
+  });
+});
+
+
+describe("XHR header application", () => {
+  it("adopts a caller header with surrounding HTTP whitespace", () => {
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "http://localhost/api/orders");
+    xhr.setRequestHeader("traceparent", ` 00-${"a".repeat(32)}-${"b".repeat(16)}-01 `);
+    xhr.send();
+    Object.defineProperty(xhr, "readyState", { value: 4 });
+    Object.defineProperty(xhr, "status", { value: 500 });
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ trace_id: "a".repeat(32), span_id: "b".repeat(16) });
+  });
+
+  it("does not claim trace context when header application throws", () => {
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    vi.spyOn(XMLHttpRequest.prototype, "setRequestHeader").mockImplementation(() => { throw new Error("header refused"); });
+    init(config());
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "http://localhost/api/orders");
+    expect(() => xhr.send()).not.toThrow();
+    Object.defineProperty(xhr, "readyState", { value: 4 });
+    Object.defineProperty(xhr, "status", { value: 500 });
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(reports).toHaveLength(0);
+  });
+});
+
+
+describe("fetch no-cors mode", () => {
+  it.each(["init", "request"] as const)("skips tracing for no-cors mode from %s", async source => {
+    const timeout = new DOMException("Timed out", "TimeoutError");
+    respond = async () => { throw timeout; };
+    init(config());
+    const input = source === "request"
+      ? new Request("http://localhost/api/orders", { mode: "no-cors" })
+      : "http://localhost/api/orders";
+    await fetch(input, source === "init" ? { mode: "no-cors" } : undefined).catch(() => {});
+    expect(requests[0].traceparent).toBeNull();
+    expect(reports).toEqual([]);
+  });
+
+  it("traces when init overrides a Request's no-cors mode", async () => {
+    init(config());
+    const input = new Request("http://localhost/api/orders", { mode: "no-cors" });
+    await fetch(input, { mode: "cors" });
+    expect(requests[0].traceparent).toMatch(/^00-/);
+    expect(reports).toHaveLength(1);
+    expectIdentity(reports[0]);
+  });
+});

@@ -154,7 +154,9 @@ function patchFetch(): void {
     // `new Headers(init?.headers)` would be empty for a `fetch(request)` call
     // and silently drop every header the caller set on the Request.
     let finalInit = init;
-    if (beforeListeners.length > 0) {
+    const mode = init?.mode ?? (input instanceof Request ? input.mode : undefined);
+    // The browser silently strips traceparent in no-cors mode.
+    if (beforeListeners.length > 0 && mode !== "no-cors") {
       // The platform replaces rather than merges: `new Request(input, init)`
       // empties the request's header list and refills it from `init.headers`
       // when that member is present. Seeding from both would put back a header
@@ -225,6 +227,7 @@ type XhrRecord = {
   method: string;
   startTime: number;
   aborted: boolean;
+  completed?: boolean;
   status?: number;
   trace?: PropagatedTrace;
 };
@@ -239,6 +242,8 @@ type WatchedXhr = XMLHttpRequest & {
   // value to read a traceparent the host already set. XHR cannot read a
   // request header back.
   _appsignalHostHeaders?: Map<string, string>;
+  // Native send can reject after this header was applied. Keep it for retries.
+  _appsignalSdkTraceparent?: string;
   // The send() that is still running.
   _appsignalSending?: XhrRecord | null;
   // A request that reached DONE with no status, waiting for the named event
@@ -247,29 +252,30 @@ type WatchedXhr = XMLHttpRequest & {
   _appsignalParked?: XhrRecord | null;
 };
 
-/** The record the event now firing belongs to, removed from the object so it
- * reports once.
- *
- * Every listener takes its record from here. A parked record wins, because the
- * event that classifies it arrives after the object may have moved on. Reading
- * the two slots in a different order in one listener than in another is what
- * made a parked record emit against the next request's status. */
-function takeXhrRecord(xhr: WatchedXhr): XhrRecord | null {
-  const parked = xhr._appsignalParked;
-  if (parked) {
-    xhr._appsignalParked = null;
-    if (!xhr._appsignalSending) xhrsToReport.delete(xhr);
-    return parked;
-  }
-  // No handoff happened, so a host handler that beat ours still owns the
-  // object. Its own request is the one this event belongs to.
+/** Pick the request this terminal event belongs to. A parked request owns
+ * the next named event even if the host has already reused the object. */
+function recordForXhrEvent(xhr: WatchedXhr): XhrRecord | null {
+  if (xhr._appsignalParked) return xhr._appsignalParked;
   const sending = xhr._appsignalSending;
-  if (sending && xhr.readyState === 4) {
-    xhr._appsignalSending = null;
-    xhrsToReport.delete(xhr);
-    return sending;
-  }
-  return null;
+  if (!sending || xhr.readyState !== 4) return null;
+  sending.status = xhr.status;
+  return sending;
+}
+
+/** Complete an explicit record, independent of the object's current state.
+ * Detach before notifying listeners, which may synchronously reuse the XHR. */
+function completeXhrRecord(
+  xhr: WatchedXhr,
+  record: XhrRecord,
+  failed: boolean,
+  timedOut = false,
+): void {
+  if (record.completed) return;
+  record.completed = true;
+  if (xhr._appsignalParked === record) xhr._appsignalParked = null;
+  if (xhr._appsignalSending === record) xhr._appsignalSending = null;
+  if (!xhr._appsignalSending && !xhr._appsignalParked) xhrsToReport.delete(xhr);
+  emitXhrReport(xhr, record, failed, timedOut);
 }
 
 function emitXhrReport(
@@ -299,8 +305,8 @@ function emitXhrReport(
 /** Report whatever this event ended. One release point, so no two listeners
  * can disagree about which record an event belongs to. */
 function releaseXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
-  const record = takeXhrRecord(xhr);
-  if (record) emitXhrReport(xhr, record, failed, timedOut);
+  const record = recordForXhrEvent(xhr);
+  if (record) completeXhrRecord(xhr, record, failed, timedOut);
 }
 
 /** Report each XHR that has finished but whose report has not run yet. A host
@@ -314,23 +320,6 @@ export function reportFinishedXhrs(): void {
       releaseXhr(xhr, (xhr._appsignalParked?.status ?? xhr.status) === 0);
     }
   }
-}
-
-/** Report a request the reopen is about to terminate. `open()` resets the
- * object and the events that would have reported it never fire, so a host that
- * retries on it would otherwise lose the request it is retrying. A parked
- * record is left alone: its named event still has to classify it, and
- * reporting it here would drop the timeout. */
-function flushOnReopen(xhr: WatchedXhr): void {
-  const sending = xhr._appsignalSending;
-  if (!sending) return;
-  if (xhr.readyState === 4) {
-    sending.status = xhr.status;
-    releaseXhr(xhr, xhr.status === 0);
-    return;
-  }
-  sending.aborted = true;
-  releaseXhr(xhr, true);
 }
 
 /** Registers once per object, in open(): listeners run in registration order
@@ -355,7 +344,7 @@ function watchXhr(xhr: WatchedXhr): void {
       xhr._appsignalParked = sending;
       return;
     }
-    releaseXhr(xhr, false);
+    completeXhrRecord(xhr, sending, false);
   });
 
   // `load` after a status 0 means the request succeeded and no named event is
@@ -379,18 +368,49 @@ function patchXhr(): void {
     ...rest: unknown[]
   ) {
     const xhr = this as WatchedXhr;
-    flushOnReopen(xhr);
-    // open() clears the request's headers, so the record of them goes too.
+    const sending = xhr._appsignalSending;
+    const parked = xhr._appsignalParked;
+    const status = sending && xhr.readyState === 4 ? xhr.status : undefined;
+    const previousHeaders = xhr._appsignalHostHeaders;
+    const previousSdkTraceparent = xhr._appsignalSdkTraceparent;
+    const previousMethod = xhr._appsignalMethod;
+    const previousUrl = xhr._appsignalUrl;
+    // Prepare for synchronous OPENED handlers that may send a new request.
+    // Reporting the old request waits until native open() accepts the call.
+    xhr._appsignalSending = null;
+    if (sending && status === 0) xhr._appsignalParked = sending;
     xhr._appsignalHostHeaders = undefined;
+    xhr._appsignalSdkTraceparent = undefined;
     xhr._appsignalMethod = method;
     xhr._appsignalUrl = typeof url === "string" ? url : url.href;
     watchXhr(xhr);
-    return underlyingXhrOpen.call(
-      this,
-      method,
-      url,
-      ...(rest as [boolean, string?, string?]),
-    );
+    try {
+      underlyingXhrOpen.call(
+        this,
+        method,
+        url,
+        ...(rest as [boolean, string?, string?]),
+      );
+    } catch (error) {
+      // Rejected arguments leave the native request running unchanged.
+      xhr._appsignalSending = sending;
+      xhr._appsignalParked = parked;
+      xhr._appsignalHostHeaders = previousHeaders;
+      xhr._appsignalSdkTraceparent = previousSdkTraceparent;
+      xhr._appsignalMethod = previousMethod;
+      xhr._appsignalUrl = previousUrl;
+      throw error;
+    }
+    if (sending) {
+      sending.status = status;
+      if (status === undefined) {
+        sending.aborted = true;
+        completeXhrRecord(xhr, sending, true);
+      } else if (status !== 0) {
+        completeXhrRecord(xhr, sending, false);
+      }
+      // Status zero still belongs to the pending named terminal event.
+    }
   };
 
   // abort() reaches readyState 4 with status 0, indistinguishable from a
@@ -401,15 +421,32 @@ function patchXhr(): void {
     const result = underlyingXhrSetHeader.call(this, name, value);
     // Recorded only once the call is accepted: a rejected one leaves no header
     // on the request, so the SDK must still apply its own.
-    (xhr._appsignalHostHeaders ??= new Map()).set(String(name).toLowerCase(), String(value));
+    const headers = xhr._appsignalHostHeaders ??= new Map();
+    const key = String(name).toLowerCase();
+    const previous = headers.get(key);
+    const normalized = String(value).trim();
+    headers.set(key, previous === undefined ? normalized : `${previous}, ${normalized}`);
     return result;
   };
 
   underlyingXhrAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
     const xhr = this as WatchedXhr;
-    const live = xhr._appsignalSending ?? xhr._appsignalParked;
-    if (live) live.aborted = true;
+    // abort() at DONE is cleanup, not cancellation of the completed request.
+    const live = xhr._appsignalSending;
+    if (live) {
+      if (xhr.readyState === 4) {
+        live.status = xhr.status;
+        if (live.status === 0) {
+          xhr._appsignalSending = null;
+          xhr._appsignalParked = live;
+        } else {
+          completeXhrRecord(xhr, live, false);
+        }
+      } else {
+        live.aborted = true;
+      }
+    }
     return underlyingXhrAbort.call(this);
   };
 
@@ -431,14 +468,17 @@ function patchXhr(): void {
     const headers = new Headers();
     // Show a before-listener the trace header the host already set, so it can
     // join that trace instead of starting a rival one.
-    const hostTraceparent = xhr._appsignalHostHeaders?.get("traceparent");
+    const hostTraceparent = xhr._appsignalHostHeaders?.get("traceparent") ?? xhr._appsignalSdkTraceparent;
     if (hostTraceparent) headers.set("traceparent", hostTraceparent);
 
     const ctx: RequestContext = { url, method, headers };
     for (const listener of beforeListeners) {
       try { listener(ctx); } catch { /* swallow */ }
     }
-    pending.trace = ctx.trace;
+    // A caller's header cannot be replaced on XHR. Adopt the listener's
+    // identity only if its traceparent will actually be sent unchanged.
+    let traceparentApplied = !headers.has("traceparent")
+      || headers.get("traceparent") === hostTraceparent;
 
     // Apply headers contributed by before-listeners, through the underlying
     // method so they are not recorded as the host's. A name the host already
@@ -447,10 +487,17 @@ function patchXhr(): void {
     // throw on forbidden headers (Cookie, Host, etc.); ignore those.
     const hostHeaders = xhr._appsignalHostHeaders;
     headers.forEach((value, key) => {
-      if (hostHeaders?.has(key.toLowerCase())) return;
+      if (hostHeaders?.has(key.toLowerCase()) || (key === "traceparent" && xhr._appsignalSdkTraceparent !== undefined)) return;
 
-      try { underlyingXhrSetHeader.call(xhr, key, value); } catch { /* forbidden header */ }
+      try {
+        underlyingXhrSetHeader.call(xhr, key, value);
+        if (key === "traceparent") {
+          traceparentApplied = true;
+          xhr._appsignalSdkTraceparent = value;
+        }
+      } catch { /* forbidden header */ }
     });
+    if (traceparentApplied) pending.trace = ctx.trace;
 
     try {
       return underlyingXhrSend.call(this, body);

@@ -311,3 +311,47 @@ describe("a parked record across every ending", () => {
     }
   }
 });
+
+
+describe("explicit XHR completion", () => {
+  it("releases an in-flight request on reopen, even without another send", () => {
+    const seen: { url: string; aborted?: boolean }[] = [];
+    onAfterRequest(r => seen.push({ url: r.url, aborted: r.aborted }));
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/first");
+    xhr.send();
+    xhr.open("GET", "https://example.com/second");
+    expect(seen).toEqual([{ url: "https://example.com/first", aborted: true }]);
+    finish(xhr);
+    xhr.dispatchEvent(new Event("load"));
+    expect(seen).toHaveLength(1);
+  });
+});
+
+
+describe("rejected XHR reopen", () => {
+  it("keeps the active request when native open rejects its arguments", () => {
+    const seen: { url: string; status?: number; aborted?: boolean }[] = [];
+    onAfterRequest(r => seen.push({ url: r.url, status: r.status, aborted: r.aborted }));
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/original");
+    xhr.send();
+    expect(() => xhr.open("INVALID METHOD", "https://example.com/next")).toThrow();
+    expect(seen).toEqual([]);
+    finish(xhr, 500);
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(seen).toEqual([{ url: "https://example.com/original", status: 500, aborted: false }]);
+  });
+
+  it("preserves caller headers when a rejected open precedes send", () => {
+    const seen: (string | null)[] = [];
+    onBeforeRequest(ctx => { seen.push(ctx.headers.get("traceparent")); });
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/original");
+    xhr.setRequestHeader("traceparent", "caller-context");
+    expect(() => xhr.open("INVALID METHOD", "https://example.com/next")).toThrow();
+    xhr.send();
+    xhr.abort();
+    expect(seen).toEqual(["caller-context"]);
+  });
+});

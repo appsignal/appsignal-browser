@@ -27,16 +27,14 @@ export function initTracing(tracePropagationTargets: string[]): void {
   }));
 }
 
-const TRACE_ID = /^[0-9a-f]{32}$/;
-const SPAN_ID = /^[0-9a-f]{16}$/;
-
 /** The ids of a W3C `traceparent` the caller set, when it is one we can join.
  * An all-zero id is invalid per the spec and names no span. */
 function parseTraceparent(value: string | null): PropagatedTrace | undefined {
   if (!value) return undefined;
-  const [version, traceId, spanId] = value.trim().split("-");
-  if (version?.length !== 2) return undefined;
-  if (!TRACE_ID.test(traceId ?? "") || !SPAN_ID.test(spanId ?? "")) return undefined;
+  const parts = value.trim().match(/^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-.*)?$/);
+  if (!parts) return undefined;
+  const [, version, traceId, spanId, , extension] = parts;
+  if (version === "ff" || (version === "00" && extension !== undefined)) return undefined;
   if (/^0+$/.test(traceId) || /^0+$/.test(spanId)) return undefined;
   return { traceId, spanId };
 }
