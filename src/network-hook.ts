@@ -60,6 +60,7 @@ let beforeListeners: BeforeRequestListener[] = [];
 let afterListeners: AfterRequestListener[] = [];
 
 let installed = false;
+let generation = 0;
 let underlyingFetch: typeof window.fetch;
 let underlyingXhrOpen: typeof XMLHttpRequest.prototype.open;
 let underlyingXhrSend: typeof XMLHttpRequest.prototype.send;
@@ -102,6 +103,7 @@ export function initNetworkHook(): void {
 
 export function destroyNetworkHook(): void {
   if (!installed) return;
+  generation++;
   // Drop the subscriber references first, so a failed restore does not retain
   // them. `installed` says our patch is on the globals, so it goes down only
   // for the ones we put back: a later init must not wrap our own wrapper,
@@ -128,15 +130,22 @@ export function destroyNetworkHook(): void {
   installed = !restored;
 }
 
+function resolveRequestUrl(url: string): string {
+  try { return new URL(url, document.baseURI).href; }
+  catch { return url; }
+}
+
 function patchFetch(): void {
   underlyingFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
-    const url =
+    const requestGeneration = generation;
+    const url = resolveRequestUrl(
       typeof input === "string"
         ? input
         : input instanceof URL
           ? input.href
-          : input.url;
+          : input.url,
+    );
     const method =
       (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
     const startTime = Date.now();
@@ -175,6 +184,7 @@ function patchFetch(): void {
 
     try {
       const response = await underlyingFetch(input, finalInit);
+      if (requestGeneration !== generation) return response;
       const result: RequestResult = {
         url,
         method,
@@ -190,6 +200,7 @@ function patchFetch(): void {
       }
       return response;
     } catch (err) {
+      if (requestGeneration !== generation) throw err;
       // A cancelled fetch rejects with AbortError, which is not a failure.
       const name = (err as { name?: string } | null)?.name;
       // Custom abort reasons still mean cancellation. TimeoutError is a
@@ -224,6 +235,7 @@ type PreparedXhr = {
 };
 
 type XhrRecord = {
+  generation: number;
   prepared: PreparedXhr;
   startTime: number;
   endTime?: number;
@@ -271,6 +283,7 @@ function settleXhr(state: XhrState, record: XhrRecord, outcome: XhrOutcome): voi
   record.completed = true;
   if (state.active === record) state.active = undefined;
   trackXhr(state);
+  if (record.generation !== generation) return;
   const result: RequestResult = {
     url: record.prepared.url,
     method: record.prepared.method,
@@ -345,7 +358,7 @@ function patchXhr(): void {
     const done = previousActive && this.readyState === 4;
     if (done) captureXhrDone(state, previousActive);
     state.active = undefined;
-    state.prepared = { url: String(url), method: method.toUpperCase(), headers: new Map() };
+    state.prepared = { url: resolveRequestUrl(String(url)), method: method.toUpperCase(), headers: new Map() };
     try {
       underlyingXhrOpen.call(this, method, url, ...(rest as [boolean, string?, string?]));
     } catch (error) {
@@ -397,7 +410,7 @@ function patchXhr(): void {
     const prepared = state?.prepared;
     if (!state || !prepared) return underlyingXhrSend.call(this, body);
     const previousActive = state.active;
-    const record: XhrRecord = { prepared, startTime: Date.now(), cancelled: false, completed: false };
+    const record: XhrRecord = { generation, prepared, startTime: Date.now(), cancelled: false, completed: false };
     state.active = record;
     trackXhr(state);
     const headers = new Headers(Object.fromEntries(prepared.headers));
