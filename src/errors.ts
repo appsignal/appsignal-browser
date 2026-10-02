@@ -39,10 +39,29 @@ let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefine
 // privacy gate every other capture path goes through.
 let allowlist: string[] = [];
 let networkBlocklist: string[] = [];
+// A request error that reached transport. Permanent: a report for that object
+// exists, so no later route may send a second one.
 let reportedRequestErrors = new WeakSet<object>();
+// A request error the SDK held back for volume, and the time the hold expires.
+// The gates that cause it are windowed, so the hold has to be windowed too, or
+// a ten second storm would silence the object for the life of the page.
+let suppressedRequestErrors = new WeakMap<object, number>();
+
+function trackable(error: unknown): error is object {
+  return error !== null && (typeof error === "object" || typeof error === "function");
+}
 
 function alreadyReported(error: unknown): boolean {
-  return error !== null && (typeof error === "object" || typeof error === "function") && reportedRequestErrors.has(error);
+  return trackable(error) && reportedRequestErrors.has(error);
+}
+
+/** True while a route that the host did not ask for must stay quiet. An
+ * explicit `captureError` is the host asking, so it does not consult this. */
+function handledRecently(error: unknown): boolean {
+  if (alreadyReported(error)) return true;
+  if (!trackable(error)) return false;
+  const until = suppressedRequestErrors.get(error);
+  return until !== undefined && Date.now() < until;
 }
 
 // Error click tracking — exported so breadcrumbs can check for recent errors
@@ -72,6 +91,11 @@ const RATE_LIMIT_MAX = 100;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 let rateWindowStart = 0;
 let rateWindowCount = 0;
+
+/** How long a held-back request error stays quiet on the routes the host did
+ * not ask for. The gates that hold it back are windowed, so this matches the
+ * longer of them. */
+const SUPPRESSION_HOLD_MS = Math.max(RATE_LIMIT_WINDOW_MS, DEDUPE_WINDOW_MS);
 
 function rateLimited(now: number): boolean {
   if (now - rateWindowStart >= RATE_LIMIT_WINDOW_MS) {
@@ -103,7 +127,7 @@ export function initErrors(
   beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
-    if (alreadyReported(event.error)) return;
+    if (handledRecently(event.error)) return;
     handleError(
       event.message,
       event.filename,
@@ -118,7 +142,7 @@ export function initErrors(
 
   rejectionHandler = (event: PromiseRejectionEvent) => {
     const reason = event.reason;
-    if (alreadyReported(reason)) return;
+    if (handledRecently(reason)) return;
     // errorLike, not `instanceof Error`, so a rejection carrying an error from
     // another realm keeps its message, class and stack instead of collapsing to
     // "{}" — which also made every such rejection share one dedupe key.
@@ -154,6 +178,7 @@ export function destroyErrors(): void {
   lastErrorTimestamp = 0;
   errorListeners.length = 0;
   reportedRequestErrors = new WeakSet();
+  suppressedRequestErrors = new WeakMap();
 }
 
 /** Report an error through the full pipeline. Used by captureError for framework plugins. */
@@ -214,10 +239,13 @@ export function reportRequestError(result: RequestResult): void {
     result.endTime,
   );
   const reason = result.failureReason;
-  // A report the SDK held back for volume must not come round again as a bare
-  // rejection: that one carries no trace and no longer names the endpoint.
-  if (outcome !== "dropped" && reason !== null && (typeof reason === "object" || typeof reason === "function")) {
+  if (!trackable(reason)) return;
+  if (outcome === "sent") {
     reportedRequestErrors.add(reason);
+  } else if (outcome === "suppressed") {
+    // Held back, not rejected, so the hold lasts only as long as the gate that
+    // caused it could still be in effect.
+    suppressedRequestErrors.set(reason, Date.now() + SUPPRESSION_HOLD_MS);
   }
 }
 
@@ -251,7 +279,10 @@ function handleError(
   if (message === "Script error." && !stack) return "dropped";
 
   // Sample rate check
-  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return "dropped";
+  // Sampling is a volume gate, so a second route must not roll again: that
+  // would report the failure at s + (1-s)s rather than s, and the second roll
+  // produces a bare error with no trace and no endpoint.
+  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return "suppressed";
 
   // Global rate limit — checked before the beforeError hook, the error
   // breadcrumb, the O(n) dedupe scan, and the network send, so a storm caps

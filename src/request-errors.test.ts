@@ -301,6 +301,46 @@ describe("request failure traces", () => {
     expect(reports.every(report => report.trace_id)).toBe(true);
   });
 
+  it("reports a held-back request again once the window has passed", async () => {
+    // The gates that hold it back are windowed, so the hold must be too. A ten
+    // second storm must not silence the object for the life of the page.
+    vi.useFakeTimers();
+    respond = async () => { throw new DOMException("The operation timed out", "TimeoutError"); };
+    init(config());
+    const failures: unknown[] = [];
+    for (let i = 0; i < 6; i++) {
+      failures.push(await fetch("http://localhost/api/orders").catch(e => e));
+    }
+    reports.length = 0;
+    vi.advanceTimersByTime(11_000);
+    rejectGlobally(failures[5]);
+
+    expect(reports).toHaveLength(1);
+  });
+
+  it("runs captureError for a request it only held back", async () => {
+    // The host asked for this one by hand, and no report exists for it.
+    respond = async () => { throw new DOMException("The operation timed out", "TimeoutError"); };
+    init(config());
+    let last: unknown;
+    for (let i = 0; i < 6; i++) last = await fetch("http://localhost/api/orders").catch(e => e);
+    reports.length = 0;
+    captureError(last as Error, { componentName: "OrderList" });
+
+    expect(reports).toHaveLength(1);
+  });
+
+  it("rolls the sample once for a request failure, not once per route", async () => {
+    respond = async () => { throw new DOMException("The operation timed out", "TimeoutError"); };
+    init(config({ errors: { sampleRate: 0.5 } }));
+    const rolls = [0.9, 0.1];
+    vi.spyOn(Math, "random").mockImplementation(() => rolls.shift() ?? 0.1);
+    const failure = await fetch("http://localhost/api/orders").catch(e => e);
+    rejectGlobally(failure);
+
+    expect(reports).toHaveLength(0);
+  });
+
   it("leaves a traceparent the host set on an XHR alone", () => {
     // setRequestHeader combines values, so setting ours over the host's would
     // send one malformed header that a conformant backend rejects whole.
