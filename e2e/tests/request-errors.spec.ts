@@ -231,3 +231,27 @@ test("retrying a rejected send preserves one propagated traceparent", async ({ p
   expect(joined.errors).toHaveLength(1);
   expect(joined.errors[0]).toMatchObject({ trace_id: trace, span_id: span });
 });
+
+for (const transport of ["fetch", "xhr"]) test(`${transport} relative URLs honor the actual resolved request blocklist`, async ({ page, request }) => {
+  await page.evaluate(async (transport) => {
+    const sdk = (window as any).AppsignalBrowser;
+    sdk.destroy();
+    history.replaceState(null, "", "/api/page");
+    sdk.init({ key: "test", endpoint: location.origin, tracePropagationTargets: [location.host + "/**"], privacy: { networkBlocklist: [location.host + "/api/**"] } });
+    const status = transport === "fetch"
+      ? (await fetch("echo?status=500")).status
+      : await new Promise<number>(resolve => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("GET", "echo?status=500");
+          xhr.onload = () => resolve(xhr.status);
+          xhr.send();
+        });
+    if (status !== 500) throw new Error("unexpected response");
+    sdk.captureError(new Error("relative-check-finished"));
+  }, transport);
+  const errors = await pollFor(request, items => {
+    const errors = ingestErrors(items);
+    return errors.some(e => (e.error as any)?.message === "relative-check-finished") ? errors : null;
+  });
+  expect(errors.filter(e => (e.error as any)?.name === "HTTPError")).toHaveLength(0);
+});

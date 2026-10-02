@@ -128,15 +128,21 @@ export function destroyNetworkHook(): void {
   installed = !restored;
 }
 
+function resolveRequestUrl(url: string): string {
+  try { return new URL(url, document.baseURI).href; }
+  catch { return url; }
+}
+
 function patchFetch(): void {
   underlyingFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
-    const url =
+    const url = resolveRequestUrl(
       typeof input === "string"
         ? input
         : input instanceof URL
           ? input.href
-          : input.url;
+          : input.url,
+    );
     const method =
       (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
     const startTime = Date.now();
@@ -382,7 +388,7 @@ function patchXhr(): void {
     xhr._appsignalHostHeaders = undefined;
     xhr._appsignalSdkTraceparent = undefined;
     xhr._appsignalMethod = method;
-    xhr._appsignalUrl = typeof url === "string" ? url : url.href;
+    xhr._appsignalUrl = resolveRequestUrl(typeof url === "string" ? url : url.href);
     watchXhr(xhr);
     try {
       underlyingXhrOpen.call(

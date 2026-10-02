@@ -355,3 +355,44 @@ describe("rejected XHR reopen", () => {
     expect(seen).toEqual(["caller-context"]);
   });
 });
+
+
+describe("request URL resolution", () => {
+  it("resolves fetch URLs against the document base before notifying listeners", async () => {
+    const base = document.createElement("base");
+    base.href = "https://example.com/api/";
+    document.head.append(base);
+    const before = vi.fn();
+    const after = vi.fn();
+    onBeforeRequest(before);
+    onAfterRequest(after);
+    try {
+      await window.fetch("echo");
+      expect(before.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      expect(after.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      expect(lastInput).toBe("echo");
+    } finally { base.remove(); }
+  });
+
+  it("keeps the XHR URL resolved at open even if the base changes before send", () => {
+    const base = document.createElement("base");
+    base.href = "https://example.com/api/";
+    document.head.append(base);
+    const before = vi.fn();
+    const after = vi.fn();
+    onBeforeRequest(before);
+    onAfterRequest(after);
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "echo");
+      base.href = "https://other.example/";
+      xhr.send();
+      finish(xhr, 500);
+      xhr.dispatchEvent(new Event("readystatechange"));
+      expect(before.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      expect(after.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      unfinish(xhr);
+      xhr.abort();
+    } finally { base.remove(); }
+  });
+});
