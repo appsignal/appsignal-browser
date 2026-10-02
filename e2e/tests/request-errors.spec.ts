@@ -231,3 +231,30 @@ test("retrying a rejected send preserves one propagated traceparent", async ({ p
   expect(joined.errors).toHaveLength(1);
   expect(joined.errors[0]).toMatchObject({ trace_id: trace, span_id: span });
 });
+
+
+test("a synchronous retry does not consume the original timeout event", async ({ page, request }) => {
+  await page.evaluate(() => new Promise<void>(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.ontimeout = () => {
+      xhr.timeout = 0;
+      xhr.open("GET", "/api/echo?status=500", false);
+      xhr.send();
+      resolve();
+    };
+    xhr.open("POST", "/api/echo?delay=2000");
+    xhr.timeout = 100;
+    xhr.send();
+  }));
+  const joined = await pollFor(request, items => {
+    const apis = items.filter((item): item is CapturedApi => item.kind === "api" && item.path === "/api/echo");
+    const errors = ingestErrors(items);
+    return apis.length === 2 && errors.length === 2 ? { apis, errors } : null;
+  });
+  for (const [method, name] of [["POST", "TimeoutError"], ["GET", "HTTPError"]]) {
+    const api = joined.apis.find(api => api.method === method)!;
+    const [, trace, span] = api.headers.traceparent!.split("-");
+    expect(joined.errors.find(error => (error.error as { name?: string })?.name === name))
+      .toMatchObject({ trace_id: trace, span_id: span });
+  }
+});
