@@ -313,6 +313,14 @@ export function scrubPageUrl(url: string, allowlist: string[]): string {
   return parsed.origin + stripTrailingSlash(parsed.pathname) + parsed.search + hash;
 }
 
+/** Match a tracing target without allowing a path segment to stand in for
+ * its host. Preserve the existing host + pathname and explicit-port syntax. */
+export function matchesUrl(pattern: string, url: URL): boolean {
+  const slash = pattern.indexOf("/");
+  const hostPattern = slash === -1 ? pattern : pattern.slice(0, slash);
+  return globMatch(hostPattern, url.host) && globMatch(pattern, url.host + url.pathname);
+}
+
 export function globMatch(pattern: string, input: string): boolean {
   const regex = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")

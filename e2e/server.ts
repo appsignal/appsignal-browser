@@ -124,6 +124,10 @@ const server = createServer(async (req, res) => {
       body,
       receivedAt: Date.now(),
     });
+    if (query.disconnect === "1") {
+      req.socket.destroy();
+      return;
+    }
     const status = query.status ? Number(query.status) : 200;
     // ?delay=NNN keeps the response open, so a test can cancel a request that
     // is still in flight.

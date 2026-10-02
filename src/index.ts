@@ -2,12 +2,12 @@ import type { BrowserConfig, EventPayload, ResolvedConfig, UserContext } from ".
 import { resolveConfig } from "./types.js";
 import { initSession, getSessionContext, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, touchActivity, endSession as sessionEndSession, stopSessionTracking } from "./session.js";
 import { initBreadcrumbs, addManualBreadcrumb, drainBreadcrumbs, destroyBreadcrumbs, onAfterNavigation } from "./breadcrumbs.js";
-import { initErrors, reportError, destroyErrors } from "./errors.js";
+import { initErrors, reportError, reportRequestError, destroyErrors } from "./errors.js";
 import { initVitals, drainVitals, finalizeRouteVitals, destroyVitals, markVitalsNavigation, setRouteTemplate as setVitalsRouteTemplate } from "./vitals.js";
 
 import { initTransport, sendEvents, sendBeaconEvents, destroyTransport, EVENTS_PATH, ERROR_PATH } from "./transport.js";
 import { initTracing, destroyTracing } from "./tracing.js";
-import { initNetworkHook, destroyNetworkHook } from "./network-hook.js";
+import { initNetworkHook, destroyNetworkHook, onAfterRequest } from "./network-hook.js";
 import { onVisibilityChange, onPageHide, destroyLifecycle } from "./lifecycle.js";
 import { logError, attemptCleanup } from "./utils.js";
 
@@ -225,10 +225,13 @@ function startCollection(endpoint: string): void {
     cfg.privacy.queryParamsAllowlist,
     clientConfig?.appVersion,
     clientConfig?.beforeError,
+    cfg.serviceName,
+    cfg.privacy.networkBlocklist,
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
     initTracing(clientConfig.tracePropagationTargets);
+    lifecycleUnsubscribers.push(onAfterRequest(reportRequestError));
   }
 
   initVitals(cfg.privacy.queryParamsAllowlist);

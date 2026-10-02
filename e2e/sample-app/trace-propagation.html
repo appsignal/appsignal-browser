@@ -15,13 +15,26 @@
        outgoing <code>fetch</code> / <code>XMLHttpRequest</code> whose URL
        matches any entry in <code>tracePropagationTargets</code>. The same
        trace id lands on the network breadcrumb's <code>data.trace_id</code>,
-       so frontend and backend traces stitch together.</p>
+       so requests can be inspected from an error's breadcrumbs. Network
+       failures and HTTP 5xx responses also report the browser request as
+       the root span of that request's backend trace.</p>
 
     <p>Glob syntax: <code>*</code> matches one path segment, <code>**</code>
        matches across segments. Match anchors on the URL's
        <code>host&nbsp;+&nbsp;pathname</code>.</p>
 
     <button id="trigger-fetch">fetch /api/echo</button>
+    <button id="trigger-fetch-500">fetch → HTTP 500 (request error)</button>
+    <button id="trigger-xhr-503">XHR → HTTP 503 (request error)</button>
+    <button id="trigger-timeout">fetch → timeout (request error)</button>
+    <button id="trigger-xhr-timeout">XHR → timeout (request error)</button>
+    <button id="trigger-xhr-retry">XHR → HTTP 500, retried on the same object</button>
+    <button id="trigger-connection-closed">fetch → connection closed (no request error)</button>
+    <button id="trigger-fetch-404">fetch → HTTP 404 (no request error)</button>
+    <button id="trigger-js-error">JavaScript error (independent trace)</button>
+    <button id="show-reports">Refresh captured error payloads</button>
+    <p>This fixture captures payloads locally. It does not create backend spans
+       or send reports to AppSignal.</p>
     <pre id="status">SDK loading…</pre>
 
     <script src="/dist/browser.umd.js"></script>
@@ -33,12 +46,74 @@
         // Only requests matching these globs get the traceparent header.
         // Prevents leaking trace context to third-party APIs (analytics,
         // CDNs, etc.) while still connecting frontend to your own backend.
-        tracePropagationTargets: ["**/api/**"],
+        tracePropagationTargets: ["localhost:*/api/**"],
       });
       document.getElementById("status").textContent = "SDK initialised";
 
       document.getElementById("trigger-fetch").addEventListener("click", function () {
         fetch("/api/echo");
+      });
+      document.getElementById("trigger-fetch-500").addEventListener("click", async function () {
+        const response = await fetch("/api/echo?status=500");
+        document.getElementById("status").textContent = "fetch resolved with HTTP " + response.status;
+      });
+      document.getElementById("trigger-xhr-503").addEventListener("click", function () {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/echo?status=503");
+        xhr.onload = () => {
+          document.getElementById("status").textContent = "XHR completed with HTTP " + xhr.status;
+        };
+        xhr.send();
+      });
+      document.getElementById("trigger-xhr-retry").addEventListener("click", function () {
+        const xhr = new XMLHttpRequest();
+        let retried = false;
+        // Set before open(), so it runs ahead of the SDK's own listener.
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState === 4 && !retried) {
+            retried = true;
+            xhr.open("GET", "/api/echo?status=200");
+            xhr.send();
+            document.getElementById("status").textContent = "XHR retried on the same object";
+          }
+        };
+        xhr.open("POST", "/api/echo?status=500");
+        xhr.send();
+      });
+      document.getElementById("trigger-xhr-timeout").addEventListener("click", function () {
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/echo?delay=2000");
+        xhr.timeout = 300;
+        xhr.ontimeout = () => {
+          document.getElementById("status").textContent = "XHR timed out";
+        };
+        xhr.send();
+      });
+      document.getElementById("trigger-timeout").addEventListener("click", async function () {
+        try {
+          await fetch("/api/echo?delay=2000", { signal: AbortSignal.timeout(300) });
+        } catch (error) {
+          document.getElementById("status").textContent = "fetch timed out: " + error.name;
+        }
+      });
+      document.getElementById("trigger-connection-closed").addEventListener("click", async function () {
+        try {
+          await fetch("/api/echo?disconnect=1", { method: "POST" });
+        } catch (error) {
+          document.getElementById("status").textContent = "fetch rejected: " + error.message;
+        }
+      });
+      document.getElementById("trigger-fetch-404").addEventListener("click", async function () {
+        const response = await fetch("/api/echo?status=404");
+        document.getElementById("status").textContent = "fetch resolved with HTTP " + response.status;
+      });
+      document.getElementById("trigger-js-error").addEventListener("click", function () {
+        throw new Error("Independent rendering error");
+      });
+      document.getElementById("show-reports").addEventListener("click", async function () {
+        const captured = await (await fetch("/__captured")).json();
+        const errors = captured.filter(item => item.kind === "ingest" && item.path === "/ingest/browser/errors");
+        document.getElementById("status").textContent = JSON.stringify(errors.map(item => JSON.parse(item.body)), null, 2);
       });
     </script>
   </body>

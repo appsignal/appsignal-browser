@@ -836,8 +836,7 @@ function timingPhases(entry: PerformanceResourceTiming): Record<string, unknown>
 function isBlocklisted(url: string): boolean {
   const parsed = safeUrl(url);
   if (!parsed) return false;
-  const hostPath = parsed.host + parsed.pathname;
-  return networkBlocklist.some((pattern) => globMatch(pattern, hostPath));
+  return networkBlocklist.some((pattern) => globMatch(pattern, parsed.host + parsed.pathname));
 }
 
 function isCollectEndpoint(url: string): boolean {
