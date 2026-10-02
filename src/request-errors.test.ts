@@ -286,6 +286,21 @@ describe("request failure traces", () => {
     expect(reports[0].params).toMatchObject({ request: { status: 500 } });
   });
 
+  it("holds back the rejection of a request it stopped reporting", async () => {
+    // Past the dedupe cap the SDK sends nothing, so the same rejection must
+    // not arrive through `unhandledrejection` as an untraced error that no
+    // longer names the endpoint.
+    respond = async () => { throw new DOMException("The operation timed out", "TimeoutError"); };
+    init(config());
+    for (let i = 0; i < 6; i++) {
+      const failure = await fetch("http://localhost/api/orders").catch(e => e);
+      rejectGlobally(failure);
+    }
+
+    expect(reports).toHaveLength(5);
+    expect(reports.every(report => report.trace_id)).toBe(true);
+  });
+
   it("leaves a traceparent the host set on an XHR alone", () => {
     // setRequestHeader combines values, so setting ours over the host's would
     // send one malformed header that a conformant backend rejects whole.

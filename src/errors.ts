@@ -193,7 +193,7 @@ export function reportRequestError(result: RequestResult): void {
   const errorClass = serverError ? "HTTPError" : "TimeoutError";
   const failure = serverError ? `HTTP ${result.status}` : "timed out";
   const durationMs = Math.max(0, result.endTime - result.startTime);
-  const sent = handleError(
+  const outcome = handleError(
     `${result.method} ${url}: ${failure}`,
     undefined, undefined, undefined, undefined,
     // The same duration rides the params, where `beforeError` can redact it.
@@ -214,10 +214,18 @@ export function reportRequestError(result: RequestResult): void {
     result.endTime,
   );
   const reason = result.failureReason;
-  if (sent && reason !== null && (typeof reason === "object" || typeof reason === "function")) {
+  // A report the SDK held back for volume must not come round again as a bare
+  // rejection: that one carries no trace and no longer names the endpoint.
+  if (outcome !== "dropped" && reason !== null && (typeof reason === "object" || typeof reason === "function")) {
     reportedRequestErrors.add(reason);
   }
 }
+
+/** `sent` reached transport. `suppressed` means the SDK held it back for
+ * volume, so the caller must not let the same object through another route.
+ * `dropped` means a gate or the host rejected it, and the host's own error
+ * still deserves its usual path. */
+type ErrorOutcome = "sent" | "suppressed" | "dropped";
 
 function handleError(
   message: string,
@@ -229,26 +237,26 @@ function handleError(
   errorClass?: string,
   trace?: ErrorTrace,
   occurredAt?: number,
-): boolean {
-  if (!config.enabled) return false;
+): ErrorOutcome {
+  if (!config.enabled) return "dropped";
 
   // Self-protection: ignore errors from our own SDK to prevent feedback loops
-  if (isOwnError(filename, stack)) return false;
+  if (isOwnError(filename, stack)) return "dropped";
 
   // Cross-origin script errors surface as an opaque "Script error." with no
   // stack and no usable location — the browser withholds the detail unless the
   // script is served with `crossorigin="anonymous"` + CORS headers. These can't
   // be symbolicated and carry zero actionable information, so drop them rather
   // than flood the stream with indistinguishable noise.
-  if (message === "Script error." && !stack) return false;
+  if (message === "Script error." && !stack) return "dropped";
 
   // Sample rate check
-  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return false;
+  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return "dropped";
 
   // Global rate limit — checked before the beforeError hook, the error
   // breadcrumb, the O(n) dedupe scan, and the network send, so a storm caps
   // the per-error work too, not just the wire volume.
-  if (rateLimited(Date.now())) return false;
+  if (rateLimited(Date.now())) return "suppressed";
 
   // beforeError hook — early-pipeline. Runs before any side effect (error
   // breadcrumb, lastErrorTimestamp, dedupe slot, payload construction,
@@ -278,9 +286,9 @@ function handleError(
       "the error was dropped. Move async work outside the hook (e.g. perform " +
       "it before calling captureError).",
     );
-    return false;
+    return "dropped";
   }
-  if (!hookResult) return false;
+  if (!hookResult) return "dropped";
   const effective: IncomingError = hookResult;
 
   const now = Date.now();
@@ -295,7 +303,7 @@ function handleError(
 
   // Deduplication: first 5 occurrences sent, 6+ suppressed
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
-  if (checkDedupe(dedupeKey, now)) return false;
+  if (checkDedupe(dedupeKey, now)) return "suppressed";
 
   const payload: BrowserError = {
     type: "error",
@@ -324,7 +332,7 @@ function handleError(
       try { l(payload); } catch { /* don't break the chain */ }
     }
   }
-  return true;
+  return "sent";
 }
 
 // Map our internal BrowserError to the AppSignal `FrontendTransaction` wire
