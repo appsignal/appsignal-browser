@@ -281,3 +281,58 @@ for (const transport of ["fetch", "xhr"]) test(`${transport} cannot report throu
   expect(httpErrors).toHaveLength(1);
   expect(httpErrors[0]).toMatchObject({ service_name: "Replacement", params: { request: { status: 503 } } });
 });
+
+test("preserves headers and trace identity on an iframe Request", async ({ page, request }) => {
+  const parent = `00-${"a".repeat(32)}-${"b".repeat(16)}-01`;
+  await page.evaluate(async parent => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const other = frame.contentWindow as any;
+    const input = new other.Request(location.origin + "/api/echo?status=500", { method: "POST", body: "payload", headers: { authorization: "Bearer test", traceparent: parent } });
+    await fetch(input);
+    (window as any).AppsignalBrowser.captureError(new Error("realm-check-finished"));
+  }, parent);
+  const items = await pollFor(request, items => ingestErrors(items).some(e => e.message === "realm-check-finished") ? items : null);
+  const api = items.find((e): e is CapturedApi => e.kind === "api")!;
+  expect(api.method).toBe("POST");
+  expect(api.body).toBe("payload");
+  const error = ingestErrors(items).find(e => e.error_class === "HTTPError")!;
+  expect(error).toMatchObject({ trace_id: "a".repeat(32), span_id: "b".repeat(16), params: { request: { method: "POST" } } });
+  expect(api.headers.authorization).toBe("Bearer test");
+  expect(api.headers.traceparent).toBe(parent);
+});
+
+test("reports a failed fetch given an iframe URL", async ({ page, request }) => {
+  await page.evaluate(async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const other = frame.contentWindow as any;
+    await fetch(new other.URL(location.origin + "/api/echo?status=500"));
+    (window as any).AppsignalBrowser.captureError(new Error("url-check-finished"));
+  });
+  const errors = await pollFor(request, items => {
+    const errors = ingestErrors(items);
+    return errors.some(e => e.message === "url-check-finished") ? errors : null;
+  });
+  const httpErrors = errors.filter(e => e.error_class === "HTTPError");
+  expect(httpErrors).toHaveLength(1);
+  expect((httpErrors[0].params as any).request.url).toMatch(/\/api\/echo$/);
+});
+
+test("does not invent a timeout span for an already aborted iframe Request", async ({ page, request }) => {
+  await page.evaluate(async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const other = frame.contentWindow as any;
+    const controller = new other.AbortController();
+    controller.abort(new other.DOMException("Expired", "TimeoutError"));
+    const input = new other.Request(location.origin + "/api/echo", { signal: controller.signal });
+    await fetch(input).catch(() => {});
+    (window as any).AppsignalBrowser.captureError(new Error("abort-check-finished"));
+  });
+  const errors = await pollFor(request, items => {
+    const errors = ingestErrors(items);
+    return errors.some(e => e.message === "abort-check-finished") ? errors : null;
+  });
+  expect(errors.filter(e => e.error_class === "TimeoutError")).toHaveLength(0);
+});

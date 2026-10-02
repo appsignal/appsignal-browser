@@ -135,21 +135,23 @@ function resolveRequestUrl(url: string): string {
   catch { return url; }
 }
 
+/** `instanceof` is false for a Request built in another frame, which has its
+ * own constructor. The tag check holds across frames, as `errorLike` does for
+ * a thrown Error. */
+function isRequest(input: RequestInfo | URL): input is Request {
+  return input instanceof Request || Object.prototype.toString.call(input) === "[object Request]";
+}
+
 function patchFetch(): void {
   underlyingFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const requestGeneration = generation;
-    const url = resolveRequestUrl(
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.href
-          : input.url,
-    );
+    const request = isRequest(input) ? input : undefined;
+    const url = resolveRequestUrl(request ? request.url : String(input));
     const method =
-      (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+      (init?.method || (request?.method ?? "GET")).toUpperCase();
     const startTime = Date.now();
-    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    const signal = init?.signal ?? request?.signal;
     // A signal that fired before this call means the request never goes out, so
     // nothing about it says anything about the server. `AbortSignal.timeout()`
     // reused across retries is the way this happens.
@@ -163,7 +165,7 @@ function patchFetch(): void {
     // `new Headers(init?.headers)` would be empty for a `fetch(request)` call
     // and silently drop every header the caller set on the Request.
     let finalInit = init;
-    const mode = init?.mode ?? (input instanceof Request ? input.mode : undefined);
+    const mode = init?.mode ?? request?.mode;
     // The browser silently strips traceparent in no-cors mode.
     if (beforeListeners.length > 0 && mode !== "no-cors") {
       // The platform replaces rather than merges: `new Request(input, init)`
@@ -172,7 +174,7 @@ function patchFetch(): void {
       // the caller removed, an Authorization among them.
       const headers = init?.headers
         ? new Headers(init.headers)
-        : new Headers(input instanceof Request ? input.headers : undefined);
+        : new Headers(request?.headers);
 
       const ctx: RequestContext = { url, method, headers };
       for (const listener of beforeListeners) {
