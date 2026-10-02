@@ -273,3 +273,41 @@ describe("network-hook teardown that the browser refuses", () => {
     expect(seen).toEqual([{ error: false, aborted: true }]);
   });
 });
+
+// The record's lifecycle is what kept breaking: an event arriving while the
+// object already belonged to another request. This drives every named event
+// against a parked record, with and without a retry in between, and asserts
+// the two invariants that were violated each time.
+describe("a parked record across every ending", () => {
+  const NAMED = ["load", "error", "timeout", "abort"] as const;
+
+  for (const named of NAMED) {
+    for (const retry of [false, true]) {
+      it(`${named}${retry ? " with a retry in between" : ""} reports each request once, with its own status`, () => {
+        const seen: { url: string; status?: number }[] = [];
+        onAfterRequest((r) => seen.push({ url: r.url, status: r.status }));
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", "https://example.com/a");
+        xhr.send();
+        finish(xhr, 0);                   // finishes with no HTTP status
+        xhr.dispatchEvent(new Event("readystatechange"));   // parks the record
+
+        if (retry) {
+          unfinish(xhr);
+          xhr.open("GET", "https://example.com/b");
+          xhr.send();
+          finish(xhr, 500);               // the retry's own status
+        }
+        xhr.dispatchEvent(new Event(named));
+
+        const a = seen.filter((r) => r.url.endsWith("/a"));
+        // Reported once, never twice and never dropped.
+        expect(a).toHaveLength(1);
+        // And never wearing the retry's status.
+        expect(a[0].status === undefined || a[0].status === 0).toBe(true);
+        expect(seen.some((r) => r.url.endsWith("/a") && r.status === 500)).toBe(false);
+      });
+    }
+  }
+});

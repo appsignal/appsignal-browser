@@ -390,6 +390,42 @@ describe("request failure traces", () => {
       .toEqual([["traceparent", hostValue]]);
   });
 
+  it("does not emit a parked record against the next request's status", () => {
+    // The host resends from its own `load` handler, registered before open(),
+    // so the object is back at OPENED when the SDK's listener runs.
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+    const xhr = new XMLHttpRequest();
+    let state = 1;
+    let status = 0;
+    let retried = false;
+    Object.defineProperty(xhr, "readyState", { get: () => state, configurable: true });
+    Object.defineProperty(xhr, "status", { get: () => status, configurable: true });
+
+    xhr.onload = () => {
+      if (retried) return;
+      retried = true;
+      state = 1;
+      xhr.open("GET", "http://localhost/api/b");
+      xhr.send();
+    };
+    xhr.open("GET", "http://localhost/api/config");
+    xhr.send();
+
+    state = 4; status = 0;        // a `file:`-style success
+    xhr.dispatchEvent(new Event("readystatechange"));
+    xhr.dispatchEvent(new Event("load"));
+
+    state = 4; status = 500;      // the retry answers 500
+    xhr.dispatchEvent(new Event("readystatechange"));
+    xhr.dispatchEvent(new Event("load"));
+
+    // /api/config succeeded with status 0, so only the retry is an error.
+    expect(reports).toHaveLength(1);
+    expect((reports[0].params as { request: { url: string } }).request.url)
+      .toBe("http://localhost/api/b");
+  });
+
   it("does not report a stale request after a status 0 that succeeded", () => {
     vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
     init(config());

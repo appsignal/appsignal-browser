@@ -214,116 +214,123 @@ function patchFetch(): void {
   };
 }
 
+/** One request on one XMLHttpRequest, from send() to its report.
+ *
+ * `status` is captured when the request reaches DONE rather than read from the
+ * object at report time. The event that classifies a transport failure arrives
+ * after DONE, and a host can reuse the object in between, so by then the
+ * object's own status belongs to another request. */
+type XhrRecord = {
+  url: string;
+  method: string;
+  startTime: number;
+  aborted: boolean;
+  status?: number;
+  trace?: PropagatedTrace;
+};
+
 type WatchedXhr = XMLHttpRequest & {
   _appsignalMethod?: string;
   _appsignalUrl?: string;
   _appsignalWatched?: boolean;
-  // The request that send() started. The listeners take this record, so a host
-  // that opens the object again for the next request cannot change the report
-  // of the request that is still in flight.
-  _appsignalRequest?: {
-    url: string;
-    method: string;
-    startTime: number;
-    aborted?: boolean;
-    trace?: PropagatedTrace;
-  } | null;
-  // A request that reached DONE with no status, waiting for the named event
-  // that says which failure it was. Held apart from `_appsignalRequest`,
-  // because a host can retry on this object before that event arrives.
-  _appsignalFinished?: PendingXhr | null;
   // Headers the host set on this request, keyed by lowercased name.
   // setRequestHeader combines values rather than replacing them, so the SDK
   // has to know which names to leave alone, and a before-listener needs the
   // value to read a traceparent the host already set. XHR cannot read a
   // request header back.
   _appsignalHostHeaders?: Map<string, string>;
+  // The send() that is still running.
+  _appsignalSending?: XhrRecord | null;
+  // A request that reached DONE with no status, waiting for the named event
+  // that says which failure it was. Held apart from `_appsignalSending`,
+  // because a host can retry on this object before that event arrives.
+  _appsignalParked?: XhrRecord | null;
 };
 
-type PendingXhr = NonNullable<WatchedXhr["_appsignalRequest"]>;
-
-function reportXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
-  const pending = xhr._appsignalRequest;
-  if (!pending) return;
-  // One report per send(), whichever event arrives first.
-  xhr._appsignalRequest = null;
-  xhrsToReport.delete(xhr);
-  emitXhrReport(xhr, pending, failed, timedOut);
-}
-
-/** Report the failure its named event describes, from the record set aside at
- * DONE. A host that retried on this object in between has its own record in
- * `_appsignalRequest`, which this must not take. */
-function reportXhrFailure(xhr: WatchedXhr, timedOut: boolean): void {
-  const finished = xhr._appsignalFinished;
-  if (!finished) {
-    // No handoff happened, so a host handler that beat ours still owns the
-    // object. Fall back to the record in flight, as before.
-    if (xhr.readyState === 4) reportXhr(xhr, true, timedOut);
-    return;
+/** The record the event now firing belongs to, removed from the object so it
+ * reports once.
+ *
+ * Every listener takes its record from here. A parked record wins, because the
+ * event that classifies it arrives after the object may have moved on. Reading
+ * the two slots in a different order in one listener than in another is what
+ * made a parked record emit against the next request's status. */
+function takeXhrRecord(xhr: WatchedXhr): XhrRecord | null {
+  const parked = xhr._appsignalParked;
+  if (parked) {
+    xhr._appsignalParked = null;
+    if (!xhr._appsignalSending) xhrsToReport.delete(xhr);
+    return parked;
   }
-  xhr._appsignalFinished = null;
-  if (!xhr._appsignalRequest) xhrsToReport.delete(xhr);
-  emitXhrReport(xhr, finished, true, timedOut);
+  // No handoff happened, so a host handler that beat ours still owns the
+  // object. Its own request is the one this event belongs to.
+  const sending = xhr._appsignalSending;
+  if (sending && xhr.readyState === 4) {
+    xhr._appsignalSending = null;
+    xhrsToReport.delete(xhr);
+    return sending;
+  }
+  return null;
 }
 
 function emitXhrReport(
   xhr: WatchedXhr,
-  pending: PendingXhr,
+  record: XhrRecord,
   failed: boolean,
   timedOut: boolean,
 ): void {
-  const aborted = pending.aborted === true;
+  const aborted = record.aborted;
   const result: RequestResult = {
-    url: pending.url,
-    method: pending.method,
-    startTime: pending.startTime,
+    url: record.url,
+    method: record.method,
+    startTime: record.startTime,
     endTime: Date.now(),
     error: failed && !aborted,
     timedOut: timedOut && !aborted,
     aborted,
     xhr,
-    trace: pending.trace,
+    trace: record.trace,
   };
-  if (!failed) result.status = xhr.status;
+  if (!failed) result.status = record.status;
   for (const listener of afterListeners) {
     try { listener(result); } catch { /* swallow */ }
   }
 }
 
+/** Report whatever this event ended. One release point, so no two listeners
+ * can disagree about which record an event belongs to. */
+function releaseXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
+  const record = takeXhrRecord(xhr);
+  if (record) emitXhrReport(xhr, record, failed, timedOut);
+}
+
 /** Report each XHR that has finished but whose report has not run yet. A host
- * handler that was set before open() runs before the SDK's listeners, so code
- * in it that needs to know the request it is handling calls this first. */
+ * handler that was set before the SDK's listeners runs first, so code in it
+ * that needs to know the request it is handling calls this first. */
 export function reportFinishedXhrs(): void {
   for (const xhr of xhrsToReport) {
     // No named event has run for these, so a transport failure stays
     // unclassified and reports as a plain failure, never as a timeout.
-    const finished = xhr._appsignalFinished;
-    if (finished) {
-      xhr._appsignalFinished = null;
-      if (!xhr._appsignalRequest) xhrsToReport.delete(xhr);
-      emitXhrReport(xhr, finished, true, false);
-      continue;
+    if (xhr._appsignalParked || xhr.readyState === 4) {
+      releaseXhr(xhr, (xhr._appsignalParked?.status ?? xhr.status) === 0);
     }
-    if (xhr.readyState === 4) reportXhr(xhr, xhr.status === 0);
   }
 }
 
 /** Report a request the reopen is about to terminate. `open()` resets the
  * object and the events that would have reported it never fire, so a host that
- * retries on it would otherwise lose the request it is retrying. A record set
- * aside at DONE is left alone: its named event still has to classify it, and
+ * retries on it would otherwise lose the request it is retrying. A parked
+ * record is left alone: its named event still has to classify it, and
  * reporting it here would drop the timeout. */
 function flushOnReopen(xhr: WatchedXhr): void {
-  const pending = xhr._appsignalRequest;
-  if (!pending) return;
+  const sending = xhr._appsignalSending;
+  if (!sending) return;
   if (xhr.readyState === 4) {
-    // No named event ran, so the failure stays unclassified.
-    reportXhr(xhr, xhr.status === 0);
+    sending.status = xhr.status;
+    releaseXhr(xhr, xhr.status === 0);
     return;
   }
-  pending.aborted = true;
-  reportXhr(xhr, true);
+  sending.aborted = true;
+  releaseXhr(xhr, true);
 }
 
 /** Registers once per object, in open(): listeners run in registration order
@@ -335,42 +342,31 @@ function watchXhr(xhr: WatchedXhr): void {
 
   xhr.addEventListener("readystatechange", () => {
     if (xhr.readyState !== 4) return;
-    // status 0 at DONE is a transport failure, and only the named event that
-    // follows says which one. Elapsed time cannot stand in for it: a blocked
-    // main thread delivers a connection failure after the deadline and makes
-    // it look like a timeout.
+    const sending = xhr._appsignalSending;
+    if (!sending) return;
+    // Capture it now. The named event that classifies a status 0 arrives
+    // later, and the object may belong to another request by then.
+    sending.status = xhr.status;
     if (xhr.status === 0) {
-      const pending = xhr._appsignalRequest;
-      if (pending) {
-        xhr._appsignalRequest = null;
-        xhr._appsignalFinished = pending;
-      }
+      // Only the named event that follows says which failure this was.
+      // Elapsed time cannot stand in for it: a blocked main thread delivers a
+      // connection failure after the deadline and makes it look like a timeout.
+      xhr._appsignalSending = null;
+      xhr._appsignalParked = sending;
       return;
     }
-    reportXhr(xhr, false);
+    releaseXhr(xhr, false);
   });
-  // Only at DONE: a host that sends the next request from its own load or
-  // error handler has already moved the object on to that request.
-  xhr.addEventListener("load", () => {
-    if (xhr.readyState !== 4) return;
-    const finished = xhr._appsignalFinished;
-    if (finished) {
-      // `load` after a status 0 means the request succeeded and no named event
-      // is coming, as a `file:` URL does. Without this the record stays parked
-      // and the next failure on this object reports it instead of its own.
-      xhr._appsignalFinished = null;
-      if (!xhr._appsignalRequest) xhrsToReport.delete(xhr);
-      emitXhrReport(xhr, finished, false, false);
-      return;
-    }
-    reportXhr(xhr, false);
-  });
-  xhr.addEventListener("error", () => reportXhrFailure(xhr, false));
-  xhr.addEventListener("timeout", () => reportXhrFailure(xhr, true));
+
+  // `load` after a status 0 means the request succeeded and no named event is
+  // coming, as a `file:` URL does.
+  xhr.addEventListener("load", () => releaseXhr(xhr, false));
+  xhr.addEventListener("error", () => releaseXhr(xhr, true));
+  xhr.addEventListener("timeout", () => releaseXhr(xhr, true, true));
   // abort() marks the record, so this reports a cancel. Without it a cancelled
   // request reaches no listener at all, because readystatechange leaves every
   // status 0 to the named event.
-  xhr.addEventListener("abort", () => reportXhrFailure(xhr, false));
+  xhr.addEventListener("abort", () => releaseXhr(xhr, true));
 }
 
 function patchXhr(): void {
@@ -412,7 +408,8 @@ function patchXhr(): void {
   underlyingXhrAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
     const xhr = this as WatchedXhr;
-    if (xhr._appsignalRequest) xhr._appsignalRequest.aborted = true;
+    const live = xhr._appsignalSending ?? xhr._appsignalParked;
+    if (live) live.aborted = true;
     return underlyingXhrAbort.call(this);
   };
 
@@ -427,9 +424,9 @@ function patchXhr(): void {
     if (!url) return underlyingXhrSend.call(this, body);
 
     watchXhr(xhr);
-    const previous = xhr._appsignalRequest;
-    const pending: NonNullable<WatchedXhr["_appsignalRequest"]> = { url, method, startTime: Date.now() };
-    xhr._appsignalRequest = pending;
+    const previous = xhr._appsignalSending;
+    const pending: XhrRecord = { url, method, startTime: Date.now(), aborted: false };
+    xhr._appsignalSending = pending;
     xhrsToReport.add(xhr);
     const headers = new Headers();
     // Show a before-listener the trace header the host already set, so it can
@@ -460,8 +457,8 @@ function patchXhr(): void {
     } catch (error) {
       // The native send refused this call, so the request already in flight,
       // if there is one, keeps its own record.
-      xhr._appsignalRequest = previous;
-      if (!previous) xhrsToReport.delete(xhr);
+      xhr._appsignalSending = previous ?? null;
+      if (!previous && !xhr._appsignalParked) xhrsToReport.delete(xhr);
       throw error;
     }
   };
