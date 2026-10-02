@@ -313,12 +313,25 @@ export function scrubPageUrl(url: string, allowlist: string[]): string {
   return parsed.origin + stripTrailingSlash(parsed.pathname) + parsed.search + hash;
 }
 
-/** Match a tracing target without allowing a path segment to stand in for
- * its host. Preserve the existing host + pathname and explicit-port syntax. */
+const DEFAULT_URL_PORTS: Record<string, string> = {
+  "http:": "80", "https:": "443", "ws:": "80", "wss:": "443", "ftp:": "21",
+};
+
+/** Match hosts separately from paths. Portless patterns match every port. */
 export function matchesUrl(pattern: string, url: URL): boolean {
   const slash = pattern.indexOf("/");
-  const hostPattern = slash === -1 ? pattern : pattern.slice(0, slash);
-  return globMatch(hostPattern, url.host) && globMatch(pattern, url.host + url.pathname);
+  const hostPattern = (slash === -1 ? pattern : pattern.slice(0, slash)).toLowerCase();
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  const namesPort = hostPattern.startsWith("[")
+    ? hostPattern.slice(hostPattern.indexOf("]") + 1).includes(":")
+    : hostPattern.includes(":");
+  // URL.port is empty for the protocol's default port, even if written out.
+  const port = url.port || DEFAULT_URL_PORTS[url.protocol];
+  const host = namesPort && port ? `${hostname}:${port}` : hostname;
+  if (!globMatch(hostPattern, host)) return false;
+  // Keep **/auth/** matching nested paths.
+  const pathPattern = slash === -1 ? "/**" : pattern.slice(slash);
+  return globMatch(hostPattern + pathPattern, host + url.pathname);
 }
 
 export function globMatch(pattern: string, input: string): boolean {

@@ -613,3 +613,20 @@ describe("fetch no-cors mode", () => {
     expectIdentity(reports[0]);
   });
 });
+
+
+describe("shared URL-pattern policy", () => {
+  it("traces a portless uppercase host target on a non-default port", async () => {
+    init(config({ tracePropagationTargets: ["LOCALHOST"] }));
+    await fetch("http://localhost:8443/api/orders");
+    expect(reports).toHaveLength(1);
+    expectIdentity(reports[0]);
+  });
+
+  it("applies host-only blocklists to request errors on every port", async () => {
+    init(config({ tracePropagationTargets: ["localhost/**"], privacy: { networkBlocklist: ["LOCALHOST"] } }));
+    await fetch("http://localhost:8443/api/orders");
+    expect(requests[0].traceparent).not.toBeNull();
+    expect(reports).toHaveLength(0);
+  });
+});
