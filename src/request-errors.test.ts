@@ -286,6 +286,29 @@ describe("request failure traces", () => {
     expect(reports[0].params).toMatchObject({ request: { status: 500 } });
   });
 
+  it("leaves a traceparent the host set on an XHR alone", () => {
+    // setRequestHeader combines values, so setting ours over the host's would
+    // send one malformed header that a conformant backend rejects whole.
+    const sent: [string, string][] = [];
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    const realSet = XMLHttpRequest.prototype.setRequestHeader;
+    vi.spyOn(XMLHttpRequest.prototype, "setRequestHeader").mockImplementation(
+      function (this: XMLHttpRequest, name: string, value: string) {
+        sent.push([name, value]);
+        return realSet.call(this, name, value);
+      },
+    );
+    init(config());
+    const hostValue = `00-${"a".repeat(32)}-${"b".repeat(16)}-01`;
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "http://localhost/api/orders");
+    xhr.setRequestHeader("traceparent", hostValue);
+    xhr.send();
+
+    expect(sent.filter(([name]) => name.toLowerCase() === "traceparent"))
+      .toEqual([["traceparent", hostValue]]);
+  });
+
   it("does not report a stale request after a status 0 that succeeded", () => {
     vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
     init(config());

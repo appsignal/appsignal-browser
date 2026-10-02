@@ -64,6 +64,7 @@ let underlyingFetch: typeof window.fetch;
 let underlyingXhrOpen: typeof XMLHttpRequest.prototype.open;
 let underlyingXhrSend: typeof XMLHttpRequest.prototype.send;
 let underlyingXhrAbort: typeof XMLHttpRequest.prototype.abort;
+let underlyingXhrSetHeader: typeof XMLHttpRequest.prototype.setRequestHeader;
 const xhrsToReport = new Set<WatchedXhr>();
 
 /** Register a before-request listener. Returns an unregister fn. */
@@ -117,6 +118,9 @@ export function destroyNetworkHook(): void {
   }
   if (underlyingXhrSend) {
     restored = attemptCleanup("xhr send patch", () => { XMLHttpRequest.prototype.send = underlyingXhrSend; }) && restored;
+  }
+  if (underlyingXhrSetHeader) {
+    restored = attemptCleanup("xhr header patch", () => { XMLHttpRequest.prototype.setRequestHeader = underlyingXhrSetHeader; }) && restored;
   }
   if (underlyingXhrAbort) {
     restored = attemptCleanup("xhr abort patch", () => { XMLHttpRequest.prototype.abort = underlyingXhrAbort; }) && restored;
@@ -228,6 +232,10 @@ type WatchedXhr = XMLHttpRequest & {
   // that says which failure it was. Held apart from `_appsignalRequest`,
   // because a host can retry on this object before that event arrives.
   _appsignalFinished?: PendingXhr | null;
+  // Header names the host set on this request, lowercased. setRequestHeader
+  // combines values rather than replacing them, so the SDK has to know which
+  // names to leave alone. XHR cannot read a request header back.
+  _appsignalHostHeaders?: Set<string>;
 };
 
 type PendingXhr = NonNullable<WatchedXhr["_appsignalRequest"]>;
@@ -374,6 +382,8 @@ function patchXhr(): void {
   ) {
     const xhr = this as WatchedXhr;
     flushOnReopen(xhr);
+    // open() clears the request's headers, so the record of them goes too.
+    xhr._appsignalHostHeaders = undefined;
     xhr._appsignalMethod = method;
     xhr._appsignalUrl = typeof url === "string" ? url : url.href;
     watchXhr(xhr);
@@ -387,6 +397,13 @@ function patchXhr(): void {
 
   // abort() reaches readyState 4 with status 0, indistinguishable from a
   // failure, and fires before the `abort` event. Mark it here.
+  underlyingXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (name: string, value: string) {
+    const xhr = this as WatchedXhr;
+    (xhr._appsignalHostHeaders ??= new Set()).add(String(name).toLowerCase());
+    return underlyingXhrSetHeader.call(this, name, value);
+  };
+
   underlyingXhrAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
     const xhr = this as WatchedXhr;
@@ -417,10 +434,15 @@ function patchXhr(): void {
     }
     pending.trace = ctx.trace;
 
-    // Apply headers contributed by before-listeners. setRequestHeader can
+    // Apply headers contributed by before-listeners, through the underlying
+    // method so they are not recorded as the host's. A name the host already
+    // set is left alone: setRequestHeader would append to it and produce one
+    // malformed header rather than replacing it. setRequestHeader can also
     // throw on forbidden headers (Cookie, Host, etc.); ignore those.
+    const hostHeaders = xhr._appsignalHostHeaders;
     headers.forEach((value, key) => {
-      try { xhr.setRequestHeader(key, value); } catch { /* forbidden header */ }
+      if (hostHeaders?.has(key.toLowerCase())) return;
+      try { underlyingXhrSetHeader.call(xhr, key, value); } catch { /* forbidden header */ }
     });
 
     try {
