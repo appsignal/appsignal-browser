@@ -1,4 +1,4 @@
-import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
+import { safeUrl, matchesUrl, randomBytes, toHex } from "./utils.js";
 import { onBeforeRequest, type PropagatedTrace, type RequestResult } from "./network-hook.js";
 
 let targets: string[] = [];
@@ -57,8 +57,7 @@ export function destroyTracing(): void {
 function shouldPropagate(url: string): boolean {
   const parsed = safeUrl(url);
   if (!parsed) return false;
-  const hostPath = parsed.host + parsed.pathname;
-  return targets.some((pattern) => globMatch(pattern, hostPath));
+  return targets.some((pattern) => matchesUrl(pattern, parsed));
 }
 
 /** N random bytes encoded as a lowercase hex string. Used for both the

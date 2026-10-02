@@ -313,6 +313,31 @@ export function scrubPageUrl(url: string, allowlist: string[]): string {
   return parsed.origin + stripTrailingSlash(parsed.pathname) + parsed.search + hash;
 }
 
+/** Match a URL against one glob pattern, host and path separately.
+ *
+ * Gluing them let a path segment stand in for a host, so `**.example.com/**`
+ * matched `evil.com/cdn/logo.example.com/x`. Splitting at the pattern's first
+ * `/` keeps a wildcard inside the part it was written for.
+ *
+ * The host is compared lowercased and without a trailing dot. A pattern that
+ * names a port matches that port only; one that names none matches any, so a
+ * blocklist entry still covers the host it names. */
+export function matchesUrl(pattern: string, url: URL): boolean {
+  const slash = pattern.indexOf("/");
+  const hostPattern = (slash === -1 ? pattern : pattern.slice(0, slash)).toLowerCase();
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  // The port joins the target only when the pattern asks about one, so an
+  // entry naming a host still covers that host on every port.
+  const host = hostPattern.includes(":") && url.port ? `${hostname}:${url.port}` : hostname;
+  // The host part has to match the host on its own. Without this a path
+  // segment stands in for a host, and `**.example.com/**` matched
+  // `evil.com/cdn/logo.example.com/x`.
+  if (!globMatch(hostPattern, host)) return false;
+  // Then the whole pattern against the whole target, which keeps `**` meaning
+  // "any segments" inside a path: `**/auth/**` still covers `/api/auth/login`.
+  return globMatch(slash === -1 ? `${pattern}/**` : pattern, host + url.pathname);
+}
+
 export function globMatch(pattern: string, input: string): boolean {
   const regex = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
