@@ -228,6 +228,37 @@ describe("request failure traces", () => {
     expect(reports[0].error.name).toBe("HTTPError");
   });
 
+  it("reports the timed-out XHR even when the host retries on the same object", () => {
+    vi.useFakeTimers();
+    vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {});
+    init(config());
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "http://localhost/api/orders");
+    xhr.timeout = 100;
+    // Registered after open(), so it runs after the SDK's listener and inside
+    // the window between readystatechange and the timeout event.
+    xhr.addEventListener("readystatechange", () => {
+      if (xhr.readyState === 4 && xhr.status === 0) {
+        xhr.open("GET", "http://localhost/api/orders");
+        xhr.send();
+      }
+    });
+    xhr.send();
+    vi.advanceTimersByTime(500);
+
+    let state = 4;
+    Object.defineProperty(xhr, "readyState", { get: () => state, configurable: true });
+    Object.defineProperty(xhr, "status", { value: 0, configurable: true });
+    xhr.dispatchEvent(new Event("readystatechange"));
+    // open() put the object back to OPENED for the retry.
+    state = 1;
+    xhr.dispatchEvent(new Event("timeout"));
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].error.name).toBe("TimeoutError");
+  });
+
   it("does not report a request that never reached the backend", async () => {
     // Refused, undeliverable or blocked by an extension. The browser reports
     // all of them as one TypeError, and none of them leaves a span to join.

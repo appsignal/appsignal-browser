@@ -222,7 +222,13 @@ type WatchedXhr = XMLHttpRequest & {
     aborted?: boolean;
     trace?: PropagatedTrace;
   } | null;
+  // A request that reached DONE with no status, waiting for the named event
+  // that says which failure it was. Held apart from `_appsignalRequest`,
+  // because a host can retry on this object before that event arrives.
+  _appsignalFinished?: PendingXhr | null;
 };
+
+type PendingXhr = NonNullable<WatchedXhr["_appsignalRequest"]>;
 
 function reportXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
   const pending = xhr._appsignalRequest;
@@ -230,6 +236,31 @@ function reportXhr(xhr: WatchedXhr, failed: boolean, timedOut = false): void {
   // One report per send(), whichever event arrives first.
   xhr._appsignalRequest = null;
   xhrsToReport.delete(xhr);
+  emitXhrReport(xhr, pending, failed, timedOut);
+}
+
+/** Report the failure its named event describes, from the record set aside at
+ * DONE. A host that retried on this object in between has its own record in
+ * `_appsignalRequest`, which this must not take. */
+function reportXhrFailure(xhr: WatchedXhr, timedOut: boolean): void {
+  const finished = xhr._appsignalFinished;
+  if (!finished) {
+    // No handoff happened, so a host handler that beat ours still owns the
+    // object. Fall back to the record in flight, as before.
+    if (xhr.readyState === 4) reportXhr(xhr, true, timedOut);
+    return;
+  }
+  xhr._appsignalFinished = null;
+  if (!xhr._appsignalRequest) xhrsToReport.delete(xhr);
+  emitXhrReport(xhr, finished, true, timedOut);
+}
+
+function emitXhrReport(
+  xhr: WatchedXhr,
+  pending: PendingXhr,
+  failed: boolean,
+  timedOut: boolean,
+): void {
   const aborted = pending.aborted === true;
   const result: RequestResult = {
     url: pending.url,
@@ -255,6 +286,13 @@ export function reportFinishedXhrs(): void {
   for (const xhr of xhrsToReport) {
     // No named event has run for these, so a transport failure stays
     // unclassified and reports as a plain failure, never as a timeout.
+    const finished = xhr._appsignalFinished;
+    if (finished) {
+      xhr._appsignalFinished = null;
+      if (!xhr._appsignalRequest) xhrsToReport.delete(xhr);
+      emitXhrReport(xhr, finished, true, false);
+      continue;
+    }
     if (xhr.readyState === 4) reportXhr(xhr, xhr.status === 0);
   }
 }
@@ -272,7 +310,14 @@ function watchXhr(xhr: WatchedXhr): void {
     // follows says which one. Elapsed time cannot stand in for it: a blocked
     // main thread delivers a connection failure after the deadline and makes
     // it look like a timeout.
-    if (xhr.status === 0) return;
+    if (xhr.status === 0) {
+      const pending = xhr._appsignalRequest;
+      if (pending) {
+        xhr._appsignalRequest = null;
+        xhr._appsignalFinished = pending;
+      }
+      return;
+    }
     reportXhr(xhr, false);
   });
   // Only at DONE: a host that sends the next request from its own load or
@@ -280,18 +325,12 @@ function watchXhr(xhr: WatchedXhr): void {
   xhr.addEventListener("load", () => {
     if (xhr.readyState === 4) reportXhr(xhr, false);
   });
-  xhr.addEventListener("error", () => {
-    if (xhr.readyState === 4) reportXhr(xhr, true);
-  });
-  xhr.addEventListener("timeout", () => {
-    if (xhr.readyState === 4) reportXhr(xhr, true, true);
-  });
+  xhr.addEventListener("error", () => reportXhrFailure(xhr, false));
+  xhr.addEventListener("timeout", () => reportXhrFailure(xhr, true));
   // abort() marks the record, so this reports a cancel. Without it a cancelled
   // request reaches no listener at all, because readystatechange leaves every
   // status 0 to the named event.
-  xhr.addEventListener("abort", () => {
-    if (xhr.readyState === 4) reportXhr(xhr, true);
-  });
+  xhr.addEventListener("abort", () => reportXhrFailure(xhr, false));
 }
 
 function patchXhr(): void {
