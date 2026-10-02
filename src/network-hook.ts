@@ -216,8 +216,7 @@ function patchFetch(): void {
   };
 }
 
-/** Header state belongs to a successful open(), including headers applied
- * before a send() that the platform rejected. */
+/** Applied headers survive rejected send() calls. */
 type PreparedXhr = {
   url: string;
   method: string;
@@ -244,9 +243,7 @@ type XhrState = {
   xhr: XMLHttpRequest;
   prepared?: PreparedXhr;
   active?: XhrRecord;
-  // DONE records retain a terminal-event marker after reporting a response.
-  // Browser events nest synchronously: a retry's load must consume its own
-  // marker before the interrupted timeout consumes the original marker.
+  // Keep terminal markers after reporting; nested retry events unwind first.
   endings: XhrRecord[];
 };
 
@@ -268,8 +265,7 @@ function captureXhrDone(state: XhrState, record: XhrRecord): void {
   trackXhr(state);
 }
 
-/** Settle an explicit record exactly once, without consulting mutable native
- * state. Completion data was captured before host callbacks could reset it. */
+/** Settle once using captured data, even if the host reset the XHR. */
 function settleXhr(state: XhrState, record: XhrRecord, outcome: XhrOutcome): void {
   if (record.completed) return;
   record.completed = true;
@@ -293,7 +289,7 @@ function settleXhr(state: XhrState, record: XhrRecord, outcome: XhrOutcome): voi
 }
 
 function endXhr(state: XhrState, kind: XhrOutcome["kind"]): void {
-  // Some wrappers dispatch the named event without a readystatechange first.
+  // Support terminal events without an earlier readystatechange.
   if (state.endings.length === 0 && state.active && state.xhr.readyState === 4) captureXhrDone(state, state.active);
   const record = state.endings.pop();
   if (!record) return;
@@ -306,8 +302,7 @@ function endXhr(state: XhrState, kind: XhrOutcome["kind"]): void {
   trackXhr(state);
 }
 
-/** Make completed HTTP responses available to an early host handler. A
- * status-zero request must wait for its named event to classify the failure. */
+/** Report HTTP responses early; status zero waits for its named event. */
 export function reportFinishedXhrs(): void {
   for (const state of xhrsToReport) {
     const record = state.active;
@@ -417,8 +412,7 @@ function patchXhr(): void {
         prepared.headers.set(key, value);
       } catch { /* rejected header */ }
     });
-    // Adopt only the trace header that the platform accepted. Applied headers
-    // survive a rejected send, so a retry adopts rather than appends them.
+    // Only adopt trace context accepted by the platform.
     if (!headers.has("traceparent") || headers.get("traceparent") === prepared.headers.get("traceparent")) {
       record.trace = ctx.trace;
     }
