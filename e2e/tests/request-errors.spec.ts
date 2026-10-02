@@ -255,3 +255,29 @@ for (const transport of ["fetch", "xhr"]) test(`${transport} relative URLs honor
   });
   expect(errors.filter(e => (e.error as any)?.name === "HTTPError")).toHaveLength(0);
 });
+
+for (const transport of ["fetch", "xhr"]) test(`${transport} cannot report through a replacement SDK`, async ({ page, request }) => {
+  await page.evaluate(async transport => {
+    const sdk = (window as any).AppsignalBrowser;
+    const pending = transport === "fetch"
+      ? fetch("/api/echo?delay=200&status=500")
+      : new Promise<void>(resolve => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("GET", "/api/echo?delay=200&status=500");
+          xhr.onload = () => resolve();
+          xhr.send();
+        });
+    sdk.destroy();
+    sdk.init({ key: "replacement", endpoint: location.origin, serviceName: "Replacement", tracePropagationTargets: [location.host + "/**"] });
+    await pending;
+    await fetch("/api/echo?status=503");
+    sdk.captureError(new Error("replacement-check-finished"));
+  }, transport);
+  const errors = await pollFor(request, items => {
+    const errors = ingestErrors(items);
+    return errors.some(e => (e.error as any)?.message === "replacement-check-finished") ? errors : null;
+  });
+  const httpErrors = errors.filter(e => (e.error as any)?.name === "HTTPError");
+  expect(httpErrors).toHaveLength(1);
+  expect(httpErrors[0]).toMatchObject({ service_name: "Replacement", params: { request: { status: 503 } } });
+});

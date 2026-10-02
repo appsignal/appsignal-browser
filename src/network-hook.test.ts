@@ -396,3 +396,57 @@ describe("request URL resolution", () => {
     } finally { base.remove(); }
   });
 });
+
+
+describe("request subscriber lifetime", () => {
+  it.each([false, true])("isolates an old fetch after reinit (rejected: %s)", async rejected => {
+    let settle!: (value: Response) => void;
+    let fail!: (reason: unknown) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve, reject) => {
+      settle = resolve;
+      fail = reject;
+    }));
+    const oldListener = vi.fn();
+    onAfterRequest(oldListener);
+    const pending = window.fetch("https://example.com/old");
+    destroyNetworkHook();
+    initNetworkHook();
+    const newListener = vi.fn();
+    onAfterRequest(newListener);
+    if (rejected) {
+      const reason = new DOMException("Timed out", "TimeoutError");
+      fail(reason);
+      await expect(pending).rejects.toBe(reason);
+    } else {
+      const response = new Response(null, { status: 500 });
+      settle(response);
+      await expect(pending).resolves.toBe(response);
+    }
+    expect(oldListener).not.toHaveBeenCalled();
+    expect(newListener).not.toHaveBeenCalled();
+    await window.fetch("https://example.com/new");
+    expect(newListener).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates an old XHR and observes its reuse after reinit", () => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/old");
+    xhr.send();
+    destroyNetworkHook();
+    initNetworkHook();
+    const listener = vi.fn();
+    onAfterRequest(listener);
+    finish(xhr, 500);
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(listener).not.toHaveBeenCalled();
+    unfinish(xhr);
+    xhr.open("GET", "https://example.com/new");
+    xhr.send();
+    finish(xhr, 503);
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener.mock.calls[0][0]).toMatchObject({ url: "https://example.com/new", status: 503 });
+    unfinish(xhr);
+    xhr.abort();
+  });
+});
