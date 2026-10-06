@@ -66,6 +66,11 @@ let underlyingXhrSend: typeof XMLHttpRequest.prototype.send;
 let underlyingXhrAbort: typeof XMLHttpRequest.prototype.abort;
 let underlyingXhrSetHeader: typeof XMLHttpRequest.prototype.setRequestHeader;
 const xhrsToReport = new Set<WatchedXhr>();
+// The status an XHR reports when no HTTP response arrived: abort, network
+// failure or a blocked cross-origin request.
+enum XhrStatus {
+  NO_RESPONSE = 0,
+}
 
 /** Register a before-request listener. Returns an unregister fn. */
 export function onBeforeRequest(fn: BeforeRequestListener): () => void {
@@ -325,7 +330,7 @@ export function reportFinishedXhrs(): void {
     // No named event has run for these, so a transport failure stays
     // unclassified and reports as a plain failure, never as a timeout.
     if (xhr._appsignalParked || xhr.readyState === XMLHttpRequest.DONE) {
-      releaseXhr(xhr, (xhr._appsignalParked?.status ?? xhr.status) === 0);
+      releaseXhr(xhr, (xhr._appsignalParked?.status ?? xhr.status) === XhrStatus.NO_RESPONSE);
     }
   }
 }
@@ -344,7 +349,7 @@ function watchXhr(xhr: WatchedXhr): void {
     // Capture it now. The named event that classifies a status 0 arrives
     // later, and the object may belong to another request by then.
     sending.status = xhr.status;
-    if (xhr.status === 0) {
+    if (xhr.status === XhrStatus.NO_RESPONSE) {
       // Only the named event that follows says which failure this was.
       // Elapsed time cannot stand in for it: a blocked main thread delivers a
       // connection failure after the deadline and makes it look like a timeout.
@@ -386,7 +391,7 @@ function patchXhr(): void {
     // Prepare for synchronous OPENED handlers that may send a new request.
     // Reporting the old request waits until native open() accepts the call.
     xhr._appsignalSending = null;
-    if (sending && status === 0) xhr._appsignalParked = sending;
+    if (sending && status === XhrStatus.NO_RESPONSE) xhr._appsignalParked = sending;
     xhr._appsignalHostHeaders = undefined;
     xhr._appsignalSdkTraceparent = undefined;
     xhr._appsignalMethod = method;
@@ -414,7 +419,7 @@ function patchXhr(): void {
       if (status === undefined) {
         sending.aborted = true;
         completeXhrRecord(xhr, sending, true);
-      } else if (status !== 0) {
+      } else if (status !== XhrStatus.NO_RESPONSE) {
         completeXhrRecord(xhr, sending, false);
       }
       // Status zero still belongs to the pending named terminal event.
@@ -445,7 +450,7 @@ function patchXhr(): void {
     if (live) {
       if (xhr.readyState === XMLHttpRequest.DONE) {
         live.status = xhr.status;
-        if (live.status === 0) {
+        if (live.status === XhrStatus.NO_RESPONSE) {
           xhr._appsignalSending = null;
           xhr._appsignalParked = live;
         } else {
