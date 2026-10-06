@@ -271,7 +271,7 @@ type WatchedXhr = XMLHttpRequest & {
 function recordForXhrEvent(xhr: WatchedXhr): XhrRecord | null {
   if (xhr._appsignalParked) return xhr._appsignalParked;
   const sending = xhr._appsignalSending;
-  if (!sending || xhr.readyState !== 4) return null;
+  if (!sending || xhr.readyState !== XMLHttpRequest.DONE) return null;
   sending.status = xhr.status;
   return sending;
 }
@@ -331,7 +331,7 @@ export function reportFinishedXhrs(): void {
   for (const xhr of xhrsToReport) {
     // No named event has run for these, so a transport failure stays
     // unclassified and reports as a plain failure, never as a timeout.
-    if (xhr._appsignalParked || xhr.readyState === 4) {
+    if (xhr._appsignalParked || xhr.readyState === XMLHttpRequest.DONE) {
       releaseXhr(xhr, (xhr._appsignalParked?.status ?? xhr.status) === 0);
     }
   }
@@ -345,7 +345,7 @@ function watchXhr(xhr: WatchedXhr): void {
   xhr._appsignalWatched = true;
 
   xhr.addEventListener("readystatechange", () => {
-    if (xhr.readyState !== 4) return;
+    if (xhr.readyState !== XMLHttpRequest.DONE) return;
     const sending = xhr._appsignalSending;
     if (!sending) return;
     // Capture it now. The named event that classifies a status 0 arrives
@@ -385,7 +385,7 @@ function patchXhr(): void {
     const xhr = this as WatchedXhr;
     const sending = xhr._appsignalSending;
     const parked = xhr._appsignalParked;
-    const status = sending && xhr.readyState === 4 ? xhr.status : undefined;
+    const status = sending && xhr.readyState === XMLHttpRequest.DONE ? xhr.status : undefined;
     const previousHeaders = xhr._appsignalHostHeaders;
     const previousSdkTraceparent = xhr._appsignalSdkTraceparent;
     const previousMethod = xhr._appsignalMethod;
@@ -428,7 +428,7 @@ function patchXhr(): void {
     }
   };
 
-  // abort() reaches readyState 4 with status 0, indistinguishable from a
+  // abort() reaches DONE with status 0, indistinguishable from a
   // failure, and fires before the `abort` event. Mark it here.
   underlyingXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.setRequestHeader = function (name: string, value: string) {
@@ -450,7 +450,7 @@ function patchXhr(): void {
     // abort() at DONE is cleanup, not cancellation of the completed request.
     const live = xhr._appsignalSending;
     if (live) {
-      if (xhr.readyState === 4) {
+      if (xhr.readyState === XMLHttpRequest.DONE) {
         live.status = xhr.status;
         if (live.status === 0) {
           xhr._appsignalSending = null;
