@@ -119,6 +119,21 @@ describe("network-hook teardown that the browser refuses", () => {
     destroyNetworkHook();
   });
 
+  it("does not put back a header the caller replaced on a Request", async () => {
+    // `new Request(input, init)` empties the header list and refills it from
+    // init, so a caller who passes replacement headers has dropped the rest.
+    onBeforeRequest((ctx) => { ctx.headers.set("traceparent", "00-a-b-01"); });
+    const authed = new Request("https://example.com/api", {
+      headers: { authorization: "Bearer SECRET", accept: "a" },
+    });
+    await window.fetch(authed, { headers: { accept: "b" } });
+
+    const headers = effectiveHeaders();
+    expect(headers.get("accept")).toBe("b");
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("traceparent")).toBe("00-a-b-01");
+  });
+
   it("notifies after-listeners before a host XHR load handler", () => {
     // Listeners run in registration order, and a host attaches between open()
     // and send(), so the SDK must register first.
@@ -256,5 +271,180 @@ describe("network-hook teardown that the browser refuses", () => {
     await window.fetch("https://example.com/api/search").catch(() => {});
 
     expect(seen).toEqual([{ error: false, aborted: true }]);
+  });
+});
+
+// The record's lifecycle is what kept breaking: an event arriving while the
+// object already belonged to another request. This drives every named event
+// against a parked record, with and without a retry in between, and asserts
+// the two invariants that were violated each time.
+describe("a parked record across every ending", () => {
+  const NAMED = ["load", "error", "timeout", "abort"] as const;
+
+  for (const named of NAMED) {
+    for (const retry of [false, true]) {
+      it(`${named}${retry ? " with a retry in between" : ""} reports each request once, with its own status`, () => {
+        const seen: { url: string; status?: number }[] = [];
+        onAfterRequest((r) => seen.push({ url: r.url, status: r.status }));
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", "https://example.com/a");
+        xhr.send();
+        finish(xhr, 0);                   // finishes with no HTTP status
+        xhr.dispatchEvent(new Event("readystatechange"));   // parks the record
+
+        if (retry) {
+          unfinish(xhr);
+          xhr.open("GET", "https://example.com/b");
+          xhr.send();
+          finish(xhr, 500);               // the retry's own status
+        }
+        xhr.dispatchEvent(new Event(named));
+
+        const a = seen.filter((r) => r.url.endsWith("/a"));
+        // Reported once, never twice and never dropped.
+        expect(a).toHaveLength(1);
+        // And never wearing the retry's status.
+        expect(a[0].status === undefined || a[0].status === 0).toBe(true);
+        expect(seen.some((r) => r.url.endsWith("/a") && r.status === 500)).toBe(false);
+      });
+    }
+  }
+});
+
+
+describe("explicit XHR completion", () => {
+  it("releases an in-flight request on reopen, even without another send", () => {
+    const seen: { url: string; aborted?: boolean }[] = [];
+    onAfterRequest(r => seen.push({ url: r.url, aborted: r.aborted }));
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/first");
+    xhr.send();
+    xhr.open("GET", "https://example.com/second");
+    expect(seen).toEqual([{ url: "https://example.com/first", aborted: true }]);
+    finish(xhr);
+    xhr.dispatchEvent(new Event("load"));
+    expect(seen).toHaveLength(1);
+  });
+});
+
+
+describe("rejected XHR reopen", () => {
+  it("keeps the active request when native open rejects its arguments", () => {
+    const seen: { url: string; status?: number; aborted?: boolean }[] = [];
+    onAfterRequest(r => seen.push({ url: r.url, status: r.status, aborted: r.aborted }));
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/original");
+    xhr.send();
+    expect(() => xhr.open("INVALID METHOD", "https://example.com/next")).toThrow();
+    expect(seen).toEqual([]);
+    finish(xhr, 500);
+    xhr.dispatchEvent(new Event("readystatechange"));
+    expect(seen).toEqual([{ url: "https://example.com/original", status: 500, aborted: false }]);
+  });
+
+  it("preserves caller headers when a rejected open precedes send", () => {
+    const seen: (string | null)[] = [];
+    onBeforeRequest(ctx => { seen.push(ctx.headers.get("traceparent")); });
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://example.com/original");
+    xhr.setRequestHeader("traceparent", "caller-context");
+    expect(() => xhr.open("INVALID METHOD", "https://example.com/next")).toThrow();
+    xhr.send();
+    xhr.abort();
+    expect(seen).toEqual(["caller-context"]);
+  });
+});
+
+
+describe("request URL resolution", () => {
+  it("resolves fetch URLs against the document base before notifying listeners", async () => {
+    const base = document.createElement("base");
+    base.href = "https://example.com/api/";
+    document.head.append(base);
+    const before = vi.fn();
+    const after = vi.fn();
+    onBeforeRequest(before);
+    onAfterRequest(after);
+    try {
+      await window.fetch("echo");
+      expect(before.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      expect(after.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      expect(lastInput).toBe("echo");
+    } finally { base.remove(); }
+  });
+
+  it("keeps the XHR URL resolved at open even if the base changes before send", () => {
+    const base = document.createElement("base");
+    base.href = "https://example.com/api/";
+    document.head.append(base);
+    const before = vi.fn();
+    const after = vi.fn();
+    onBeforeRequest(before);
+    onAfterRequest(after);
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "echo");
+      base.href = "https://other.example/";
+      xhr.send();
+      finish(xhr, 500);
+      xhr.dispatchEvent(new Event("readystatechange"));
+      expect(before.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      expect(after.mock.calls[0][0].url).toBe("https://example.com/api/echo");
+      unfinish(xhr);
+      xhr.abort();
+    } finally { base.remove(); }
+  });
+});
+
+describe("a fetch input from another frame", () => {
+  // Each frame has its own `Request` and `URL`, so `instanceof` against ours
+  // is false for an object the host built elsewhere. Stand-ins that fail the
+  // same check model that, since jsdom has no second frame to build one in.
+  const foreignRequest = (init: { method?: string; headers?: Record<string, string>; signal?: AbortSignal }): Request => {
+    const real = new Request("https://example.com/api", init);
+    return {
+      url: real.url,
+      method: real.method,
+      headers: real.headers,
+      signal: init.signal ?? real.signal,
+      mode: real.mode,
+      get [Symbol.toStringTag]() { return "Request"; },
+    } as unknown as Request;
+  };
+
+  it("keeps the Request's headers and joins its trace", async () => {
+    const parent = `00-${"a".repeat(32)}-${"b".repeat(16)}-01`;
+    const seen: Array<{ method: string; traceparent: string | null }> = [];
+    onBeforeRequest((ctx) => {
+      seen.push({ method: ctx.method, traceparent: ctx.headers.get("traceparent") });
+      ctx.headers.set("x-sdk", "1");
+    });
+    await window.fetch(foreignRequest({ method: "POST", headers: { authorization: "Bearer SECRET", traceparent: parent } }));
+
+    expect(seen).toEqual([{ method: "POST", traceparent: parent }]);
+    const headers = new Headers(lastInit?.headers);
+    expect(headers.get("authorization")).toBe("Bearer SECRET");
+    expect(headers.get("traceparent")).toBe(parent);
+    expect(headers.get("x-sdk")).toBe("1");
+  });
+
+  it("reports the URL object's address", async () => {
+    const listener = vi.fn();
+    onAfterRequest(listener);
+    const foreignUrl = { href: "https://example.com/api", toString: () => "https://example.com/api" } as unknown as URL;
+    await window.fetch(foreignUrl);
+    expect(listener.mock.calls[0][0]).toMatchObject({ url: "https://example.com/api", method: "GET" });
+  });
+
+  it("reports a cancel, not a timeout, for a signal that fired before the call", async () => {
+    const listener = vi.fn();
+    onAfterRequest(listener);
+    const controller = new AbortController();
+    const reason = new DOMException("Expired", "TimeoutError");
+    controller.abort(reason);
+    fetchMock.mockRejectedValueOnce(reason);
+    await expect(window.fetch(foreignRequest({ signal: controller.signal }))).rejects.toBe(reason);
+    expect(listener.mock.calls[0][0]).toMatchObject({ aborted: true, error: false, timedOut: false });
   });
 });

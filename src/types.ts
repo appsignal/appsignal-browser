@@ -12,6 +12,10 @@ export interface BrowserConfig {
    * `active: process.env.NODE_ENV === "production"`. */
   active?: boolean;
   appVersion?: string;
+  /** The name of this frontend as a service in traces. Defaults to "Browser".
+   * Set it when one organization runs several frontends, so each one gets its
+   * own node in the service map. Sent on every error. */
+  serviceName?: string;
   user?: UserContext;
   /** Inspect or modify each error at the entry point, before the SDK adds an
    * error breadcrumb, records `lastErrorTimestamp`, or runs deduplication.
@@ -29,7 +33,10 @@ export interface BrowserConfig {
    * (PII in messages, sensitive data fields). Runs on the page's hot path;
    * keep it cheap. */
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
-  /** URL patterns to inject trace context headers into. Glob syntax. */
+  /** URL patterns to propagate trace context to. Matching fetch/XHR requests
+   * also report HTTP 5xx responses and timeouts as browser root spans.
+   * Glob syntax against host + pathname, including a non-default port.
+   * The host is checked separately to keep path segments out of host matches. */
   tracePropagationTargets?: string[];
 
   errors?: ErrorsConfig;
@@ -76,15 +83,15 @@ export interface PrivacyConfig {
    * anchors (`#section-1`) are preserved.
    *
    * Applied to:
-   *  - network breadcrumb URLs (request/response capture)
+   *  - network breadcrumb URLs and automatic request-error URLs
    *  - SPA navigation breadcrumbs (`data.from`, `data.to`)
    *  - `session_context.page_url` and `session_context.referrer`
    *  - `web_vitals.page_url`
    *  - the error payload's `environment.url` */
   queryParamsAllowlist?: string[];
   /** Glob URL patterns whose requests are never recorded. Matched against
-   * host + pathname. Today applied to network breadcrumbs; when replay
-   * returns it will gate replay's network capture too. */
+   * host + pathname. Applied to network breadcrumbs and automatic request
+   * errors; when replay returns it will gate replay's network capture too. */
   networkBlocklist?: string[];
   /** DOM-derived captures only. Selectors are CSS selectors evaluated
    * against live DOM nodes; they have no effect on data that isn't sourced
@@ -106,10 +113,13 @@ export interface PrivacyDomConfig {
   blockElement?: string[];
 }
 
+export const DEFAULT_SERVICE_NAME = "Browser";
+
 /** Fully-resolved config (every field present) — the shape modules see
  * after defaults are merged with the user's input. Distinct from
  * BrowserConfig because that has Partial groups for ergonomic init() calls. */
 export interface ResolvedConfig {
+  serviceName: string;
   errors: Required<ErrorsConfig>;
   breadcrumbs: Required<BreadcrumbsConfig>;
   session: Required<SessionConfig>;
@@ -121,6 +131,7 @@ export interface ResolvedConfig {
 }
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
+  serviceName: DEFAULT_SERVICE_NAME,
   errors: { enabled: true, sampleRate: 1.0 },
   breadcrumbs: {
     network: true,
@@ -143,6 +154,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
 export function resolveConfig(input: BrowserConfig): ResolvedConfig {
   const d = DEFAULT_CONFIG;
   return {
+    serviceName: input.serviceName?.trim() || d.serviceName,
     errors: { ...d.errors, ...input.errors },
     breadcrumbs: { ...d.breadcrumbs, ...input.breadcrumbs },
     session: { ...d.session, ...input.session },
@@ -236,18 +248,37 @@ export interface BrowserError {
   context?: Record<string, unknown>;
 }
 
+/** Identity of a failed request's browser root span. */
+export interface ErrorTrace {
+  /** The trace the request's `traceparent` put its backend spans in. */
+  trace_id: string;
+  /** The browser span named as parent by the backend's request span. */
+  span_id: string;
+  /** The request's start, in unix milliseconds, and how long it ran. The span
+   * is built from these, so it covers the request. Milliseconds because a
+   * request is usually shorter than a second, and a span built from seconds
+   * collapses to a point and leaves the backend spans outside their parent. */
+  start_time_ms: number;
+  duration_ms: number;
+}
+
 /** Wire shape for errors POSTed to `/ingest/browser/errors`. Aligned with AppSignal's
  * Transaction schema. Kept separate from `BrowserError` because subscribers
  * (`onErrorReported`) still want the richer internal shape — only the
  * network format follows this. */
-export interface FrontendTransaction {
+export interface FrontendTransaction extends Partial<ErrorTrace> {
   /** Unix seconds (not milliseconds). */
   timestamp: number;
+  /** Names the frontend among the services of a trace. See
+   * `BrowserConfig.serviceName`. */
+  service_name: string;
   namespace: "browser";
   /** Route template if known, else `location.pathname`. */
   action: string;
   /** Maps to `BrowserConfig.appVersion`. */
   revision?: string;
+  /** Request details, filtered through beforeError's context field. */
+  params?: Record<string, unknown>;
   error: {
     name: string;
     message: string;

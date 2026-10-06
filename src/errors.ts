@@ -1,16 +1,19 @@
 import type {
   Breadcrumb,
   BrowserError,
+  ErrorTrace,
   FrontendTransaction,
   IncomingError,
   ResolvedConfig,
   TransactionBreadcrumb,
 } from "./types.js";
+import { DEFAULT_SERVICE_NAME } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
 import { getRouteTemplate } from "./vitals.js";
-import { scrubPageUrl, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import type { RequestResult } from "./network-hook.js";
+import { scrubPageUrl, scrubUrl, safeUrl, globMatch, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -28,12 +31,38 @@ export function onErrorReported(fn: (event: BrowserError) => void): () => void {
 
 let config: ResolvedConfig["errors"];
 let appVersion: string | undefined;
+let serviceName: string;
 let beforeErrorHook: ((event: IncomingError) => IncomingError | null) | undefined;
 // Query-param allowlist for scrubbing URLs that ride the error payload. The
 // errors module captures `location.href` for `environment.url`; without this it
 // would ship raw query params (tokens, emails, OAuth fragments) — bypassing the
 // privacy gate every other capture path goes through.
 let allowlist: string[] = [];
+let networkBlocklist: string[] = [];
+// A request error that reached transport. Permanent: a report for that object
+// exists, so no later route may send a second one.
+let reportedRequestErrors = new WeakSet<object>();
+// A request error the SDK held back for volume, and the time the hold expires.
+// The gates that cause it are windowed, so the hold has to be windowed too, or
+// a ten second storm would silence the object for the life of the page.
+let suppressedRequestErrors = new WeakMap<object, number>();
+
+function trackable(error: unknown): error is object {
+  return error !== null && (typeof error === "object" || typeof error === "function");
+}
+
+function alreadyReported(error: unknown): boolean {
+  return trackable(error) && reportedRequestErrors.has(error);
+}
+
+/** True while a route that the host did not ask for must stay quiet. An
+ * explicit `captureError` is the host asking, so it does not consult this. */
+function handledRecently(error: unknown): boolean {
+  if (alreadyReported(error)) return true;
+  if (!trackable(error)) return false;
+  const until = suppressedRequestErrors.get(error);
+  return until !== undefined && Date.now() < until;
+}
 
 // Error click tracking — exported so breadcrumbs can check for recent errors
 let lastErrorTimestamp = 0;
@@ -63,6 +92,11 @@ const RATE_LIMIT_WINDOW_MS = 10_000;
 let rateWindowStart = 0;
 let rateWindowCount = 0;
 
+/** How long a held-back request error stays quiet on the routes the host did
+ * not ask for. The gates that hold it back are windowed, so this matches the
+ * longer of them. */
+const SUPPRESSION_HOLD_MS = Math.max(RATE_LIMIT_WINDOW_MS, DEDUPE_WINDOW_MS);
+
 function rateLimited(now: number): boolean {
   if (now - rateWindowStart >= RATE_LIMIT_WINDOW_MS) {
     rateWindowStart = now;
@@ -80,15 +114,20 @@ export function initErrors(
   queryParamsAllowlist: string[],
   version?: string,
   beforeError?: (event: IncomingError) => IncomingError | null,
+  service: string = DEFAULT_SERVICE_NAME,
+  blockedRequests: string[] = [],
 ): void {
   destroyErrors();
 
   config = resolved;
   allowlist = queryParamsAllowlist;
   appVersion = version;
+  serviceName = service;
+  networkBlocklist = blockedRequests;
   beforeErrorHook = beforeError;
 
   errorHandler = (event: ErrorEvent) => {
+    if (handledRecently(event.error)) return;
     handleError(
       event.message,
       event.filename,
@@ -103,6 +142,7 @@ export function initErrors(
 
   rejectionHandler = (event: PromiseRejectionEvent) => {
     const reason = event.reason;
+    if (handledRecently(reason)) return;
     // errorLike, not `instanceof Error`, so a rejection carrying an error from
     // another realm keeps its message, class and stack instead of collapsing to
     // "{}" — which also made every such rejection share one dedupe key.
@@ -137,6 +177,8 @@ export function destroyErrors(): void {
   rateWindowCount = 0;
   lastErrorTimestamp = 0;
   errorListeners.length = 0;
+  reportedRequestErrors = new WeakSet();
+  suppressedRequestErrors = new WeakMap();
 }
 
 /** Report an error through the full pipeline. Used by captureError for framework plugins. */
@@ -144,6 +186,7 @@ export function reportError(
   error: Error,
   context?: Record<string, unknown>,
 ): void {
+  if (alreadyReported(error)) return;
   handleError(
     error.message,
     undefined,
@@ -155,6 +198,63 @@ export function reportError(
   );
 }
 
+/** Report a request the backend can answer for, as the parent span the request
+ * sent. Later application errors never claim this identity. */
+export function reportRequestError(result: RequestResult): void {
+  if (!result.trace || result.aborted) return;
+  // Only a failure the backend can answer for. A timeout usually means the
+  // server took the request and traced it, though a deadline can expire during
+  // DNS or connect. Every other transport failure (refused, undeliverable,
+  // blocked by an extension) leaves no span to join, and its volume follows the
+  // device's connection rather than the backend.
+  const serverError = result.status !== undefined && result.status >= 500 && result.status <= 599;
+  if (!serverError && !result.timedOut) return;
+  // A deadline missed on an offline device says nothing about the backend, and
+  // a page that keeps polling would report one failure per attempt.
+  if (result.timedOut && navigator.onLine === false) return;
+  const parsed = safeUrl(result.url);
+  if (!parsed || networkBlocklist.some((pattern) => globMatch(pattern, parsed.host + parsed.pathname))) return;
+  const url = scrubUrl(result.url, allowlist);
+  const errorClass = serverError ? "HTTPError" : "TimeoutError";
+  const failure = serverError ? `HTTP ${result.status}` : "timed out";
+  const durationMs = Math.max(0, result.endTime - result.startTime);
+  const outcome = handleError(
+    `${result.method} ${url}: ${failure}`,
+    undefined, undefined, undefined, undefined,
+    // The same duration rides the params, where `beforeError` can redact it.
+    // The span is built from the field below, which the hook cannot reach.
+    { request: {
+      url,
+      method: result.method,
+      ...(result.status === undefined ? {} : { status: result.status }),
+      duration_ms: durationMs,
+    } },
+    errorClass,
+    {
+      trace_id: result.trace.traceId,
+      span_id: result.trace.spanId,
+      start_time_ms: result.startTime,
+      duration_ms: durationMs,
+    },
+    result.endTime,
+  );
+  const reason = result.failureReason;
+  if (!trackable(reason)) return;
+  if (outcome === "sent") {
+    reportedRequestErrors.add(reason);
+  } else if (outcome === "suppressed") {
+    // Held back, not rejected, so the hold lasts only as long as the gate that
+    // caused it could still be in effect.
+    suppressedRequestErrors.set(reason, Date.now() + SUPPRESSION_HOLD_MS);
+  }
+}
+
+/** `sent` reached transport. `suppressed` means the SDK held it back for
+ * volume, so the caller must not let the same object through another route.
+ * `dropped` means a gate or the host rejected it, and the host's own error
+ * still deserves its usual path. */
+type ErrorOutcome = "sent" | "suppressed" | "dropped";
+
 function handleError(
   message: string,
   filename?: string,
@@ -163,26 +263,31 @@ function handleError(
   stack?: string,
   context?: Record<string, unknown>,
   errorClass?: string,
-): void {
-  if (!config.enabled) return;
+  trace?: ErrorTrace,
+  occurredAt?: number,
+): ErrorOutcome {
+  if (!config.enabled) return "dropped";
 
   // Self-protection: ignore errors from our own SDK to prevent feedback loops
-  if (isOwnError(filename, stack)) return;
+  if (isOwnError(filename, stack)) return "dropped";
 
   // Cross-origin script errors surface as an opaque "Script error." with no
   // stack and no usable location — the browser withholds the detail unless the
   // script is served with `crossorigin="anonymous"` + CORS headers. These can't
   // be symbolicated and carry zero actionable information, so drop them rather
   // than flood the stream with indistinguishable noise.
-  if (message === "Script error." && !stack) return;
+  if (message === "Script error." && !stack) return "dropped";
 
   // Sample rate check
-  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return;
+  // Sampling is a volume gate, so a second route must not roll again: that
+  // would report the failure at s + (1-s)s rather than s, and the second roll
+  // produces a bare error with no trace and no endpoint.
+  if (config.sampleRate < 1.0 && Math.random() >= config.sampleRate) return "suppressed";
 
   // Global rate limit — checked before the beforeError hook, the error
   // breadcrumb, the O(n) dedupe scan, and the network send, so a storm caps
   // the per-error work too, not just the wire volume.
-  if (rateLimited(Date.now())) return;
+  if (rateLimited(Date.now())) return "suppressed";
 
   // beforeError hook — early-pipeline. Runs before any side effect (error
   // breadcrumb, lastErrorTimestamp, dedupe slot, payload construction,
@@ -212,9 +317,9 @@ function handleError(
       "the error was dropped. Move async work outside the hook (e.g. perform " +
       "it before calling captureError).",
     );
-    return;
+    return "dropped";
   }
-  if (!hookResult) return;
+  if (!hookResult) return "dropped";
   const effective: IncomingError = hookResult;
 
   const now = Date.now();
@@ -222,18 +327,18 @@ function handleError(
 
   // Error breadcrumb
   addBreadcrumb({
-    timestamp: now,
+    timestamp: occurredAt ?? now,
     category: "error",
     message: effective.message.slice(0, 200),
   });
 
   // Deduplication: first 5 occurrences sent, 6+ suppressed
   const dedupeKey = dedupeKeyFor(effective.message, effective.stack);
-  if (checkDedupe(dedupeKey, now)) return;
+  if (checkDedupe(dedupeKey, now)) return "suppressed";
 
   const payload: BrowserError = {
     type: "error",
-    timestamp: now,
+    timestamp: occurredAt ?? now,
     // Already filtered (UX-only categories excluded) and capped to 25 by
     // the error-context ring buffer in breadcrumbs.ts.
     breadcrumbs: getErrorBreadcrumbs(),
@@ -241,17 +346,16 @@ function handleError(
     ...effective,
   };
 
-  sendError(toFrontendTransaction(payload));
+  sendError(toFrontendTransaction(payload, trace));
 
   // Session context is only consumed by subscribers, not the wire payload —
   // getSessionContext does real work (URL scrubbing, viewport/connection reads)
   // so skip it entirely when nobody's listening.
   if (errorListeners.length > 0) {
     payload.session = getSessionContext();
-    // `context` does not reach the wire: toFrontendTransaction leaves it out.
-    // The subscribers are its only readers, so prune it here, where the same
-    // guard already gates getSessionContext, and after the dedupe gate. The
-    // beforeError hook has run by now and saw the host's own objects.
+    // Ordinary JS error context is subscriber-only; request context is also
+    // serialized as params above. Prune the subscriber copy after the hook
+    // and dedupe gate, without mutating the host's original object.
     if (payload.context) {
       payload.context = pruneRecordForJson(payload.context);
     }
@@ -259,14 +363,18 @@ function handleError(
       try { l(payload); } catch { /* don't break the chain */ }
     }
   }
+  return "sent";
 }
 
 // Map our internal BrowserError to the AppSignal `FrontendTransaction` wire
 // shape consumed by the processor's frontend_errors pipeline. `revision` is
 // the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
 // site_id + revision); without it stacks land unsymbolicated.
-function toFrontendTransaction(error: BrowserError): FrontendTransaction {
+function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): FrontendTransaction {
   return {
+    // Only an observed request failure carries the request's identity.
+    // Ordinary JavaScript errors receive independent IDs during ingestion.
+    ...trace,
     // Server expects unix seconds, not milliseconds.
     timestamp: Math.floor(error.timestamp / 1000),
     namespace: "browser",
@@ -274,6 +382,8 @@ function toFrontendTransaction(error: BrowserError): FrontendTransaction {
     // one error group for each ID in the URL.
     action: getRouteTemplate() || stripTrailingSlash(location.pathname),
     revision: error.app_version,
+    service_name: serviceName,
+    ...(trace && error.context ? { params: pruneRecordForJson(error.context) } : {}),
     error: {
       name: error.error_class || "Error",
       message: error.message,

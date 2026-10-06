@@ -1,22 +1,42 @@
-import { safeUrl, globMatch, randomBytes, toHex } from "./utils.js";
-import { onBeforeRequest, type RequestResult } from "./network-hook.js";
+import { safeUrl, matchesUrl, randomBytes, toHex } from "./utils.js";
+import { onBeforeRequest, type PropagatedTrace, type RequestResult } from "./network-hook.js";
 
 let targets: string[] = [];
-let unregister: (() => void) | null = null;
+let unregisters: (() => void)[] = [];
 
 export function initTracing(tracePropagationTargets: string[]): void {
+  destroyTracing();
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
 
-  unregister = onBeforeRequest((ctx) => {
+  unregisters.push(onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
+    const caller = parseTraceparent(ctx.headers.get("traceparent"));
+    if (caller) {
+      // The caller propagates its own context. Join that trace rather than
+      // start a rival one, and report the ids that actually go on the wire.
+      ctx.trace = caller;
+      return;
+    }
     const traceId = randomHex(16);
     const spanId = randomHex(8);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
     // Kept on the request itself, so whatever reads it later gets the ids of
     // that request and not of another one to the same URL.
     ctx.trace = { traceId, spanId };
-  });
+  }));
+}
+
+/** The ids of a W3C `traceparent` the caller set, when it is one we can join.
+ * An all-zero id is invalid per the spec and names no span. */
+function parseTraceparent(value: string | null): PropagatedTrace | undefined {
+  if (!value) return undefined;
+  const parts = value.trim().match(/^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-.*)?$/);
+  if (!parts) return undefined;
+  const [, version, traceId, spanId, , extension] = parts;
+  if (version === "ff" || (version === "00" && extension !== undefined)) return undefined;
+  if (/^0+$/.test(traceId) || /^0+$/.test(spanId)) return undefined;
+  return { traceId, spanId };
 }
 
 /** The trace ID a request propagated, or undefined when it propagated none.
@@ -27,18 +47,15 @@ export function traceIdForRequest(result: RequestResult): string | undefined {
 }
 
 export function destroyTracing(): void {
-  if (unregister) {
-    unregister();
-    unregister = null;
-  }
+  for (const unregister of unregisters) unregister();
+  unregisters = [];
   targets = [];
 }
 
 function shouldPropagate(url: string): boolean {
   const parsed = safeUrl(url);
   if (!parsed) return false;
-  const hostPath = parsed.host + parsed.pathname;
-  return targets.some((pattern) => globMatch(pattern, hostPath));
+  return targets.some((pattern) => matchesUrl(pattern, parsed));
 }
 
 /** N random bytes encoded as a lowercase hex string. Used for both the
