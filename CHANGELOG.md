@@ -1,5 +1,46 @@
 # AppSignal for Browsers Changelog
 
+## 1.0.0-beta.7
+
+_Published on 2026-10-06._
+
+### Added
+
+- Report a failed request as an error, in the trace of the backend work it
+  caused. A request matching `tracePropagationTargets` sends a `traceparent`
+  header that names a span, and the backend's spans for that request point at it.
+  Until now the browser never sent that span, so those spans named a parent that
+  does not exist. A request that answers 5xx, or runs out of time, is now
+  reported as an `HTTPError` or a `TimeoutError` carrying that span's ids, so the
+  error and the backend work beneath it read as one trace.
+
+  Only a failure the backend can answer for is reported. A timeout means the
+  server usually took the request and traced it, although a deadline can also
+  expire during DNS or connect. A request that was refused,
+  undeliverable or blocked by an extension leaves no span to join, and the browser
+  reports every one of those the same way, so none of them is reported. A 4xx is
+  not a failure, and a deadline missed while the device is offline says nothing
+  about the backend. A rejection that the SDK reports this way is not reported a
+  second time when it reaches `window.onerror`.
+
+  (minor [49ad5ff](https://github.com/appsignal/appsignal-browser/commit/49ad5ffc534a3b83b4dd859a1e2aca8ffa2ad552))
+- Add the `serviceName` option. It names this frontend as a service in traces,
+  and every error report carries it. The default is `Browser`. Set one name per
+  frontend when one organization runs several.
+
+  (minor [49ad5ff](https://github.com/appsignal/appsignal-browser/commit/49ad5ffc534a3b83b4dd859a1e2aca8ffa2ad552))
+
+### Fixed
+
+- Keep the SDK's own posts out of the network hook. A propagation target that
+  covers the ingest host no longer adds a `traceparent` to them, and they skip
+  any `fetch` wrapper that the host installs after `init`.
+
+  A network breadcrumb now carries the trace id of its own request. Two requests
+  to one URL that answered out of order could swap their ids before.
+
+  (patch [fa7bdcb](https://github.com/appsignal/appsignal-browser/commit/fa7bdcb29af78009f9d47557e8c10ed4139cc125))
+
 ## 1.0.0-beta.6
 
 _Published on 2026-09-18._
