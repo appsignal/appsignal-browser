@@ -60,7 +60,6 @@ let beforeListeners: BeforeRequestListener[] = [];
 let afterListeners: AfterRequestListener[] = [];
 
 let installed = false;
-let generation = 0;
 let underlyingFetch: typeof window.fetch;
 let underlyingXhrOpen: typeof XMLHttpRequest.prototype.open;
 let underlyingXhrSend: typeof XMLHttpRequest.prototype.send;
@@ -103,7 +102,6 @@ export function initNetworkHook(): void {
 
 export function destroyNetworkHook(): void {
   if (!installed) return;
-  generation++;
   // Drop the subscriber references first, so a failed restore does not retain
   // them. `installed` says our patch is on the globals, so it goes down only
   // for the ones we put back: a later init must not wrap our own wrapper,
@@ -145,7 +143,6 @@ function isRequest(input: RequestInfo | URL): input is Request {
 function patchFetch(): void {
   underlyingFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
-    const requestGeneration = generation;
     const request = isRequest(input) ? input : undefined;
     const url = resolveRequestUrl(request ? request.url : String(input));
     const method =
@@ -186,7 +183,6 @@ function patchFetch(): void {
 
     try {
       const response = await underlyingFetch(input, finalInit);
-      if (requestGeneration !== generation) return response;
       const result: RequestResult = {
         url,
         method,
@@ -202,7 +198,6 @@ function patchFetch(): void {
       }
       return response;
     } catch (err) {
-      if (requestGeneration !== generation) throw err;
       // A cancelled fetch rejects with AbortError, which is not a failure.
       const name = (err as { name?: string } | null)?.name;
       // Custom abort reasons still mean cancellation. TimeoutError is a
@@ -236,7 +231,6 @@ function patchFetch(): void {
  * after DONE, and a host can reuse the object in between, so by then the
  * object's own status belongs to another request. */
 type XhrRecord = {
-  generation: number;
   url: string;
   method: string;
   startTime: number;
@@ -298,7 +292,6 @@ function emitXhrReport(
   failed: boolean,
   timedOut: boolean,
 ): void {
-  if (record.generation !== generation) return;
   const aborted = record.aborted;
   const result: RequestResult = {
     url: record.url,
@@ -477,7 +470,7 @@ function patchXhr(): void {
 
     watchXhr(xhr);
     const previous = xhr._appsignalSending;
-    const pending: XhrRecord = { generation, url, method, startTime: Date.now(), aborted: false };
+    const pending: XhrRecord = { url, method, startTime: Date.now(), aborted: false };
     xhr._appsignalSending = pending;
     xhrsToReport.add(xhr);
     const headers = new Headers();
