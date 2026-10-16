@@ -1,13 +1,24 @@
 import { safeUrl, matchesUrl, randomBytes, toHex } from "./utils.js";
 import { onBeforeRequest, type PropagatedTrace, type RequestResult } from "./network-hook.js";
+import { DEFAULT_SERVICE_NAME } from "./types.js";
+import { currentRoute } from "./vitals.js";
+
+// A tracestate value holds only printable ASCII without `,` or `=`, and the
+// backend splits our value into fields on `;`.
+const TRACESTATE_UNSAFE_CHARACTERS = /[^\x20-\x7E]|[,=;]/g;
+const TRACESTATE_MAX_VALUE_LENGTH = 256;
 
 let targets: string[] = [];
 let unregisters: (() => void)[] = [];
 
-export function initTracing(tracePropagationTargets: string[]): void {
+export function initTracing(
+  tracePropagationTargets: string[],
+  serviceName: string = DEFAULT_SERVICE_NAME,
+): void {
   destroyTracing();
   targets = tracePropagationTargets;
   if (targets.length === 0) return;
+  const service = tracestateField(serviceName);
 
   unregisters.push(onBeforeRequest((ctx) => {
     if (!shouldPropagate(ctx.url)) return;
@@ -21,10 +32,32 @@ export function initTracing(tracePropagationTargets: string[]): void {
     const traceId = randomHex(16);
     const spanId = randomHex(8);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
+    // The SDK does not report a span for each request, so the backend often
+    // sees a parent span that it never receives. The service name and the
+    // route in tracestate tell the backend who that caller was. The route is
+    // read on each request, because a single-page app changes it without a
+    // page load.
+    const value = `service:${service};action:${tracestateField(currentRoute())}`;
+    const member = `appsignal=${value.slice(0, TRACESTATE_MAX_VALUE_LENGTH).trimEnd()}`;
+    ctx.headers.set("tracestate", prependTracestateMember(ctx.headers.get("tracestate"), member));
     // Kept on the request itself, so whatever reads it later gets the ids of
     // that request and not of another one to the same URL.
     ctx.trace = { traceId, spanId };
   }));
+}
+
+function tracestateField(text: string): string {
+  return text.replace(TRACESTATE_UNSAFE_CHARACTERS, "_");
+}
+
+/** Puts our member first, as the spec asks of the vendor that last changed the
+ * trace, and keeps the members other vendors set. */
+function prependTracestateMember(existing: string | null, member: string): string {
+  const others = (existing ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry && !entry.startsWith("appsignal="));
+  return [member, ...others].join(",");
 }
 
 /** The ids of a W3C `traceparent` the caller set, when it is one we can join.

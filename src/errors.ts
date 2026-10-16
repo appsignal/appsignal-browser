@@ -11,9 +11,9 @@ import { DEFAULT_SERVICE_NAME } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
+import { currentRoute } from "./vitals.js";
 import type { RequestResult } from "./network-hook.js";
-import { scrubPageUrl, scrubUrl, safeUrl, globMatch, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import { scrubPageUrl, scrubUrl, safeUrl, globMatch, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -380,7 +380,7 @@ function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): Fronten
     namespace: "browser",
     // The action groups the errors. A template such as "/users/:id" prevents
     // one error group for each ID in the URL.
-    action: getRouteTemplate() || stripTrailingSlash(location.pathname),
+    action: currentRoute(),
     revision: error.app_version,
     service_name: serviceName,
     ...(trace && error.context ? { params: pruneRecordForJson(error.context) } : {}),

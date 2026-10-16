@@ -230,7 +230,7 @@ function startCollection(endpoint: string): void {
   );
 
   if (clientConfig?.tracePropagationTargets?.length) {
-    initTracing(clientConfig.tracePropagationTargets);
+    initTracing(clientConfig.tracePropagationTargets, cfg.serviceName);
     lifecycleUnsubscribers.push(onAfterRequest(reportRequestError));
   }
 
