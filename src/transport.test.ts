@@ -153,6 +153,20 @@ describe("transport", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("sends when the browser does not report whether it is online", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response());
+    const onLine = Object.getOwnPropertyDescriptor(Navigator.prototype, "onLine");
+    Object.defineProperty(navigator, "onLine", { value: undefined, configurable: true });
+    try {
+      sendError(errorPayload());
+    } finally {
+      delete (navigator as { onLine?: boolean }).onLine;
+      if (onLine) Object.defineProperty(Navigator.prototype, "onLine", onLine);
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("sendReplayChunk with useBeacon queues bodies larger than the beacon cap", () => {
     // fetch({keepalive:true}) has the same ~64 KB cap in Chromium, so there is
     // no rescue path on unload. The payload goes to the retry queue instead of

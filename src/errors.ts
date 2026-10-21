@@ -11,9 +11,10 @@ import { DEFAULT_SERVICE_NAME } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
+import { getRouteTemplate } from "./route-template.js";
 import type { RequestResult } from "./network-hook.js";
 import { scrubPageUrl, scrubUrl, safeUrl, globMatch, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
+import { getRuntime, type UncaughtError } from "./runtime.js";
 
 // Subscribers fired after an error has cleared every gate (sample_rate,
 // beforeError, dedupe) and been handed to transport. Other modules
@@ -106,8 +107,7 @@ function rateLimited(now: number): boolean {
   return rateWindowCount > RATE_LIMIT_MAX;
 }
 
-let errorHandler: ((event: ErrorEvent) => void) | null = null;
-let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
+let uncaughtTeardown: (() => void) | null = null;
 
 export function initErrors(
   resolved: ResolvedConfig["errors"],
@@ -126,51 +126,39 @@ export function initErrors(
   networkBlocklist = blockedRequests;
   beforeErrorHook = beforeError;
 
-  errorHandler = (event: ErrorEvent) => {
-    if (handledRecently(event.error)) return;
-    handleError(
-      event.message,
-      event.filename,
-      event.lineno,
-      event.colno,
-      event.error?.stack,
-      undefined,
-      event.error?.name,
-    );
-  };
-  window.addEventListener("error", errorHandler);
+  uncaughtTeardown = getRuntime().onUncaughtError(handleUncaught);
+}
 
-  rejectionHandler = (event: PromiseRejectionEvent) => {
-    const reason = event.reason;
-    if (handledRecently(reason)) return;
+function handleUncaught(uncaught: UncaughtError): void {
+  if (handledRecently(uncaught.error)) return;
+  if (uncaught.rejection) {
     // errorLike, not `instanceof Error`, so a rejection carrying an error from
     // another realm keeps its message, class and stack instead of collapsing to
     // "{}" — which also made every such rejection share one dedupe key.
-    const asError = errorLike(reason);
-    const message = asError ? asError.message : stringifyReason(reason);
-    handleError(
-      message,
-      undefined,
-      undefined,
-      undefined,
-      asError?.stack,
-      undefined,
-      asError?.name,
-    );
-  };
-  window.addEventListener("unhandledrejection", rejectionHandler);
+    const asError = errorLike(uncaught.error);
+    const message = asError ? asError.message : stringifyReason(uncaught.error);
+    handleError(message, undefined, undefined, undefined, asError?.stack, undefined, asError?.name);
+    return;
+  }
+  // A thrown value is whatever the host threw: an Error, a plain object with
+  // only a stack, a string. Read the fields that are there.
+  const thrown = uncaught.error as { stack?: unknown; name?: unknown } | null | undefined;
+  handleError(
+    uncaught.message,
+    uncaught.filename,
+    uncaught.lineno,
+    uncaught.colno,
+    typeof thrown?.stack === "string" ? thrown.stack : undefined,
+    undefined,
+    typeof thrown?.name === "string" ? thrown.name : undefined,
+  );
 }
 
 export function destroyErrors(): void {
-  if (errorHandler) {
-    const handler = errorHandler;
-    errorHandler = null;
-    attemptCleanup("error listener", () => window.removeEventListener("error", handler));
-  }
-  if (rejectionHandler) {
-    const handler = rejectionHandler;
-    rejectionHandler = null;
-    attemptCleanup("rejection listener", () => window.removeEventListener("unhandledrejection", handler));
+  if (uncaughtTeardown) {
+    const teardown = uncaughtTeardown;
+    uncaughtTeardown = null;
+    attemptCleanup("error listeners", teardown);
   }
   dedupeWindow = [];
   rateWindowStart = 0;
@@ -211,7 +199,7 @@ export function reportRequestError(result: RequestResult): void {
   if (!serverError && !result.timedOut) return;
   // A deadline missed on an offline device says nothing about the backend, and
   // a page that keeps polling would report one failure per attempt.
-  if (result.timedOut && navigator.onLine === false) return;
+  if (result.timedOut && !getRuntime().isOnline()) return;
   const parsed = safeUrl(result.url);
   if (!parsed || networkBlocklist.some((pattern) => globMatch(pattern, parsed.host + parsed.pathname))) return;
   const url = scrubUrl(result.url, allowlist);
@@ -371,6 +359,7 @@ function handleError(
 // the matchup key with sourcemaps uploaded out-of-band (S3 keyed by
 // site_id + revision); without it stacks land unsymbolicated.
 function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): FrontendTransaction {
+  const runtime = getRuntime();
   return {
     // Only an observed request failure carries the request's identity.
     // Ordinary JavaScript errors receive independent IDs during ingestion.
@@ -380,7 +369,7 @@ function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): Fronten
     namespace: "browser",
     // The action groups the errors. A template such as "/users/:id" prevents
     // one error group for each ID in the URL.
-    action: getRouteTemplate() || stripTrailingSlash(location.pathname),
+    action: getRouteTemplate() || stripTrailingSlash(runtime.pagePath()),
     revision: error.app_version,
     service_name: serviceName,
     ...(trace && error.context ? { params: pruneRecordForJson(error.context) } : {}),
@@ -396,8 +385,8 @@ function toFrontendTransaction(error: BrowserError, trace?: ErrorTrace): Fronten
     // explicitly via setTags.
     tags: getTags(),
     // The full href can contain a token or an OAuth fragment.
-    environment: { url: scrubPageUrl(location.href, allowlist) },
-    user_agent: navigator.userAgent,
+    environment: { url: scrubPageUrl(runtime.pageUrl(), allowlist) },
+    user_agent: runtime.userAgent(),
   };
 }
 

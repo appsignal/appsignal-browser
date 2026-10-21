@@ -1,19 +1,20 @@
-// Single visibilitychange + pagehide listener fanned out to subscribers.
-// Each collector module previously registered its own DOM listeners;
+// Single visibility + page hide subscription fanned out to subscribers.
+// Each collector module previously registered its own listeners;
 // consolidating here cuts the registration/teardown surface and keeps
 // the firing order consistent across modules.
 
 import { attemptCleanup } from "./utils.js";
+import { getRuntime, type VisibilityState } from "./runtime.js";
 
-type VisListener = (state: DocumentVisibilityState) => void;
+type VisListener = (state: VisibilityState) => void;
 type PageHideListener = (persisted: boolean) => void;
 
 let visListeners: VisListener[] = [];
 let pageHideListeners: PageHideListener[] = [];
 
 let installed = false;
-let visHandler: (() => void) | null = null;
-let pageHideHandler: ((e: PageTransitionEvent) => void) | null = null;
+let visTeardown: (() => void) | null = null;
+let pageHideTeardown: (() => void) | null = null;
 
 export function onVisibilityChange(fn: VisListener): () => void {
   visListeners.push(fn);
@@ -37,41 +38,32 @@ function ensureInstalled(): void {
   if (installed) return;
   installed = true;
 
-  visHandler = () => {
-    const state = document.visibilityState;
+  const runtime = getRuntime();
+  visTeardown = runtime.onVisibilityChange((state) => {
     for (const l of visListeners) {
       try { l(state); } catch { /* don't break the chain */ }
     }
-  };
-  document.addEventListener("visibilitychange", visHandler);
-
-  pageHideHandler = (e: PageTransitionEvent) => {
+  });
+  pageHideTeardown = runtime.onPageHide((persisted) => {
     for (const l of pageHideListeners) {
-      try { l(e.persisted); } catch { /* don't break the chain */ }
+      try { l(persisted); } catch { /* don't break the chain */ }
     }
-  };
-  window.addEventListener("pagehide", pageHideHandler as EventListener);
+  });
 }
 
 export function destroyLifecycle(): void {
   if (!installed) return;
   visListeners = [];
   pageHideListeners = [];
-  // `installed` says our listeners are on the globals, so it goes down only
+  // `installed` says our listeners are on the platform, so it goes down only
   // when they are off. A later ensureInstalled must not attach a second pair.
-  // A handler stays referenced until its detach succeeds, so a later destroy
-  // can retry it, the way the network hook keeps the original fetch.
-  if (visHandler) {
-    const handler = visHandler;
-    if (attemptCleanup("visibility listener", () => document.removeEventListener("visibilitychange", handler))) {
-      visHandler = null;
-    }
+  // A teardown stays referenced until it succeeds, so a later destroy can
+  // retry it, the way the network hook keeps the original fetch.
+  if (visTeardown && attemptCleanup("visibility listener", visTeardown)) {
+    visTeardown = null;
   }
-  if (pageHideHandler) {
-    const handler = pageHideHandler;
-    if (attemptCleanup("pagehide listener", () => window.removeEventListener("pagehide", handler as EventListener))) {
-      pageHideHandler = null;
-    }
+  if (pageHideTeardown && attemptCleanup("pagehide listener", pageHideTeardown)) {
+    pageHideTeardown = null;
   }
-  installed = visHandler !== null || pageHideHandler !== null;
+  installed = visTeardown !== null || pageHideTeardown !== null;
 }
