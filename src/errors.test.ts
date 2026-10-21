@@ -20,11 +20,9 @@ vi.mock("./breadcrumbs.js", () => ({
   getErrorBreadcrumbs: vi.fn(() => []),
 }));
 
-// getRouteTemplate is the only thing errors.ts pulls from vitals; mock it so
-// the route-template grouping is controllable per test without driving the
-// real vitals observers.
+// Mock the route template so the grouping is controllable per test.
 const vitalsMock = vi.hoisted(() => ({ routeTemplate: "" }));
-vi.mock("./vitals.js", () => ({
+vi.mock("./route-template.js", () => ({
   getRouteTemplate: () => vitalsMock.routeTemplate,
 }));
 

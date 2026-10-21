@@ -5,7 +5,7 @@ import { reactNativeRuntime } from "./runtime.js";
 import { initSession, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, stopSessionTracking } from "../session.js";
 import { initBreadcrumbs, addManualBreadcrumb, destroyBreadcrumbs } from "../breadcrumbs.js";
 import { initErrors, reportError, destroyErrors } from "../errors.js";
-import { setRouteTemplate as setVitalsRouteTemplate, destroyVitals } from "../vitals.js";
+import { setRouteTemplate as storeRouteTemplate, clearRouteTemplate } from "../route-template.js";
 import { initTransport, destroyTransport, EVENTS_PATH, ERROR_PATH } from "../transport.js";
 import { initNetworkHook, destroyNetworkHook } from "../network-hook.js";
 import { destroyLifecycle } from "../lifecycle.js";
@@ -84,7 +84,7 @@ export const addBreadcrumb = /* @__PURE__ */ guard("addBreadcrumb", (breadcrumb:
 /** Name the screen the user is on, such as a route name from React Navigation
  * or a path from Expo Router. Errors group by it. Pass `null` to clear. */
 export const setRouteTemplate = /* @__PURE__ */ guard("setRouteTemplate", (template: string | null): void => {
-  setVitalsRouteTemplate(template);
+  storeRouteTemplate(template);
 });
 
 /** Tear down the SDK and stop all collection. */
@@ -129,7 +129,7 @@ function startCollection(config: ReactNativeConfig, endpoint: string): void {
 function detachAll(): void {
   attemptCleanup("breadcrumbs", destroyBreadcrumbs);
   attemptCleanup("errors", destroyErrors);
-  attemptCleanup("route template", destroyVitals);
+  attemptCleanup("route template", clearRouteTemplate);
   attemptCleanup("network hook", destroyNetworkHook);
   attemptCleanup("session tracking", stopSessionTracking);
   attemptCleanup("lifecycle", destroyLifecycle);

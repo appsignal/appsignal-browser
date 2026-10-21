@@ -11,7 +11,7 @@ import { DEFAULT_SERVICE_NAME } from "./types.js";
 import { getSessionContext, getTags } from "./session.js";
 import { addBreadcrumb, getErrorBreadcrumbs } from "./breadcrumbs.js";
 import { sendError } from "./transport.js";
-import { getRouteTemplate } from "./vitals.js";
+import { getRouteTemplate } from "./route-template.js";
 import type { RequestResult } from "./network-hook.js";
 import { scrubPageUrl, scrubUrl, safeUrl, globMatch, stripTrailingSlash, errorLike, pruneRecordForJson, applyHook, logError, attemptCleanup } from "./utils.js";
 import { getRuntime, type UncaughtError } from "./runtime.js";

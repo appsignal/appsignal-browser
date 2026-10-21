@@ -1,5 +1,6 @@
 import type { EventVital } from "./types.js";
-import { scrubPageUrl, stripTrailingSlash, timeOrigin, attemptCleanup } from "./utils.js";
+import { scrubPageUrl, timeOrigin, attemptCleanup } from "./utils.js";
+import { getRouteTemplate, setRouteTemplate as storeRouteTemplate, clearRouteTemplate } from "./route-template.js";
 import { onFCP, onLCP, onTTFB } from "web-vitals";
 import type { Metric } from "web-vitals";
 
@@ -25,10 +26,6 @@ let collectedVitals: EventVital[] = [];
 let allowlist: string[] = [];
 let destroyed = false;
 
-// The server uses `page_url` as the aggregation key. An explicit template
-// prevents a false positive from the auto-template function on the server.
-let currentRouteTemplate = "";
-
 // Resolved page_url for the *currently active* route — captured when the route
 // begins (init / navigation) and refreshed when the host sets a template, NOT
 // re-resolved at flush time. This matters because the SPA-navigation flush runs
@@ -53,7 +50,7 @@ export function initVitals(queryParamsAllowlist: string[]): void {
   collectedVitals = [];
   destroyed = false;
   allowlist = queryParamsAllowlist;
-  currentRouteTemplate = "";
+  clearRouteTemplate();
   loadRoute = null;
   pendingLoad = [];
   resetRouteVitals();
@@ -315,19 +312,8 @@ function resetRouteVitals(): void {
   }
 }
 
-function normalizeRouteTemplate(template: string | null): string {
-  return stripTrailingSlash((template ?? "").trim());
-}
-
-/** The host's most recently declared route template (e.g. "/users/:id"), or ""
- * if none is set. Shared with the errors module so error grouping uses the same
- * route key as vitals attribution. */
-export function getRouteTemplate(): string {
-  return currentRouteTemplate;
-}
-
 export function setRouteTemplate(template: string | null): void {
-  currentRouteTemplate = normalizeRouteTemplate(template);
+  storeRouteTemplate(template);
   // Refresh the active route's page_url so metrics accruing on this route (and
   // the load metrics, if not yet flushed) pick up the template.
   routePageUrl = resolvePageUrl();
@@ -342,7 +328,7 @@ export function drainVitals(): EventVital[] {
 export function destroyVitals(): void {
   destroyed = true;
   collectedVitals = [];
-  currentRouteTemplate = "";
+  clearRouteTemplate();
   loadRoute = null;
   pendingLoad = [];
   resetRouteVitals();
@@ -357,7 +343,10 @@ export function destroyVitals(): void {
 // --- helpers ----------------------------------------------------------------
 
 function resolvePageUrl(): string {
-  if (currentRouteTemplate) return currentRouteTemplate;
+  // The server uses `page_url` as the aggregation key. An explicit template
+  // prevents a false positive from the auto-template function on the server.
+  const template = getRouteTemplate();
+  if (template) return template;
   return scrubPageUrl(location.href, allowlist);
 }
 
