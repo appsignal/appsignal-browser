@@ -1,6 +1,11 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "react-native": new URL("./src/react-native/testing/reactNative.ts", import.meta.url).pathname,
+    },
+  },
   test: {
     environment: "jsdom",
     // Vitest's default include glob picks up `**/*.spec.ts`, which sweeps in

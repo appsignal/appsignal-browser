@@ -6,6 +6,7 @@ import { traceIdForRequest } from "./tracing.js";
 import { safeUrl, globMatch, scrubUrl, timeOrigin, errorLike, pruneRecordForJson, applyHook, attemptCleanup } from "./utils.js";
 import { onAfterRequest, type RequestResult } from "./network-hook.js";
 import { onVisibilityChange, onPageHide } from "./lifecycle.js";
+import { getRuntime } from "./runtime.js";
 
 // Two parallel ring buffers, split at write time:
 //
@@ -153,18 +154,9 @@ export function initBreadcrumbs(
   sessionBuffer = new RingBuffer<Breadcrumb>(SESSION_BUFFER_CAPACITY);
   errorBuffer = new RingBuffer<Breadcrumb>(ERROR_BUFFER_CAPACITY);
 
-  // Register all collectors unconditionally — each handler reads the
+  // Register every collector the platform has — each handler reads the
   // module-level `config` and short-circuits when its category is off.
-  initClicks();
-  initNavigation();
-  // Navigation also counts as an effect
-  onAfterNavigation(() => { lastEffectTime = Date.now(); });
-  if (document.readyState === "complete") {
-    recordDocumentLoad();
-  } else {
-    window.addEventListener("load", () => recordDocumentLoad(), { once: true });
-  }
-  initResourceTimingObserver();
+  if (getRuntime().dom) initDocumentCollectors();
   cleanups.push(
     onAfterRequest((result) => {
       if (!config.network) return;
@@ -175,9 +167,24 @@ export function initBreadcrumbs(
     }),
   );
   initConsole();
+  initVisibility();
+}
+
+/** The collectors that read the document: clicks, history, document load,
+ * resource timing, long tasks, scroll depth and tab lifecycle. */
+function initDocumentCollectors(): void {
+  initClicks();
+  initNavigation();
+  // Navigation also counts as an effect
+  onAfterNavigation(() => { lastEffectTime = Date.now(); });
+  if (document.readyState === "complete") {
+    recordDocumentLoad();
+  } else {
+    window.addEventListener("load", () => recordDocumentLoad(), { once: true });
+  }
+  initResourceTimingObserver();
   initLongTasks();
   initScrollDepth();
-  initVisibility();
   initTabLifecycle();
 }
 

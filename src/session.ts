@@ -1,6 +1,7 @@
 import type { ErrorTags, SessionContext, UserContext } from "./types.js";
 import { storage, scrubPageUrl, scrubUrl, uuidv4, uuidv7, attemptCleanup } from "./utils.js";
 import { onVisibilityChange } from "./lifecycle.js";
+import { getRuntime } from "./runtime.js";
 
 const SESSION_KEY = "appsignal_session_id";
 const ANON_KEY = "appsignal_anonymous_id";
@@ -243,19 +244,13 @@ function resetInactivityTimer(): void {
   }, inactivityTimeoutMs);
 }
 
-let activityHandler: (() => void) | null = null;
+let activityTeardown: (() => void) | null = null;
 let unsubVisibility: (() => void) | null = null;
-let storageHandler: ((e: StorageEvent) => void) | null = null;
-const ACTIVITY_EVENTS = ["click", "keydown", "scroll"];
+let storageTeardown: (() => void) | null = null;
 
 function startActivityTracking(): void {
-  activityHandler = () => touchActivity();
-  for (const event of ACTIVITY_EVENTS) {
-    document.addEventListener(event, activityHandler, {
-      passive: true,
-      capture: true,
-    });
-  }
+  const runtime = getRuntime();
+  activityTeardown = runtime.onActivity(() => touchActivity());
 
   unsubVisibility = onVisibilityChange((state) => {
     if (state === "hidden") {
@@ -269,28 +264,27 @@ function startActivityTracking(): void {
     }
   });
 
-  storageHandler = (e: StorageEvent) => {
-    if (e.key === SESSION_KEY) {
+  storageTeardown = runtime.onStorageChange((key, newValue) => {
+    if (key === SESSION_KEY) {
       // Adopt the new value; getSessionId() mints a fresh one if null.
-      currentSessionId = e.newValue;
-    } else if (e.key === LAST_ACTIVITY_KEY) {
-      const v = Number(e.newValue || "0");
+      currentSessionId = newValue;
+    } else if (key === LAST_ACTIVITY_KEY) {
+      const v = Number(newValue || "0");
       if (v > lastActivityMs) lastActivityMs = v;
-    } else if (e.key === USER_KEY) {
+    } else if (key === USER_KEY) {
       try {
-        currentUser = e.newValue ? JSON.parse(e.newValue) : null;
+        currentUser = newValue ? JSON.parse(newValue) : null;
       } catch {
         /* ignore */
       }
-    } else if (e.key === TAGS_KEY) {
+    } else if (key === TAGS_KEY) {
       try {
-        currentTags = e.newValue ? sanitizeTags(JSON.parse(e.newValue)) : {};
+        currentTags = newValue ? sanitizeTags(JSON.parse(newValue)) : {};
       } catch {
         /* ignore */
       }
     }
-  };
-  window.addEventListener("storage", storageHandler);
+  });
 }
 
 /** Detach the listeners that initSession attached, and keep the visitor's
@@ -298,22 +292,20 @@ function startActivityTracking(): void {
  * session id, the user and the tags are the visitor's own state, which this
  * page load did not create and must not delete. */
 export function stopSessionTracking(): void {
-  if (activityHandler) {
-    const handler = activityHandler;
-    activityHandler = null;
-    for (const event of ACTIVITY_EVENTS) {
-      attemptCleanup("activity listener", () => document.removeEventListener(event, handler, { capture: true }));
-    }
+  if (activityTeardown) {
+    const teardown = activityTeardown;
+    activityTeardown = null;
+    attemptCleanup("activity listener", teardown);
   }
   if (unsubVisibility) {
     const unsubscribe = unsubVisibility;
     unsubVisibility = null;
     attemptCleanup("visibility subscription", unsubscribe);
   }
-  if (storageHandler) {
-    const handler = storageHandler;
-    storageHandler = null;
-    attemptCleanup("storage listener", () => window.removeEventListener("storage", handler));
+  if (storageTeardown) {
+    const teardown = storageTeardown;
+    storageTeardown = null;
+    attemptCleanup("storage listener", teardown);
   }
   if (tabChannel) {
     const channel = tabChannel;

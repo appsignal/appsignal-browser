@@ -39,6 +39,15 @@ await build({
   external: ["react", "react-dom", "react/jsx-runtime"],
 });
 
+// React Native adapter — separate ESM bundle, react-native external (peer dep)
+await build({
+  ...shared,
+  entryPoints: ["src/react-native/index.ts"],
+  format: "esm",
+  outfile: "dist/react-native/index.js",
+  external: ["react-native"],
+});
+
 // Print sizes
 function showSize(path, label) {
   const buf = readFileSync(path);
@@ -50,3 +59,4 @@ console.log("Build complete:");
 showSize("dist/esm/index.js", "ESM (core)");
 showSize("dist/browser.umd.js", "UMD (all-in-one)");
 showSize("dist/react/index.js", "React adapter");
+showSize("dist/react-native/index.js", "React Native adapter");

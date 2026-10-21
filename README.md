@@ -320,3 +320,30 @@ const SafeWidget = withErrorBoundary(Widget, {
   fallback: <p>Widget failed to load</p>,
 });
 ```
+
+## React Native (`@appsignal/browser/react-native`)
+
+A subpath export of this package for React Native and Expo apps. It reports caught and uncaught JavaScript errors with breadcrumbs, tags, user and route template. Network requests through `fetch` and `XMLHttpRequest` and `console.warn` and `console.error` calls become breadcrumbs, and the app going to the background or foreground is recorded through `AppState`. Uncaught errors come from `ErrorUtils`; React Native's own handler still runs after the report, so development overlays and fatal crashes behave as before.
+
+```js
+import { init, captureError, setRouteTemplate } from "@appsignal/browser/react-native";
+
+init({
+  key: "your-public-ingestion-key",
+  active: !__DEV__,
+  appVersion: "2024-03-15.abc1234",
+});
+
+// In your navigation container or router effect
+setRouteTemplate("Home");
+
+try {
+  await syncItems();
+} catch (error) {
+  captureError(error);
+}
+```
+
+**Configuration:** `key`, `endpoint`, `active`, `appVersion`, `serviceName` (default `"React Native"`), `beforeError`, `beforeBreadcrumb`, `errors`, `breadcrumbs.network`, `breadcrumbs.console`, `privacy.queryParamsAllowlist` and `privacy.networkBlocklist` work as in the browser SDK. Options derived from a page, such as clicks, web vitals, DOM privacy selectors and session streaming, do not apply.
+
+**Not included yet:** web vitals, persistent session and user storage across launches (the session starts fresh on every launch), unhandled promise rejections, trace propagation, native crashes, and source map resolution for Hermes stack traces. A fatal error in a production build ends the app right after the handler runs, so its report can be lost.

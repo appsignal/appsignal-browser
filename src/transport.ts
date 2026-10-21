@@ -1,6 +1,7 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
 import { logError, attemptCleanup } from "./utils.js";
 import { fetchPastHook } from "./network-hook.js";
+import { getRuntime } from "./runtime.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -40,7 +41,7 @@ interface Queued { body: string; kind: Kind; }
 // were exhausted on 429/5xx or network error.
 let retryQueue: Queued[] = [];
 let retryQueueBytes = 0;
-let listeningForOnline = false;
+let onlineTeardown: (() => void) | null = null;
 // Pending in-line retry setTimeouts. Tracked so destroyTransport() can
 // cancel them instead of letting a stray fetch fire against a torn-down SDK.
 const pendingRetries = new Set<ReturnType<typeof setTimeout>>();
@@ -63,9 +64,10 @@ export function destroyTransport(): void {
   }
   for (const t of pendingRetries) attemptCleanup("retry timer", () => clearTimeout(t));
   pendingRetries.clear();
-  if (listeningForOnline) {
-    listeningForOnline = false;
-    attemptCleanup("online listener", () => window.removeEventListener("online", flushOnline));
+  if (onlineTeardown) {
+    const teardown = onlineTeardown;
+    onlineTeardown = null;
+    attemptCleanup("online listener", teardown);
   }
   retryQueue = [];
   retryQueueBytes = 0;
@@ -138,7 +140,7 @@ export function sendBeaconEvents(payload: EventPayload): void {
  * retry queue, which only helps a tab that is hidden but still alive. */
 function flushOnUnload(body: string | null, kind: Kind): void {
   if (body === null) return;
-  if (!navigator.onLine) {
+  if (!getRuntime().isOnline()) {
     enqueue(body, kind);
     return;
   }
@@ -168,7 +170,7 @@ function send(body: string | null, kind: Kind): void {
   // Drop payloads that exceed the size limit
   if (byteSize(body) > MAX_PAYLOAD_BYTES) return;
 
-  if (!navigator.onLine) {
+  if (!getRuntime().isOnline()) {
     enqueue(body, kind);
     return;
   }
@@ -192,13 +194,12 @@ function enqueue(body: string, kind: Kind): void {
 }
 
 function startOnlineListener(): void {
-  if (listeningForOnline) return;
-  listeningForOnline = true;
-  window.addEventListener("online", flushOnline, { once: true });
+  if (onlineTeardown) return;
+  onlineTeardown = getRuntime().onOnline(flushOnline);
 }
 
 function flushOnline(): void {
-  listeningForOnline = false;
+  onlineTeardown = null;
   drainQueue();
 }
 
@@ -217,7 +218,7 @@ function scheduleRetryDrain(): void {
   retryDrainTimer = setTimeout(() => {
     retryDrainTimer = null;
     if (retryQueue.length === 0) return;
-    if (navigator.onLine) drainQueue();
+    if (getRuntime().isOnline()) drainQueue();
     if (retryQueue.length > 0) scheduleRetryDrain();
   }, RETRY_DRAIN_INTERVAL_MS);
 }
@@ -263,7 +264,7 @@ function doFetch(body: string, attempt: number, kind: Kind): void {
       // 4xx (except 429): drop — client error, retrying won't help
     })
     .catch(() => {
-      if (!navigator.onLine) {
+      if (!getRuntime().isOnline()) {
         enqueue(body, kind);
       } else if (attempt < MAX_RETRIES) {
         scheduleRetry(body, attempt + 1, false, kind);
