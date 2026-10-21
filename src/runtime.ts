@@ -24,6 +24,8 @@ export interface Runtime {
   pageUrl(): string;
   /** The error action when the host set no route template. */
   pagePath(): string;
+  /** The base a relative URL resolves against. Undefined when there is none. */
+  baseUrl(): string | undefined;
   userAgent(): string;
   isOnline(): boolean;
   /** Call the listener once, the next time the device comes online. */
@@ -43,6 +45,7 @@ export const browserRuntime: Runtime = {
   dom: true,
   pageUrl: () => location.href,
   pagePath: () => location.pathname,
+  baseUrl: () => location.origin,
   userAgent: () => navigator.userAgent,
   // Unknown counts as online: a browser that does not report the flag still
   // has a network.

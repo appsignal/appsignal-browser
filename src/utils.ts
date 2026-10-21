@@ -1,3 +1,5 @@
+import { getRuntime } from "./runtime.js";
+
 // Defensive wrappers around the Web Storage API, addressed by area name
 // rather than by a `Storage` object: reading the `localStorage` global is
 // itself a throwing operation — SecurityError when the origin's site data is
@@ -228,7 +230,7 @@ export function applyHook<T>(hook: ((value: T) => T | null) | undefined, value: 
 
 export function safeUrl(url: string): URL | null {
   try {
-    return new URL(url, location.origin);
+    return new URL(url, getRuntime().baseUrl());
   } catch {
     return null;
   }

@@ -4,10 +4,11 @@ import { setRuntime } from "../runtime.js";
 import { reactNativeRuntime } from "./runtime.js";
 import { initSession, setUser as sessionSetUser, clearUser as sessionClearUser, setTags as sessionSetTags, clearTags as sessionClearTags, stopSessionTracking } from "../session.js";
 import { initBreadcrumbs, addManualBreadcrumb, destroyBreadcrumbs } from "../breadcrumbs.js";
-import { initErrors, reportError, destroyErrors } from "../errors.js";
+import { initErrors, reportError, reportRequestError, destroyErrors } from "../errors.js";
 import { setRouteTemplate as storeRouteTemplate, clearRouteTemplate } from "../route-template.js";
 import { initTransport, destroyTransport, EVENTS_PATH, ERROR_PATH } from "../transport.js";
-import { initNetworkHook, destroyNetworkHook } from "../network-hook.js";
+import { initNetworkHook, destroyNetworkHook, onAfterRequest } from "../network-hook.js";
+import { initTracing, destroyTracing } from "../tracing.js";
 import { destroyLifecycle } from "../lifecycle.js";
 import { logError, attemptCleanup } from "../utils.js";
 
@@ -17,7 +18,7 @@ export type { Breadcrumb, IncomingError, UserContext } from "../types.js";
  * the page (clicks, web vitals, DOM privacy, session streaming) do not apply. */
 export interface ReactNativeConfig extends Pick<
   BrowserConfig,
-  "key" | "endpoint" | "active" | "appVersion" | "serviceName" | "beforeError" | "beforeBreadcrumb" | "errors"
+  "key" | "endpoint" | "active" | "appVersion" | "serviceName" | "beforeError" | "beforeBreadcrumb" | "errors" | "tracePropagationTargets"
 > {
   breadcrumbs?: Pick<BreadcrumbsConfig, "network" | "console">;
   privacy?: Pick<PrivacyConfig, "queryParamsAllowlist" | "networkBlocklist">;
@@ -28,6 +29,7 @@ const DEFAULT_SERVICE_NAME = "React Native";
 
 let resolved: ResolvedConfig | null = null;
 let initialized = false;
+let requestErrorUnsubscribe: (() => void) | null = null;
 
 export function init(config: ReactNativeConfig): void {
   if (initialized) return;
@@ -124,9 +126,19 @@ function startCollection(config: ReactNativeConfig, endpoint: string): void {
     cfg.serviceName,
     cfg.privacy.networkBlocklist,
   );
+  if (config.tracePropagationTargets?.length) {
+    initTracing(config.tracePropagationTargets);
+    requestErrorUnsubscribe = onAfterRequest(reportRequestError);
+  }
 }
 
 function detachAll(): void {
+  if (requestErrorUnsubscribe) {
+    const unsubscribe = requestErrorUnsubscribe;
+    requestErrorUnsubscribe = null;
+    attemptCleanup("request errors", unsubscribe);
+  }
+  attemptCleanup("tracing", destroyTracing);
   attemptCleanup("breadcrumbs", destroyBreadcrumbs);
   attemptCleanup("errors", destroyErrors);
   attemptCleanup("route template", clearRouteTemplate);

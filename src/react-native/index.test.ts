@@ -125,6 +125,22 @@ describe("react-native entry point", () => {
     expect(appStateListenerCount()).toBe(0);
   });
 
+  it("propagates a trace to a matching request and reports its 5xx answer", async () => {
+    sdk.init({ key: KEY, endpoint: ENDPOINT, tracePropagationTargets: ["api.test/**"] });
+    fetchMock.mockImplementationOnce(() => Promise.resolve(new Response("", { status: 503 })));
+
+    await fetch("https://api.test/items", { headers: { Accept: "application/json" } });
+
+    const [, options] = fetchMock.mock.calls[0];
+    const traceparent = new Headers((options as RequestInit).headers).get("traceparent");
+    expect(traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    const [payload] = sentErrors();
+    expect(payload.error.name).toBe("HTTPError");
+    expect(payload.error.message).toBe("GET https://api.test/items: HTTP 503");
+    expect(payload.trace_id).toBe(traceparent?.split("-")[1]);
+    expect(payload.span_id).toBe(traceparent?.split("-")[2]);
+  });
+
   it("does nothing while inactive", () => {
     sdk.init({ key: KEY, endpoint: ENDPOINT, active: false });
     sdk.captureError(new Error("boom"));

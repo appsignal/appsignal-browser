@@ -11,6 +11,7 @@ export const reactNativeRuntime: Runtime = {
   dom: false,
   pageUrl: () => "",
   pagePath: () => "",
+  baseUrl: () => undefined,
   userAgent: () => `react-native ${Platform.OS} ${Platform.Version}`,
   isOnline: () => true,
   onOnline: () => noop,
