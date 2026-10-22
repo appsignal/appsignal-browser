@@ -32,32 +32,27 @@ export function initTracing(
     const traceId = randomHex(16);
     const spanId = randomHex(8);
     ctx.headers.set("traceparent", `00-${traceId}-${spanId}-01`);
-    // The SDK does not report a span for each request, so the backend often
-    // sees a parent span that it never receives. The service name and the
-    // route in tracestate tell the backend who that caller was. The route is
-    // read on each request, because a single-page app changes it without a
-    // page load.
-    const value = `service:${service};action:${tracestateField(currentRoute())}`;
-    const member = `appsignal=${value.slice(0, TRACESTATE_MAX_VALUE_LENGTH).trimEnd()}`;
-    ctx.headers.set("tracestate", prependTracestateMember(ctx.headers.get("tracestate"), member));
     // Kept on the request itself, so whatever reads it later gets the ids of
     // that request and not of another one to the same URL.
     ctx.trace = { traceId, spanId };
+    // The SDK does not report a span for each request, so the backend often
+    // sees a parent span that it never receives. The service name and the
+    // route in tracestate tell the backend who that caller was. This is a new
+    // trace, so a tracestate the caller set belongs to no trace and is
+    // replaced.
+    ctx.headers.set("tracestate", `appsignal=${tracestateValue(service)}`);
   }));
+}
+
+/** The route is read on each request, because a single-page app changes it
+ * without a page load. */
+function tracestateValue(service: string): string {
+  const value = `service:${service};action:${tracestateField(currentRoute())}`;
+  return value.slice(0, TRACESTATE_MAX_VALUE_LENGTH).trimEnd();
 }
 
 function tracestateField(text: string): string {
   return text.replace(TRACESTATE_UNSAFE_CHARACTERS, "_");
-}
-
-/** Puts our member first, as the spec asks of the vendor that last changed the
- * trace, and keeps the members other vendors set. */
-function prependTracestateMember(existing: string | null, member: string): string {
-  const others = (existing ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry && !entry.startsWith("appsignal="));
-  return [member, ...others].join(",");
 }
 
 /** The ids of a W3C `traceparent` the caller set, when it is one we can join.

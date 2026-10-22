@@ -1,12 +1,12 @@
 ---
 bump: minor
-type: add
+type: change
 ---
 
-When the SDK starts a trace for a request that matches
-`tracePropagationTargets`, it also sends
-`tracestate: appsignal=service:<serviceName>;action:<route>`. The route is the
-template from `setRouteTemplate`, or the page path when no template is set. The
-backend can then name the browser and its route as the caller of its spans. A
-cross-origin backend must allow `tracestate` in `Access-Control-Allow-Headers`,
-next to `traceparent`, or the browser blocks the request.
+Allow the `tracestate` header in the CORS configuration of a cross-origin
+back end, next to `traceparent`, before you upgrade. The SDK now sends both
+headers with each traced request. If the back end allows only `traceparent`,
+the browser blocks the request.
+
+The trace now shows the service name and the route of the front end
+when the browser part of the trace is not sampled.

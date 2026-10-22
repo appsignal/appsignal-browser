@@ -72,7 +72,7 @@ describe("tracing", () => {
       expect(sentHeaders()?.get("tracestate")).toBe("appsignal=service:Shop_;action:/");
     });
 
-    it("puts its tracestate member first and keeps the members of other vendors", async () => {
+    it("replaces a tracestate the caller set when it starts a new trace", async () => {
       const sentHeaders = captureFetchHeaders();
       initTracing(["localhost/**"]);
 
@@ -80,7 +80,7 @@ describe("tracing", () => {
         headers: { tracestate: "rojo=00f067aa0ba902b7, appsignal=service:Old" },
       });
 
-      expect(sentHeaders()?.get("tracestate")).toBe("appsignal=service:Browser;action:/,rojo=00f067aa0ba902b7");
+      expect(sentHeaders()?.get("tracestate")).toBe("appsignal=service:Browser;action:/");
     });
 
     it("names the route template of the page, read on each request", async () => {
@@ -114,18 +114,9 @@ describe("tracing", () => {
       const prefix = "service:Shop;action:/";
       setRouteTemplate(`/${"a".repeat(255 - prefix.length)} b`);
 
-      await window.fetch("http://localhost/api/test", { headers: { tracestate: "rojo=1" } });
+      await window.fetch("http://localhost/api/test");
 
-      expect(sentHeaders()?.get("tracestate")).toMatch(/^appsignal=service:Shop;action:\/a+,rojo=1$/);
-    });
-
-    it("drops empty tracestate members", async () => {
-      const sentHeaders = captureFetchHeaders();
-      initTracing(["localhost/**"], "Shop");
-
-      await window.fetch("http://localhost/api/test", { headers: { tracestate: "rojo=1,, ," } });
-
-      expect(sentHeaders()?.get("tracestate")).toBe("appsignal=service:Shop;action:/,rojo=1");
+      expect(sentHeaders()?.get("tracestate")).toMatch(/^appsignal=service:Shop;action:\/a+$/);
     });
 
     it("leaves tracestate alone when it joins the trace of the caller", async () => {
