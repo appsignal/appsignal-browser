@@ -1,5 +1,13 @@
 # AppSignal for Browsers Changelog
 
+## 1.0.0-beta.9
+
+_Published on 2026-10-23._
+
+### Added
+
+- Send the SDK version with every payload sent to AppSignal. (patch [0ae94e5](https://github.com/appsignal/appsignal-browser/commit/0ae94e51337abff1e5a922547cb7c3ad5b6e0a58))
+
 ## 1.0.0-beta.8
 
 _Published on 2026-10-23._
