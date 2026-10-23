@@ -1,5 +1,19 @@
 # AppSignal for Browsers Changelog
 
+## 1.0.0-beta.8
+
+_Published on 2026-10-23._
+
+### Changed
+
+- Send the `tracestate` header with each traced request, so the trace shows the
+  front end's service name and route; allow it in your CORS configuration next
+  to `traceparent`.
+
+  **Action needed:** Update your CORS configuration to allow the `tracestate` header, for example: `Access-Control-Allow-Headers` with value `content-type, traceparent, tracestate`
+
+  (minor [f9e3599](https://github.com/appsignal/appsignal-browser/commit/f9e3599e452aca2bb2ecb7de1ded1fbdf2a5bba6))
+
 ## 1.0.0-beta.7
 
 _Published on 2026-10-06._
