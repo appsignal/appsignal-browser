@@ -2,6 +2,7 @@
 // fixture server's captured state, drives the page, and waits for the
 // expected payloads to land at the server.
 
+import { readFileSync } from "node:fs";
 import { test, expect } from "../fixtures.js";
 import {
   reset,
@@ -9,7 +10,10 @@ import {
   ingestEvents,
   pollFor,
   type CapturedApi,
+  type CapturedIngest,
 } from "../helpers.js";
+
+const PACKAGE_VERSION: string = JSON.parse(readFileSync("package.json", "utf8")).version;
 
 test.beforeEach(async ({ request }) => {
   await reset(request);
@@ -28,6 +32,18 @@ test("page loads, SDK initialises, no console errors", async ({ page }) => {
   );
 
   expect(errors).toEqual([]);
+});
+
+test("ingest requests carry the package.json version from the built bundle", async ({ page, request }) => {
+  await page.goto("/");
+  await page.click("#trigger-fetch-404");
+  await flush(page);
+
+  const ingest = await pollFor(request, (items) =>
+    items.find((i): i is CapturedIngest => i.kind === "ingest" && i.path === "/ingest/browser"),
+  );
+
+  expect(ingest.query.version).toBe(PACKAGE_VERSION);
 });
 
 test("network breadcrumb for a 404 shows the status code, not '(error)'", async ({ page, request }) => {
