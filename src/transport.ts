@@ -74,8 +74,7 @@ export function destroyTransport(): void {
   ingestionKey = "";
 }
 
-// `version` rides the query string because a beacon cannot carry a header, and
-// a custom header would cost a CORS preflight.
+// `version` rides the query string because a beacon cannot carry a header.
 function urlFor(kind: Kind): string {
   const path = kind === "error" ? ERROR_PATH : EVENTS_PATH;
   const query = `api_key=${encodeURIComponent(ingestionKey)}&version=${encodeURIComponent(SDK_VERSION)}`;
