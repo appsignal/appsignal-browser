@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { initTransport, sendError, sendEvents, sendBeaconEvents, sendReplayChunk, destroyTransport } from "./transport.js";
 import type { EventPayload, FrontendTransaction, ReplayChunk, SessionContext } from "./types.js";
+import { SDK_VERSION } from "./version.js";
 
 const mockSession: SessionContext = {
   session_id: "test-session",
@@ -60,7 +61,7 @@ describe("transport", () => {
     sendError(errorPayload());
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser/errors?api_key=test-key",
+      `http://localhost/ingest/browser/errors?api_key=test-key&version=${SDK_VERSION}`,
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -79,7 +80,7 @@ describe("transport", () => {
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(beaconSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser/errors?api_key=test-key",
+      `http://localhost/ingest/browser/errors?api_key=test-key&version=${SDK_VERSION}`,
       expect.any(Blob),
     );
   });
@@ -132,7 +133,7 @@ describe("transport", () => {
 
     expect(beaconSpy).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser?api_key=test-key",
+      `http://localhost/ingest/browser?api_key=test-key&version=${SDK_VERSION}`,
       expect.objectContaining({ method: "POST" }),
     );
     // Plain fetch path — no keepalive
@@ -147,7 +148,7 @@ describe("transport", () => {
     sendReplayChunk(replayPayload(), true);
 
     expect(beaconSpy).toHaveBeenCalledWith(
-      "http://localhost/ingest/browser?api_key=test-key",
+      `http://localhost/ingest/browser?api_key=test-key&version=${SDK_VERSION}`,
       expect.any(Blob),
     );
     expect(fetchSpy).not.toHaveBeenCalled();

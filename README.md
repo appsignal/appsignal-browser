@@ -221,7 +221,7 @@ Errors send immediately on capture. Web vitals batch into an `events` payload an
 
 Live requests use `fetch`; unload flushes use `navigator.sendBeacon`. Failed batches retry with backoff, and payloads queue in memory while the browser is offline, draining when it reconnects.
 
-The ingestion key rides as a query parameter: `POST /ingest/browser?api_key=<key>` — worth knowing if you maintain a CSP `connect-src` allowlist.
+The ingestion key and the SDK version ride as query parameters: `POST /ingest/browser?api_key=<key>&version=<sdk version>` — worth knowing if you maintain a CSP `connect-src` allowlist.
 
 ### Tracking consent
 
