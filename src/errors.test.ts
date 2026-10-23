@@ -9,6 +9,7 @@ import {
 import * as transport from "./transport.js";
 import * as breadcrumbs from "./breadcrumbs.js";
 import * as session from "./session.js";
+import { setRouteTemplate } from "./vitals.js";
 import type { Breadcrumb, FrontendTransaction, IncomingError } from "./types.js";
 
 vi.mock("./transport.js", () => ({
@@ -18,14 +19,6 @@ vi.mock("./transport.js", () => ({
 vi.mock("./breadcrumbs.js", () => ({
   addBreadcrumb: vi.fn(),
   getErrorBreadcrumbs: vi.fn(() => []),
-}));
-
-// getRouteTemplate is the only thing errors.ts pulls from vitals; mock it so
-// the route-template grouping is controllable per test without driving the
-// real vitals observers.
-const vitalsMock = vi.hoisted(() => ({ routeTemplate: "" }));
-vi.mock("./vitals.js", () => ({
-  getRouteTemplate: () => vitalsMock.routeTemplate,
 }));
 
 vi.mock("./session.js", () => ({
@@ -82,7 +75,7 @@ describe("errors", () => {
     addBreadcrumbMock.mockClear();
     getErrorBreadcrumbsMock.mockReturnValue([]);
     getTagsMock.mockReturnValue({});
-    vitalsMock.routeTemplate = "";
+    setRouteTemplate(null);
     Object.defineProperty(window, "location", { value: originalLocation, configurable: true });
   });
 
@@ -488,7 +481,7 @@ describe("errors", () => {
   describe("error action grouping", () => {
     it("groups by the route template when set", () => {
       setLocation("https://app.example.com/users/12345");
-      vitalsMock.routeTemplate = "/users/:id";
+      setRouteTemplate("/users/:id");
       initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("boom");
 
@@ -525,7 +518,7 @@ describe("errors", () => {
 
     it("removes the trailing slash from a route template too", () => {
       setLocation("https://app.example.com/users/12345/");
-      vitalsMock.routeTemplate = "/users/:id";
+      setRouteTemplate("/users/:id/");
       initErrors({ enabled: true, sampleRate: 1.0 }, []);
       fireError("boom");
 

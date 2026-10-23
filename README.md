@@ -135,6 +135,15 @@ JavaScript errors keep independent traces; there is no time window that
 associates them with a preceding request. Fetch responses/rejections remain
 unchanged for application code.
 
+**Trace headers and CORS.** When the SDK starts a trace for a matching request,
+it sends two headers: `traceparent` and `tracestate`. The `tracestate` header
+carries the `serviceName` and the route: the template from `setRouteTemplate`,
+or the page path when no template is set. The backend uses them to show the
+browser as the caller of its spans. A cross-origin backend must allow both
+headers, for example
+`Access-Control-Allow-Headers: traceparent, tracestate`. If it allows only
+`traceparent`, the browser blocks the preflight and the request fails.
+
 Request reports honor `errors.enabled`, `errors.sampleRate`, `beforeError`,
 rate limits, `privacy.networkBlocklist`, and `privacy.queryParamsAllowlist`.
 Anchor each tracing pattern on a host. Patterns match `host + pathname`,

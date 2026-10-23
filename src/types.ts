@@ -34,7 +34,9 @@ export interface BrowserConfig {
    * keep it cheap. */
   beforeBreadcrumb?: (breadcrumb: Breadcrumb) => Breadcrumb | null;
   /** URL patterns to propagate trace context to. Matching fetch/XHR requests
-   * also report HTTP 5xx responses and timeouts as browser root spans.
+   * get a `traceparent` and a `tracestate` header, and also report HTTP 5xx
+   * responses and timeouts as browser root spans. A cross-origin backend must
+   * allow both headers in `Access-Control-Allow-Headers`.
    * Glob syntax against host + pathname, including a non-default port.
    * The host is checked separately to keep path segments out of host matches. */
   tracePropagationTargets?: string[];
