@@ -2,8 +2,11 @@ import { build } from "esbuild";
 import { gzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 
+const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+
 const shared = {
   bundle: true,
+  define: { __APPSIGNAL_BROWSER_VERSION__: JSON.stringify(version) },
   sourcemap: true,
   target: "es2020",
 };

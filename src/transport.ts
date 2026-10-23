@@ -1,6 +1,7 @@
 import type { EventPayload, FrontendTransaction, ReplayChunk } from "./types.js";
 import { logError, attemptCleanup } from "./utils.js";
 import { fetchPastHook } from "./network-hook.js";
+import { SDK_VERSION } from "./version.js";
 
 let baseEndpoint = "";
 let ingestionKey = "";
@@ -73,9 +74,11 @@ export function destroyTransport(): void {
   ingestionKey = "";
 }
 
+// `version` rides the query string because a beacon cannot carry a header.
 function urlFor(kind: Kind): string {
   const path = kind === "error" ? ERROR_PATH : EVENTS_PATH;
-  return `${baseEndpoint}${path}?api_key=${encodeURIComponent(ingestionKey)}`;
+  const query = `api_key=${encodeURIComponent(ingestionKey)}&version=${encodeURIComponent(SDK_VERSION)}`;
+  return `${baseEndpoint}${path}?${query}`;
 }
 
 function contentTypeFor(kind: Kind): string {
